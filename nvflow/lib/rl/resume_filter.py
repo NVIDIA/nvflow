@@ -35,6 +35,7 @@ Exit codes:
     0 -- success (remaining_file written; may be empty if ALL_DONE)
     1 -- error
 """
+
 import hashlib
 import json
 import os
@@ -94,8 +95,7 @@ def resume_filter(
             f.write(json.dumps(r) + "\n")
 
     print(
-        f"RESUME_STATUS: remaining={len(remaining)} "
-        f"completed={len(completed)} total={len(inputs)}"
+        f"RESUME_STATUS: remaining={len(remaining)} completed={len(completed)} total={len(inputs)}"
     )
     if not remaining:
         print("ALL_DONE")

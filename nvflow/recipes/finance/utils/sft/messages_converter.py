@@ -135,9 +135,10 @@ def convert_file(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(input_path, encoding="utf-8") as f_in, open(
-        output_path, "w", encoding="utf-8"
-    ) as f_out:
+    with (
+        open(input_path, encoding="utf-8") as f_in,
+        open(output_path, "w", encoding="utf-8") as f_out,
+    ):
         for line_num, line in enumerate(f_in, 1):
             try:
                 record = json.loads(line.strip())

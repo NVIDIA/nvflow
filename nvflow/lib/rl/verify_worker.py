@@ -26,6 +26,7 @@ Usage:
         <input.jsonl> <output.jsonl> \\
         <head_host> <head_port> <environment_name> <num_parallel>
 """
+
 import asyncio
 import json
 import sys
@@ -54,8 +55,7 @@ def _wait_for_server_client(
             last_err = e
             time.sleep(poll_interval)
     raise RuntimeError(
-        f"Could not connect to head server at {head_host}:{head_port} "
-        f"after {timeout}s: {last_err}"
+        f"Could not connect to head server at {head_host}:{head_port} after {timeout}s: {last_err}"
     )
 
 

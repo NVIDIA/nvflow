@@ -30,6 +30,7 @@ Produces:
 Cross-seed difficulty analysis (pass@k, per-question pass rates) is
 handled separately by aggregate_seeds.py.
 """
+
 import json
 import sys
 from collections import Counter
@@ -79,12 +80,12 @@ def analyze(
         title,
         "=" * 60,
         f"Total samples:     {total}",
-        f"Correct (1.0):     {len(correct):5d} ({len(correct)/total*100:5.1f}%)",
-        f"Incorrect (0.0):   {len(incorrect):5d} ({len(incorrect)/total*100:5.1f}%)",
-        f"Partial (0<r<1):   {len(partial):5d} ({len(partial)/total*100:5.1f}%)",
-        f"Judge failed:      {len(judge_failed):5d} ({len(judge_failed)/total*100:5.1f}%)",
+        f"Correct (1.0):     {len(correct):5d} ({len(correct) / total * 100:5.1f}%)",
+        f"Incorrect (0.0):   {len(incorrect):5d} ({len(incorrect) / total * 100:5.1f}%)",
+        f"Partial (0<r<1):   {len(partial):5d} ({len(partial) / total * 100:5.1f}%)",
+        f"Judge failed:      {len(judge_failed):5d} ({len(judge_failed) / total * 100:5.1f}%)",
         "",
-        f"pass@1:            {avg_reward:.4f} ({avg_reward*100:.1f}%)",
+        f"pass@1:            {avg_reward:.4f} ({avg_reward * 100:.1f}%)",
         "",
         "Reward distribution:",
         f"  Mean:  {avg_reward:.4f}",

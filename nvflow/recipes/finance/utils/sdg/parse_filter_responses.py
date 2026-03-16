@@ -86,9 +86,11 @@ def parse_filter_responses(input_file, output_file):
 
     buffer = []
 
-    with open(input_file, "rb") as reader, open(output_file, "wb") as writer, open(
-        log_file, "w"
-    ) as log_writer:
+    with (
+        open(input_file, "rb") as reader,
+        open(output_file, "wb") as writer,
+        open(log_file, "w") as log_writer,
+    ):
         for line in reader:
             line = line.strip()
             if not line:
@@ -146,32 +148,36 @@ def parse_filter_responses(input_file, output_file):
             writer.write(b"\n".join(buffer) + b"\n")
 
         # Write summary to log
-        log_writer.write(f"\n{'='*60}\n")
+        log_writer.write(f"\n{'=' * 60}\n")
         log_writer.write("PARSE SUMMARY\n")
-        log_writer.write(f"{'='*60}\n")
+        log_writer.write(f"{'=' * 60}\n")
         log_writer.write(f"Total entries: {num_total_entries}\n")
         log_writer.write(f"Successfully parsed: {num_successfully_parsed}\n")
         log_writer.write(f"Failed to parse: {num_failed_to_parse}\n")
-        log_writer.write(f"Success rate: {num_successfully_parsed/num_total_entries*100:.2f}%\n")
+        log_writer.write(
+            f"Success rate: {num_successfully_parsed / num_total_entries * 100:.2f}%\n"
+        )
         log_writer.write(f"\nAnswerable: {num_answerable}\n")
         log_writer.write(f"Unanswerable: {num_unanswerable}\n")
         if num_successfully_parsed > 0:
             log_writer.write(
-                f"Unanswerable rate: {num_unanswerable/num_successfully_parsed*100:.2f}%\n"
+                f"Unanswerable rate: {num_unanswerable / num_successfully_parsed * 100:.2f}%\n"
             )
 
         # Log summary
-        logger.info(f"\n{'='*60}")
+        logger.info(f"\n{'=' * 60}")
         logger.info("PARSE SUMMARY")
-        logger.info(f"{'='*60}")
+        logger.info(f"{'=' * 60}")
         logger.info(f"Total entries: {num_total_entries}")
         logger.info(f"Successfully parsed: {num_successfully_parsed}")
         logger.info(f"Failed to parse: {num_failed_to_parse}")
-        logger.info(f"Success rate: {num_successfully_parsed/num_total_entries*100:.2f}%")
+        logger.info(f"Success rate: {num_successfully_parsed / num_total_entries * 100:.2f}%")
         logger.info(f"\nAnswerable: {num_answerable}")
         logger.info(f"Unanswerable: {num_unanswerable}")
         if num_successfully_parsed > 0:
-            logger.info(f"Unanswerable rate: {num_unanswerable/num_successfully_parsed*100:.2f}%")
+            logger.info(
+                f"Unanswerable rate: {num_unanswerable / num_successfully_parsed * 100:.2f}%"
+            )
 
 
 if __name__ == "__main__":

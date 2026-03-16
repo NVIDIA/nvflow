@@ -134,9 +134,10 @@ def dgsdg_post_process(
 
     logger.info("Pass 1: Cleaning records and writing full data...")
 
-    with open(input_file, encoding="utf-8") as f_in, open(
-        full_output_file, "w", encoding="utf-8"
-    ) as f_out:
+    with (
+        open(input_file, encoding="utf-8") as f_in,
+        open(full_output_file, "w", encoding="utf-8") as f_out,
+    ):
         for line_num, line in enumerate(f_in, 1):
             line = line.strip()
             if not line:
@@ -168,9 +169,10 @@ def dgsdg_post_process(
     medium_sft_count = 0
     hard_rl_count = 0
 
-    with open(medium_sft_file, "w", encoding="utf-8") as f_medium, open(
-        hard_rl_file, "w", encoding="utf-8"
-    ) as f_hard:
+    with (
+        open(medium_sft_file, "w", encoding="utf-8") as f_medium,
+        open(hard_rl_file, "w", encoding="utf-8") as f_hard,
+    ):
         for record in all_records:
             # Check for final_result.jsonl
             if is_medium_sft_eligible(record):

@@ -78,9 +78,11 @@ def parse_judge_responses(input_file, output_file):
     num_failed_to_parse = 0
     num_successfully_parsed = 0
 
-    with open(input_file) as reader, open(output_file, "w") as writer, open(
-        log_file, "w"
-    ) as log_writer:
+    with (
+        open(input_file) as reader,
+        open(output_file, "w") as writer,
+        open(log_file, "w") as log_writer,
+    ):
         for line in reader:
             row = json.loads(line)
             num_total_entries += 1
@@ -112,13 +114,15 @@ def parse_judge_responses(input_file, output_file):
                 log_writer.write(msg + "\n")
 
         # Write summary to log
-        log_writer.write(f"\n{'='*60}\n")
+        log_writer.write(f"\n{'=' * 60}\n")
         log_writer.write("SUMMARY\n")
-        log_writer.write(f"{'='*60}\n")
+        log_writer.write(f"{'=' * 60}\n")
         log_writer.write(f"Total entries: {num_total_entries}\n")
         log_writer.write(f"Successfully parsed: {num_successfully_parsed}\n")
         log_writer.write(f"Failed to parse: {num_failed_to_parse}\n")
-        log_writer.write(f"Success rate: {num_successfully_parsed/num_total_entries*100:.2f}%\n")
+        log_writer.write(
+            f"Success rate: {num_successfully_parsed / num_total_entries * 100:.2f}%\n"
+        )
 
         # Print summary to console as well
         logger.info("=" * 60)

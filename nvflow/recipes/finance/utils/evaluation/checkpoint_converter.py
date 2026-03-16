@@ -86,7 +86,7 @@ def convert_checkpoint(
     weights_path = megatron_path / "policy" / "weights"
     if not weights_path.exists():
         raise FileNotFoundError(
-            f"Megatron checkpoint not found at {megatron_path}\n" f"Expected: {weights_path}/"
+            f"Megatron checkpoint not found at {megatron_path}\nExpected: {weights_path}/"
         )
 
     # Convert Megatron → HuggingFace

@@ -42,9 +42,11 @@ def apply_answer_filter(input_file, output_file, keep_tag="ANSWERABLE"):
 
     buffer = []
 
-    with open(input_file, "rb") as reader, open(output_file, "wb") as writer, open(
-        log_file, "w"
-    ) as log_writer:
+    with (
+        open(input_file, "rb") as reader,
+        open(output_file, "wb") as writer,
+        open(log_file, "w") as log_writer,
+    ):
         for line in reader:
             line = line.strip()
             if not line:
@@ -91,28 +93,28 @@ def apply_answer_filter(input_file, output_file, keep_tag="ANSWERABLE"):
             writer.write(b"\n".join(buffer) + b"\n")
 
         # Write summary to log
-        log_writer.write(f"\n{'='*60}\n")
+        log_writer.write(f"\n{'=' * 60}\n")
         log_writer.write("FILTER SUMMARY\n")
-        log_writer.write(f"{'='*60}\n")
+        log_writer.write(f"{'=' * 60}\n")
         log_writer.write(f"Total entries: {num_total_entries}\n")
         log_writer.write(f"Kept ({keep_tag}): {num_kept}\n")
         log_writer.write(f"Filtered out: {num_filtered}\n")
         log_writer.write(f"Missing tag: {num_missing_tag}\n")
         if num_total_entries > 0:
-            log_writer.write(f"Keep rate: {num_kept/num_total_entries*100:.2f}%\n")
-            log_writer.write(f"Filter rate: {num_filtered/num_total_entries*100:.2f}%\n")
+            log_writer.write(f"Keep rate: {num_kept / num_total_entries * 100:.2f}%\n")
+            log_writer.write(f"Filter rate: {num_filtered / num_total_entries * 100:.2f}%\n")
 
         # Log summary
-        logger.info(f"\n{'='*60}")
+        logger.info(f"\n{'=' * 60}")
         logger.info("FILTER SUMMARY")
-        logger.info(f"{'='*60}")
+        logger.info(f"{'=' * 60}")
         logger.info(f"Total entries: {num_total_entries}")
         logger.info(f"Kept ({keep_tag}): {num_kept}")
         logger.info(f"Filtered out: {num_filtered}")
         logger.info(f"Missing tag: {num_missing_tag}")
         if num_total_entries > 0:
-            logger.info(f"Keep rate: {num_kept/num_total_entries*100:.2f}%")
-            logger.info(f"Filter rate: {num_filtered/num_total_entries*100:.2f}%")
+            logger.info(f"Keep rate: {num_kept / num_total_entries * 100:.2f}%")
+            logger.info(f"Filter rate: {num_filtered / num_total_entries * 100:.2f}%")
 
 
 if __name__ == "__main__":

@@ -101,9 +101,10 @@ def add_token_counts(
 
     try:
         with Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_path,)) as pool:
-            with open(input_path, encoding="utf-8") as f_in, open(
-                actual_output, "w", encoding="utf-8"
-            ) as f_out:
+            with (
+                open(input_path, encoding="utf-8") as f_in,
+                open(actual_output, "w", encoding="utf-8") as f_out,
+            ):
                 batch: list[str] = []
                 processed = 0
 

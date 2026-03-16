@@ -349,7 +349,7 @@ def write_chunk_outputs(
         f'<base href="{base_href}">' if base_href else "",
         head_assets or "",
     ]
-    orig_doc = f"""<html><head>{''.join(head_content)}</head><body>{orig_body}</body></html>"""
+    orig_doc = f"""<html><head>{"".join(head_content)}</head><body>{orig_body}</body></html>"""
 
     orig_path = output_dir / f"{base_name}_{chunk_index}_orig.html"
     with open(orig_path, "w", encoding="utf-8") as f:

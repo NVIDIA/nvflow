@@ -80,9 +80,11 @@ def parse_generations(input_file, output_file):
     log_file = output_file.replace(".jsonl", "_log.txt")
     num_original_questions, num_failed_to_parse = 0, 0
     num_generated_questions, num_generated_questions_after_deduplication = 0, 0
-    with jsonlines.open(input_file) as reader, jsonlines.open(output_file, "w") as writer, open(
-        log_file, "w"
-    ) as log_writer:
+    with (
+        jsonlines.open(input_file) as reader,
+        jsonlines.open(output_file, "w") as writer,
+        open(log_file, "w") as log_writer,
+    ):
         deduplicated_questions = set()
         for row in reader:
             num_original_questions += 1

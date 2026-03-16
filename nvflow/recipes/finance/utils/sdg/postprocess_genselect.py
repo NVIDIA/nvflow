@@ -66,9 +66,10 @@ def postprocess_genselect(input_file, output_file):
     records_processed = 0
     records_skipped = 0
 
-    with open(input_file, encoding="utf-8") as f_in, open(
-        output_file, "w", encoding="utf-8"
-    ) as f_out:
+    with (
+        open(input_file, encoding="utf-8") as f_in,
+        open(output_file, "w", encoding="utf-8") as f_out,
+    ):
         for line_num, line in enumerate(f_in, 1):
             try:
                 record = orjson.loads(line.strip())

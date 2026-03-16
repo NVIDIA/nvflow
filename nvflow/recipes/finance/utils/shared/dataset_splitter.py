@@ -108,9 +108,11 @@ def perform_split(
     train_count = val_count = 0
     output_fields = None if keep_all_fields else _SFT_OUTPUT_FIELDS
 
-    with open(input_file, encoding="utf-8") as f_in, open(
-        train_path, "w", encoding="utf-8"
-    ) as f_train, open(val_path, "w", encoding="utf-8") as f_val:
+    with (
+        open(input_file, encoding="utf-8") as f_in,
+        open(train_path, "w", encoding="utf-8") as f_train,
+        open(val_path, "w", encoding="utf-8") as f_val,
+    ):
         for line in f_in:
             if not line.strip():
                 continue
@@ -182,9 +184,9 @@ def main():
     logger.info("SUMMARY")
     logger.info("=" * 60)
     logger.info(f"Total:    {total:,}")
-    logger.info(f"Train:    {train_n:,} ({train_n/total:.1%})")
+    logger.info(f"Train:    {train_n:,} ({train_n / total:.1%})")
     if val_n:
-        logger.info(f"Val:      {val_n:,} ({val_n/total:.1%})")
+        logger.info(f"Val:      {val_n:,} ({val_n / total:.1%})")
     if filtered_n:
         logger.info(f"Filtered: {filtered_n:,}")
     logger.info(f"✅ Output: {args.output_dir}")

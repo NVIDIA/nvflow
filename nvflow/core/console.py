@@ -45,9 +45,9 @@ def header(message: str) -> None:
         Starting SDG Pipeline
         ================================================================================
     """
-    console.print(f"\n{'='*80}")
+    console.print(f"\n{'=' * 80}")
     console.print(f"[bold]{message}[/bold]")
-    console.print(f"{'='*80}\n")
+    console.print(f"{'=' * 80}\n")
 
 
 def section(message: str) -> None:
@@ -64,9 +64,9 @@ def section(message: str) -> None:
         ▶ Running Stage: sdg.generate_qas
         ────────────────────────────────────────────────────────────────────────────────
     """
-    console.print(f"\n{'─'*80}")
+    console.print(f"\n{'─' * 80}")
     console.print(f"[cyan]▶[/cyan] {message}")
-    console.print(f"{'─'*80}")
+    console.print(f"{'─' * 80}")
 
 
 def success(message: str) -> None:

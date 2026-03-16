@@ -42,9 +42,10 @@ def prepare_difficulty_input(input_file: str, output_file: str):
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
     count = 0
-    with open(input_file, encoding="utf-8") as f_in, open(
-        output_file, "w", encoding="utf-8"
-    ) as f_out:
+    with (
+        open(input_file, encoding="utf-8") as f_in,
+        open(output_file, "w", encoding="utf-8") as f_out,
+    ):
         for line in f_in:
             if not line.strip():
                 continue

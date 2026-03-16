@@ -86,7 +86,7 @@ class WorkflowRunner:
 
             if not base_path.exists():
                 raise FileNotFoundError(
-                    f"Base config not found: {config['_base_']} " f"(resolved to {base_path})"
+                    f"Base config not found: {config['_base_']} (resolved to {base_path})"
                 )
 
             # Recursively load base config (supports chained inheritance)
@@ -338,8 +338,7 @@ class WorkflowRunner:
             # Check if stage is in the workflow config
             if stage not in all_stages:
                 raise ValueError(
-                    f"Stage '{stage}' not found in workflow config. "
-                    f"Available stages: {all_stages}"
+                    f"Stage '{stage}' not found in workflow config. Available stages: {all_stages}"
                 )
 
             # Check if stage is registered in hierarchical registry

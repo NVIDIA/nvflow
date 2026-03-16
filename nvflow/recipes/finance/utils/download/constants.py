@@ -17,7 +17,6 @@
 Section definitions, part mappings, and other constants used by the extractors.
 """
 
-
 # 10-K sections with their official numbering
 SECTIONS_10K: list[str] = [
     "1",  # Business

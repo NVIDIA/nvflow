@@ -33,6 +33,7 @@ Standalone script that runs inside the Slurm container with python3.
 Usage:
     python enrich_rollouts.py <input.jsonl> <rollouts.jsonl>
 """
+
 import hashlib
 import json
 import sys

@@ -183,9 +183,9 @@ class TestPrepareQuestionGenData:
                 output_rows.append(row)
 
         # Expected: 2 companies × 3 years = 6 entries
-        assert (
-            len(output_rows) == 6
-        ), f"Expected 6 rows (2 companies × 3 years), got {len(output_rows)}"
+        assert len(output_rows) == 6, (
+            f"Expected 6 rows (2 companies × 3 years), got {len(output_rows)}"
+        )
 
         # Check years
         years = sorted({row["year"] for row in output_rows})

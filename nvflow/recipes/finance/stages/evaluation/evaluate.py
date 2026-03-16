@@ -557,7 +557,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         )
 
         for step in eval_steps:
-            console.info(f"Evaluating checkpoint step {step} " f"(format: {checkpoint_format})")
+            console.info(f"Evaluating checkpoint step {step} (format: {checkpoint_format})")
 
             if checkpoint_format == "hf":
                 model_path = str(Path(checkpoint_path) / f"step_{step}" / "policy")

@@ -18,14 +18,13 @@ import os
 import re
 import traceback
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, override
 
 import aiohttp
 import backoff
 from bs4 import BeautifulSoup
 from model_library.base import LLM, ToolBody, ToolDefinition
 from tavily import AsyncTavilyClient
-from typing_extensions import override
 
 from nvflow.utils import setup_logger
 
@@ -97,8 +96,7 @@ class Tool(ABC):
         data_storage: dict[str, Any],
         llm: LLM,
         logger: logging.Logger | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def __call__(
         self,

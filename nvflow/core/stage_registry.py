@@ -161,7 +161,7 @@ class StageRegistry:
             else:
                 available_recipes = list(cls._stages.keys())
                 raise KeyError(
-                    f"Recipe '{recipe}' not found. " f"Available recipes: {available_recipes}"
+                    f"Recipe '{recipe}' not found. Available recipes: {available_recipes}"
                 ) from None
 
     @classmethod
@@ -209,9 +209,7 @@ class StageRegistry:
             KeyError: If recipe is not found
         """
         if recipe not in cls._stages:
-            raise KeyError(
-                f"Recipe '{recipe}' not found. " f"Available recipes: {cls.list_recipes()}"
-            )
+            raise KeyError(f"Recipe '{recipe}' not found. Available recipes: {cls.list_recipes()}")
 
         registered_workflows = set(cls._stages[recipe].keys())
 
@@ -243,9 +241,7 @@ class StageRegistry:
             KeyError: If recipe or workflow is not found
         """
         if recipe not in cls._stages:
-            raise KeyError(
-                f"Recipe '{recipe}' not found. " f"Available recipes: {cls.list_recipes()}"
-            )
+            raise KeyError(f"Recipe '{recipe}' not found. Available recipes: {cls.list_recipes()}")
         if workflow not in cls._stages[recipe]:
             raise KeyError(
                 f"Workflow '{workflow}' not found in recipe '{recipe}'. "

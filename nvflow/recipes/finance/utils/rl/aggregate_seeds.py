@@ -29,6 +29,7 @@ Produces:
     <output_dir>/metrics.json      -- machine-readable metrics
     <output_dir>/difficulty.jsonl   -- per-question pass rates and pass@k
 """
+
 import json
 import math
 import sys
@@ -182,14 +183,14 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
         f"Questions (uuid):  {num_questions}",
         f"Total rows:        {total_rows}",
         f"Avg pass rate:     {avg_pass_rate:.1%}",
-        f"Mixed (0<p<1):     {mixed} ({mixed/num_questions:.1%})",
+        f"Mixed (0<p<1):     {mixed} ({mixed / num_questions:.1%})",
         "",
     ]
 
     # pass@k by question type.
     header = f"  {'Type':<20} {'Count':>6}"
     for k in k_values:
-        header += f"  {'pass@'+str(k):>8}"
+        header += f"  {'pass@' + str(k):>8}"
     lines.append("pass@k (macro average across questions):")
     lines.append(header)
     lines.append("  " + "-" * (28 + 10 * len(k_values)))
@@ -199,7 +200,7 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
         for k in k_values:
             key = f"pass@{k}"
             if key in tm:
-                row += f"  {tm[key]*100:>7.1f}%"
+                row += f"  {tm[key] * 100:>7.1f}%"
             else:
                 row += f"  {'N/A':>8}"
         lines.append(row)
@@ -207,7 +208,7 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
     for k in k_values:
         key = f"pass@{k}"
         if key in metrics:
-            overall += f"  {metrics[key]*100:>7.1f}%"
+            overall += f"  {metrics[key] * 100:>7.1f}%"
     lines.append("  " + "-" * (28 + 10 * len(k_values)))
     lines.append(overall)
     lines.append("")

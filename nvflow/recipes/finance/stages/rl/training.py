@@ -200,7 +200,7 @@ class GRPOStage(BaseStage):
                         f"Parallelism validation failed for MoE model on MEGATRON backend:\n"
                         f"  world_size ({world_size}) must be divisible by TP×PP×CP = {tp}×{pp}×{cp} = {regular_model_size}\n"
                         f"  Regular layer DP would be: {world_size}/{regular_model_size} = "
-                        f"{world_size/regular_model_size:.2f} (must be integer)"
+                        f"{world_size / regular_model_size:.2f} (must be integer)"
                     )
 
                 if world_size % expert_model_size != 0:
@@ -208,7 +208,7 @@ class GRPOStage(BaseStage):
                         f"Parallelism validation failed for MoE model on MEGATRON backend:\n"
                         f"  world_size ({world_size}) must be divisible by ETP×EP×PP = {etp}×{ep}×{pp} = {expert_model_size}\n"
                         f"  Expert layer DP would be: {world_size}/{expert_model_size} = "
-                        f"{world_size/expert_model_size:.2f} (must be integer)"
+                        f"{world_size / expert_model_size:.2f} (must be integer)"
                     )
 
                 regular_dp = world_size // regular_model_size
@@ -248,7 +248,7 @@ class GRPOStage(BaseStage):
                     f"Parallelism validation failed for Dense model on {backend.upper()} backend:\n"
                     f"  world_size ({world_size}) must be divisible by {formula} = {parallelism_product}\n"
                     f"  Data parallel size would be: {world_size}/{parallelism_product} = "
-                    f"{world_size/parallelism_product:.2f} (must be integer)"
+                    f"{world_size / parallelism_product:.2f} (must be integer)"
                 )
 
     def _validate_sequence_packing_for_cp(self, nemo_rl_config: dict, backend: str) -> None:
