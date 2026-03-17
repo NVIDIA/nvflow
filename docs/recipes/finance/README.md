@@ -200,4 +200,4 @@ uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yam
 - 📖 **[Workflow Guides](workflows/)** - How to run each workflow
 - 🔧 **[Stage Reference](stages/)** - Technical specifications
 - 🚨 **[Troubleshooting Guide](troubleshooting.md)** - Solutions to common issues
-- 🐛 **GitLab Issues** - Report bugs or request features
+- 🐛 **[GitHub Issues](https://github.com/NVIDIA/nvflow/issues)** - Report bugs or request features

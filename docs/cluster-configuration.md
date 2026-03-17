@@ -322,7 +322,6 @@ env_vars:
 | `OPENAI_API_KEY` | OpenAI API access | [OpenAI Dashboard](https://platform.openai.com/api-keys) |
 | `HF_TOKEN` | Hugging Face model downloads | [HF Settings](https://huggingface.co/settings/tokens) |
 | `WANDB_API_KEY` | Weights & Biases logging | [W&B Settings](https://wandb.ai/authorize) |
-| `GITLAB_TOKEN` | GitLab API access | Your GitLab instance |
 
 **Security notes:**
 - ⚠️ **Never commit API keys to git** (config is gitignored)

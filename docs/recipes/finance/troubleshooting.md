@@ -64,7 +64,6 @@ vim $NEMO_SKILLS_CONFIG_DIR/my_cluster.yaml
 - Verify cluster has internet access
 - Check firewall rules for SEC EDGAR (sec.gov)
 - Ensure model repositories are accessible
-- Check GitLab token: `echo $GITLAB_TOKEN`
 
 ### Ray Cluster Initialization Issues (SLURM 25.11.2+)
 
@@ -321,7 +320,6 @@ ls outputs/.../checkpoints/final/
 
 **Common issues:**
 - Rate limiting: See [SEC Download Rate Limits](#sec-download-rate-limits)
-- Authentication: Ensure GITLAB_TOKEN is exported
 - Invalid tickers: Verify company symbols in config
 
 **Quick check:**
@@ -439,7 +437,7 @@ If issues persist after trying these solutions:
    - [Stage documentation](stages/)
 
 3. **Report issues:**
-   - Check existing GitLab issues
+   - Check existing [GitHub issues](https://github.com/NVIDIA/nvflow/issues)
    - Create new issue with:
      - Workflow and stage name
      - Error message (full traceback)
@@ -447,5 +445,5 @@ If issues persist after trying these solutions:
      - Environment details
 
 4. **Feature requests:**
-   - Submit GitLab issue with `[Feature Request]` tag
+   - Submit [GitHub issue](https://github.com/NVIDIA/nvflow/issues) with `[Feature Request]` tag
    - Describe use case and expected behavior

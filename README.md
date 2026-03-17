@@ -100,7 +100,7 @@ uv --version  # Should show: uv 0.9.22
 ## 📦 Installation
 
 ```bash
-git clone ssh://git@gitlab-master.nvidia.com:12051/swdl-nemollm-mlops/alignment-data/nvflow.git
+git clone https://github.com/NVIDIA/nvflow.git
 cd nvflow
 
 # For users

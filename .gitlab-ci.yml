@@ -4,7 +4,7 @@ default:
 
 stages:
   - lint
-  # - test  # Uncomment when tests are ready
+  - test
   - build
   - publish
 
@@ -55,25 +55,25 @@ dco-check:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 # =============================================================================
-# TEST STAGE (disabled for now)
+# TEST STAGE
 # =============================================================================
-# test:
-#   stage: test
-#   image: python:3.12-slim
-#   before_script:
-#     - pip install uv
-#     - uv sync --all-extras
-#   script:
-#     - uv run pytest tests/ -v --tb=short
-#   rules:
-#     # Run on merge requests
-#     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-#     # Run on main branch
-#     - if: $CI_COMMIT_BRANCH == "main"
-#     # Run on dev/ci-test branch (for testing)
-#     - if: $CI_COMMIT_BRANCH == "dev/ci-test"
-#     # Run on tags
-#     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+test:
+  stage: test
+  image: python:3.12-slim
+  before_script:
+    - apt-get update && apt-get install -y git
+    - pip install uv==0.9.22
+    - uv venv --python 3.12
+    - uv pip install pytest pytest-cov pytest-timeout
+    - uv pip install PyYAML omegaconf rich
+    - uv pip install -e . --no-deps
+  script:
+    - uv run pytest tests/ -v --tb=short
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
 
 # =============================================================================
 # BUILD STAGE

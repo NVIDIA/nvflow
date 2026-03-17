@@ -85,8 +85,8 @@ mmdc -i deployment-architecture.mmd -o deployment-architecture.png
 mmdc -i architecture-overview.mmd -o architecture-overview.svg
 ```
 
-### Option 4: GitHub/GitLab Rendering
-GitLab and GitHub now support Mermaid diagrams natively in Markdown files. You can include them in documentation using:
+### Option 4: GitHub Rendering
+GitHub supports Mermaid diagrams natively in Markdown files. You can include them in documentation using:
 
 ````markdown
 ```mermaid

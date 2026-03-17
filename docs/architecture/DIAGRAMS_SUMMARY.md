@@ -193,7 +193,7 @@ Use Case: Cluster setup and deployment planning
 
 ## 🎨 Diagram Rendering Examples
 
-### In Markdown (GitLab/GitHub)
+### In Markdown (GitHub)
 ````markdown
 ```mermaid
 graph TB

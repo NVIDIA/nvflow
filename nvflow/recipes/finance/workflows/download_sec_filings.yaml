@@ -28,7 +28,7 @@ stages:
     stage_kwargs:
       installation_command: >-
         pip install -q --root-user-action=ignore
-        edgartools sec-parser pandas pyarrow tqdm httpx tzdata &&
+        edgartools==5.20.2 sec-parser pandas pyarrow tqdm httpx tzdata &&
         ln -sfn $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo
         /usr/share/zoneinfo 2>/dev/null || true
 
@@ -42,6 +42,6 @@ stages:
     stage_kwargs:
       installation_command: >-
         pip install -q --root-user-action=ignore
-        edgartools sec-parser pandas pyarrow tqdm httpx tzdata &&
+        edgartools==5.20.2 sec-parser pandas pyarrow tqdm httpx tzdata &&
         ln -sfn $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo
         /usr/share/zoneinfo 2>/dev/null || true

@@ -15,12 +15,6 @@ Download SEC 10-K, 10-Q, and 8-K filings from the EDGAR database for specified c
 Before running this workflow, ensure you have:
 
 - ✅ **Output directory writable** (workflow creates `outputs/finance/demo/workflow-2-download-sec/step-0-download`)
-- ✅ **GitLab token exported** (for internal NVIDIA deployments):
-  ```bash
-  export GITLAB_TOKEN=<your-token>
-  ```
-  - **Why needed:** This workflow pip installs the `sec-downloader-parser` tool from an internal GitLab repository during execution
-  - **For external deployments:** This dependency can be pre-installed or replaced with an alternative SEC downloader
 
 - ✅ **SEC EDGAR identity configured** in your workflow YAML:
   ```yaml
@@ -39,15 +33,14 @@ This workflow has 2 steps:
 1. **NVFlow Stage** (`nvflow/recipes/finance/stages/download/download_sec_filings.py`)
    - Orchestrates the download job on your Slurm cluster
    - Manages containerized execution and output paths
-   - Pip installs the SEC downloader tool at runtime
 
-2. **SEC Downloader Tool** (external Python package from GitLab)
+2. **SEC Downloader Tool** (bundled in NVFlow)
    - Interfaces directly with the SEC EDGAR API
    - Downloads filings in HTML format
    - Parses and extracts individual sections (Items 1, 1A, 2, etc.) from 10-K/10-Q filings
    - Generates metadata file (`sec_metadata.parquet`) for downstream stages
 
-The NVFlow stage wraps the external tool, handling cluster integration and output management while the tool itself handles SEC API interaction and parsing.
+The NVFlow stage handles cluster integration and output management while the bundled SEC downloader tool handles SEC API interaction and parsing.
 
 ## Configuration Files
 
@@ -86,9 +79,7 @@ The NVFlow stage wraps the external tool, handling cluster integration and outpu
 
 ## Stage: sap-500
 
-Downloads SEC filings using the `sec-downloader-parser` tool ([internal NVIDIA GitLab](https://gitlab-master.nvidia.com/swdl-nemollm-mlops/alignment-data/sec-downloader-parser)).
-
-> **Note for external deployments:** The sec-downloader-parser is currently hosted on internal NVIDIA infrastructure. For external use, you can either pre-install the tool or replace it with an alternative SEC EDGAR downloader that produces the same output format.
+Downloads SEC filings using the bundled `sec-downloader-parser` tool.
 
 **See [technical reference](../stages/download-sec.md) for detailed parameters and configuration.**
 
@@ -192,17 +183,6 @@ Both SDG workflows consume the downloaded filings.
 **Solution:**
 - There was a network delay in downloading the file so the read timed out
 - Wait a few minutes and retry
-
-### Missing GitLab Token (Internal NVIDIA Only)
-
-**Symptom:** pip install fails for sec-downloader-parser
-
-**Solution:**
-```bash
-export GITLAB_TOKEN=<your-gitlab-token>
-```
-
-**Note:** See Prerequisites section above for more details on GitLab token requirements and external deployment alternatives.
 
 ### Storage Space
 

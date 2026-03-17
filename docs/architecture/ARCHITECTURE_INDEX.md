@@ -137,7 +137,7 @@ The NVFlow architecture is documented across multiple files, each serving a spec
 - Online: https://mermaid.live/
 - VS Code: Mermaid Preview extension
 - CLI: `mmdc -i diagram.mmd -o diagram.png`
-- GitHub/GitLab: Native rendering
+- GitHub: Native rendering
 
 **When to Use:**
 - Need visual understanding

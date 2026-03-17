@@ -33,10 +33,11 @@ jobs:
 
       - name: Setup for test
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git curl ca-certificates
           curl -LsSf https://astral.sh/uv/install.sh | sh
-          uv sync --python 3.12 --no-install-project --extra dev
+          uv venv --python 3.12
+          uv pip install pytest pytest-cov pytest-timeout
+          uv pip install PyYAML omegaconf rich
+          uv pip install -e . --no-deps
 
       - name: Test
         run: |
