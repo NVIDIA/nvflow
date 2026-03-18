@@ -41,4 +41,4 @@ jobs:
 
       - name: Test
         run: |
-          uv run pytest tests/ -v --tb=short
+          .venv/bin/pytest tests/ -v --tb=short

@@ -68,7 +68,7 @@ test:
     - uv pip install PyYAML omegaconf rich
     - uv pip install -e . --no-deps
   script:
-    - uv run pytest tests/ -v --tb=short
+    - .venv/bin/pytest tests/ -v --tb=short
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
