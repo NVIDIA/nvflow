@@ -1,0 +1,7 @@
+# Scope: S&P 500 (full production training).
+# Pairs with data_root: /workspace/outputs/finance/sap-500 in the model config.
+finance_sec_search_resources_server:
+  resources_servers:
+    finance_sec_search:
+      cache_dir: /workspace/outputs/finance/sap-500/workflow-5-grpo/cache/finance_sec_search
+      sec_dump_path: /workspace/outputs/finance/sap-500/workflow-2-download-sec/step-0-download/data

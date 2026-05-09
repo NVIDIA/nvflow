@@ -13,10 +13,10 @@ def execute(self, config, cluster, expname, run_after=None):
 
     # Show configuration
     console.detail("Model", config['model'])
-    console.detail("GPUs", str(config['num_gpus']))
+    console.detail("GPUs", str(config['total_gpus']))
     console.detail("Cluster", cluster)
 
-    # Submit job (via nemo-skills)
+    # Submit job (via NeMo-RL)
     job_id = submit_to_cluster(...)
 
     console.success(f"Job submitted: {job_id}")
@@ -57,11 +57,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from nvflow.core import BaseStage, StageRegistry, console
 
-@StageRegistry.register(recipe="finance", workflow="training_sft", stage="sft")
+@StageRegistry.register(recipe="finance", workflow="sft", stage="sft")
 class SFTStage(BaseStage):
     """Supervised fine-tuning stage."""
 
-    workflow = "training_sft"
+    workflow = "sft"
 
     def execute(
         self,
@@ -79,7 +79,7 @@ class SFTStage(BaseStage):
         # Show configuration
         console.detail("Model", config['model'])
         console.detail("Data", config['data_path'])
-        console.detail("GPUs", str(config.get('num_gpus', 8)))
+        console.detail("GPUs", str(config.get('total_gpus', 8)))
         console.detail("Cluster", cluster)
         console.blank()
 

@@ -37,6 +37,10 @@ from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.server_utils import ServerClient
 from tqdm.asyncio import tqdm
 
+from nvflow.utils import setup_logger
+
+logger = setup_logger(__name__)
+
 
 def _wait_for_server_client(
     head_host: str,
@@ -75,7 +79,7 @@ async def _wait_for_verify_endpoint(
                 json={},
             )
             if resp.status != 404:
-                print(f"  /verify endpoint ready (HTTP {resp.status})")
+                logger.info("  /verify endpoint ready (HTTP %d)", resp.status)
                 return
         except Exception:
             pass
@@ -95,16 +99,16 @@ async def verify_rollouts(
         rollouts = [json.loads(line) for line in f if line.strip()]
 
     if not rollouts:
-        print("WARNING: No rollouts found in input file.")
+        logger.warning("No rollouts found in input file.")
         Path(output_file).write_text("")
         return
 
-    print(f"Connecting to NeMo-Gym head server at {head_host}:{head_port} ...")
+    logger.info("Connecting to NeMo-Gym head server at %s:%d ...", head_host, head_port)
     client = _wait_for_server_client(head_host, head_port)
-    print(f"  Connected. Waiting for {environment_name} /verify endpoint ...")
+    logger.info("  Connected. Waiting for %s /verify endpoint ...", environment_name)
     await _wait_for_verify_endpoint(client, environment_name)
 
-    print(f"Re-judging {len(rollouts)} rollouts via {environment_name} /verify")
+    logger.info("Re-judging %d rollouts via %s /verify", len(rollouts), environment_name)
 
     max_retries = 3
     retry_base_delay = 2.0
@@ -160,12 +164,15 @@ async def verify_rollouts(
 
         error_count += 1
         if error_count <= 10:
-            print(
-                f"ERROR: /verify returned {last_status} for idx={idx} "
-                f"after {max_retries + 1} attempts: {last_body[:200]}"
+            logger.error(
+                "/verify returned %d for idx=%d after %d attempts: %s",
+                last_status,
+                idx,
+                max_retries + 1,
+                last_body[:200],
             )
         elif error_count == 11:
-            print("ERROR: suppressing further per-record error messages ...")
+            logger.error("Suppressing further per-record error messages ...")
         results[idx] = None
 
     tasks = [_verify(i, r) for i, r in enumerate(rollouts)]
@@ -178,21 +185,23 @@ async def verify_rollouts(
                 f.write(json.dumps(r) + "\n")
 
     if error_count > 0:
-        print(
-            f"\nFATAL: {error_count}/{len(rollouts)} requests failed. "
-            f"Only {succeeded} results written."
+        logger.fatal(
+            "%d/%d requests failed. Only %d results written.",
+            error_count,
+            len(rollouts),
+            succeeded,
         )
         sys.exit(1)
 
     rewards = [r.get("reward", 0.0) for r in results if r is not None]
     if rewards:
         avg = sum(rewards) / len(rewards)
-        print(f"  Average reward: {avg:.4f} ({len(rewards)} samples)")
+        logger.info("  Average reward: %.4f (%d samples)", avg, len(rewards))
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 7:
-        print(
+        logger.error(
             "Usage: python -m nvflow.lib.rl.verify_worker "
             "<input.jsonl> <output.jsonl> "
             "<head_host> <head_port> <environment_name> <num_parallel>"

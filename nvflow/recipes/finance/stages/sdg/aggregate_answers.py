@@ -65,11 +65,11 @@ class AggregateAnswersStage(BaseStage):
         # Input file stem is "selected_answers" based on workflow config
         generation_folder = Path(input_dir) / "selected_answers"
 
-        aggregate_script = "/workspace/nvflow/recipes/finance/utils/sdg/aggregate_evaluate.py"
+        aggregate_module = "nvflow.recipes.finance.utils.sdg.aggregate_evaluate"
 
         # Aggregate results (parse + aggregate combined, no intermediate files)
         full_cmd = (
-            f"python {aggregate_script} "
+            f"python3 -m {aggregate_module} "
             f"--input_dir {generation_folder} "
             f"--output_file {output_file} "
             f"--num_seeds {num_seeds}"
@@ -77,15 +77,11 @@ class AggregateAnswersStage(BaseStage):
 
         console.status("Running aggregation (streaming, no intermediate files)")
 
-        preprocess_kwargs = config.get("preprocess_kwargs", {})
-        partition = preprocess_kwargs.get("partition", "cpu")
-
         run_cmd(
             ctx=wrap_arguments(full_cmd),
             cluster=cluster,
             expname=expname,
             run_after=run_after,
-            partition=partition,
         )
 
         console.success("Completed aggregation")

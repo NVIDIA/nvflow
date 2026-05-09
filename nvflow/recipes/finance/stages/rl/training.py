@@ -14,20 +14,20 @@
 #
 """GRPO Reinforcement Learning Training for financial reasoning models.
 
-Uses NeMo-RL + NeMo-Gym via the nemo-skills grpo_nemo_rl() orchestrator.
-The NeMo-Gym entry point swap and dependencies are configured in the workflow
-YAML (installation_command) for full transparency.
+Submits GRPO training via direct ``add_task()`` calls to nemo-run,
+bypassing ``nemo-skills`` ``grpo_nemo_rl()`` to avoid unwanted data-key
+injections and the ``cp`` entry-point hack.
 
-The full config (preset + overrides) is written as a YAML file and passed
-to run_grpo_nemo_gym.py via ``--config``.  nemo-skills' runtime overrides
-(model_name, cluster, checkpoint_dir, etc.) are applied on top via
-``++key=value`` CLI args.  This "pass everything from scratch" approach
-matches SFT and avoids any dependency on upstream default config files.
+The full config (preset + overrides) is base64-encoded and decoded
+inside the Slurm job, then passed to ``run_grpo_nemo_gym.py`` via
+``--config``.  Runtime overrides (model_name, cluster, checkpoint_dir,
+data paths, etc.) are applied on top via ``++key=value`` CLI args.
 """
 
-import os
+import base64
+import subprocess
+import warnings
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +35,10 @@ import yaml
 from omegaconf import OmegaConf
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.gpu_layout import resolve_gpu_layout
 from nvflow.lib.rl.helpers import (
-    JUDGE_NON_VLLM_KEYS,
+    NON_VLLM_KEYS,
+    VLLM_MODEL_FOR_TRAINING,
     build_judge_nemo_gym_config,
     build_vllm_server_args,
     determine_judge_mode,
@@ -44,6 +46,7 @@ from nvflow.lib.rl.helpers import (
     resolve_host_path,
     validate_judge_config,
 )
+from nvflow.lib.vllm_compat import get_server_entrypoint
 
 
 @dataclass
@@ -68,19 +71,8 @@ class GRPOStage(BaseStage):
     """GRPO reinforcement learning training for financial reasoning.
 
     Merges a preset (grpo_presets.yaml) with workflow overrides, validates
-    parallelism, and submits via nemo-skills grpo_nemo_rl().
-
-    Example workflow config::
-
-        training:
-          preset: "grpo-base"
-          backend: fsdp
-          overrides:
-            grpo:
-              num_prompts_per_step: 64
-            policy:
-              dtensor_cfg:
-                tensor_parallel_size: 2
+    parallelism, builds ``env.nemo_gym.config_paths`` from the
+    ``environments`` dict, and submits via direct ``add_task()`` calls.
     """
 
     def __init__(self):
@@ -130,7 +122,19 @@ class GRPOStage(BaseStage):
             }
 
     def _resolve_nemo_rl_config(self, config: dict) -> dict:
-        """Resolve NeMo-RL format preset with overrides."""
+        """Resolve NeMo-RL format preset with overrides.
+
+        Dynamically builds ``env.nemo_gym.config_paths`` from the
+        ``environments`` dict.  When ``training_datasets`` is present
+        (multi-environment combined training), injects ``data.train``
+        and ``data.validation`` as lists so NeMo-RL uses its native
+        multi-dataset support instead of a single merged file.
+
+        For single-environment training, merges the environment's
+        ``training_policy`` onto the resolved policy config (e.g. to
+        override context length).  Combined training uses the
+        model-level default and ignores per-environment overrides.
+        """
         preset_name = config.get("preset")
         if not preset_name or preset_name not in self.presets:
             raise ValueError(
@@ -142,6 +146,30 @@ class GRPOStage(BaseStage):
         preset = OmegaConf.create(self.presets[preset_name])
         overrides = OmegaConf.create(config.get("overrides", {}))
         merged = OmegaConf.to_container(OmegaConf.merge(preset, overrides))
+
+        environments = config["environments"]
+        config_paths = [VLLM_MODEL_FOR_TRAINING]
+        for env_cfg in environments.values():
+            config_paths.extend(env_cfg.get("config_paths", []))
+        merged.setdefault("env", {}).setdefault("nemo_gym", {})["config_paths"] = config_paths
+
+        if config.get("training_datasets"):
+            merged["data"]["train"] = config["training_datasets"]
+        if config.get("validation_datasets"):
+            merged["data"]["validation"] = config["validation_datasets"]
+
+        if len(environments) == 1:
+            env_name = next(iter(environments))
+            env_cfg = environments[env_name]
+            tp = env_cfg.get("training_policy")
+            if tp:
+                merged["policy"] = OmegaConf.to_container(
+                    OmegaConf.merge(
+                        OmegaConf.create(merged.get("policy", {})),
+                        OmegaConf.create(tp),
+                    )
+                )
+                console.detail("Training policy", f"Applied overrides from {env_name}")
 
         return merged
 
@@ -215,8 +243,6 @@ class GRPOStage(BaseStage):
                 expert_dp = world_size // expert_model_size
 
                 if regular_dp != expert_dp:
-                    import warnings
-
                     warnings.warn(
                         f"MoE DP mismatch detected: Regular DP={regular_dp}, Expert DP={expert_dp}. "
                         f"This may cause distributed optimizer gradient buffer allocation issues. "
@@ -274,35 +300,97 @@ class GRPOStage(BaseStage):
                     f"        train_mb_tokens: {policy.get('max_total_sequence_length', 4096)}"
                 )
 
+    def _auto_correct_sequence_length_divisibility(
+        self, nemo_rl_config: dict, backend: str
+    ) -> None:
+        """Auto-compute policy.make_sequence_length_divisible_by from parallelism.
+
+        Megatron splits individual sequences across CP and TP (when SP=true)
+        ranks, requiring sequence lengths to be divisible by a minimum factor:
+          - CP > 1 contributes cp_size * 2  (send/receive pattern)
+          - TP > 1 + SP=true contributes tp_size
+
+        If the user explicitly set a higher value (e.g., for FP8 alignment),
+        it is preserved.  Mirrors the SFT stage's identical method.
+        """
+        policy = nemo_rl_config.get("policy", {})
+        parallel = self._get_parallelism_config(policy, backend)
+
+        if backend == "fsdp":
+            cfg = policy.get("dtensor_cfg", {})
+        else:
+            cfg = policy.get("megatron_cfg", {})
+
+        tp = parallel["tp"]
+        cp = parallel["cp"]
+        sp = cfg.get("sequence_parallel", False)
+
+        minimum = 1
+        if cp > 1:
+            minimum *= cp * 2
+        if tp > 1 and sp:
+            minimum *= tp
+
+        current = policy.get("make_sequence_length_divisible_by", 1)
+        corrected = max(current, minimum)
+
+        if corrected != current:
+            console.detail(
+                "Auto-corrected make_sequence_length_divisible_by",
+                f"{current} → {corrected} (CP={cp}, TP={tp}, SP={sp})",
+            )
+            policy["make_sequence_length_divisible_by"] = corrected
+
     def _inject_judge_config(
         self,
         config: dict[str, Any],
         nemo_rl_config: dict,
         output_dir: str,
-        cluster: str,
+        cluster_config: dict,
     ) -> tuple[str, dict | None]:
         """Inject dedicated judge model config into NeMo-Gym and optionally
         build a judge job info dict for local_vllm mode.
+
+        Judge configuration is read from the per-environment ``judge_vllm``
+        block.  For single-environment training, the judge comes from that
+        environment.  For combined training, the first environment with a
+        non-trivial judge (``num_gpus > 0`` or ``model_path`` set) is used.
 
         Returns:
             (judge_mode, judge_job_info) where judge_job_info is set only in
             local_vllm mode.
         """
-        judge_mode = determine_judge_mode(config)
-        if judge_mode != "policy_as_judge":
-            validate_judge_config(config)
+        environments = config["environments"]
 
-        config_paths = nemo_rl_config.get("env", {}).get("nemo_gym", {}).get("config_paths", [])
-        env_name = next(
-            (Path(p).stem for p in config_paths if "resources_servers" in p),
-            "equivalence_llm_judge",
-        )
+        judge_env_name = None
+        judge_env_cfg: dict[str, Any] = {}
+        judge_vllm_cfg: dict[str, Any] = {}
+        for name, ecfg in environments.items():
+            jv = ecfg.get("judge_vllm") or {}
+            if jv.get("model_path") or jv.get("base_url") or jv.get("openai_base_url"):
+                judge_env_name = name
+                judge_env_cfg = ecfg
+                judge_vllm_cfg = jv
+                break
+
+        if not judge_env_name:
+            judge_env_name = next(iter(environments))
+            judge_env_cfg = environments[judge_env_name]
+
+        rs_name = judge_env_cfg.get("resources_server_name", judge_env_name)
+
+        config_with_judge = {**config, "judge_vllm": judge_vllm_cfg}
+        judge_mode = determine_judge_mode(config_with_judge)
+        if judge_mode != "policy_as_judge":
+            validate_judge_config(config_with_judge)
+
         nemo_gym_cfg = nemo_rl_config.setdefault("env", {}).setdefault("nemo_gym", {})
 
         judge_cfg_fragment = build_judge_nemo_gym_config(
-            config,
+            config_with_judge,
             judge_mode,
-            environment_name=env_name,
+            environment_name=rs_name,
+            environment_inner_name=judge_env_name,
         )
 
         if judge_cfg_fragment:
@@ -316,19 +404,20 @@ class GRPOStage(BaseStage):
 
         judge_job_info = None
         if judge_mode == "local_vllm":
-            jcfg = config.get("judge_vllm") or {}
-            vllm_overrides = {k: v for k, v in jcfg.items() if k not in JUDGE_NON_VLLM_KEYS}
+            vllm_overrides = {k: v for k, v in judge_vllm_cfg.items() if k not in NON_VLLM_KEYS}
             from nemo_skills.pipeline.utils.server import get_free_port
 
             judge_port = get_free_port(strategy="random")
-            num_gpus = jcfg.get("num_gpus", 4)
-            num_nodes = jcfg.get("server_nodes", 1)
+            num_gpus = judge_vllm_cfg.get("num_gpus", 4)
+            num_nodes = judge_vllm_cfg.get("server_nodes", 1)
             server_args = build_vllm_server_args(vllm_overrides)
 
             host_file = f"{output_dir}/judge_host.txt"
+            ep = get_server_entrypoint()  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
+            serve_cmd = f"python3 {ep}"
             vllm_cmd = (
-                f"python3 -m nemo_skills.inference.server.serve_vllm"
-                f"    --model {jcfg['model_path']}"
+                f"{serve_cmd}"
+                f"    --model {judge_vllm_cfg['model_path']}"
                 f"    --num_gpus {num_gpus}"
                 f"    --num_nodes {num_nodes}"
                 f"    --port {judge_port}"
@@ -341,9 +430,6 @@ class GRPOStage(BaseStage):
                 f"{vllm_cmd}"
             )
 
-            from nemo_skills.pipeline.utils.cluster import get_cluster_config
-
-            cluster_config = get_cluster_config(cluster)
             judge_job_info = {
                 "server_cmd": wrapped_cmd,
                 "port": judge_port,
@@ -365,15 +451,28 @@ class GRPOStage(BaseStage):
         cluster: str,
         expname: str,
         run_after: list[str] | None = None,
+        cluster_config: dict | None = None,
     ) -> PreparedGRPOConfig:
         """Merge preset + overrides, validate, and build PreparedGRPOConfig."""
+        if cluster_config is None:
+            from nemo_skills.pipeline.utils.cluster import get_cluster_config
+
+            cluster_config = get_cluster_config(cluster)
+
         hf_model_name = config["model_name"]
-        num_nodes = config.get("num_nodes", 1)
-        num_gpus = config.get("num_gpus", 8)
         backend = config.get("backend", "fsdp")
+
+        # Resolve GPU layout: total_gpus (portable) or legacy num_nodes+num_gpus
+        layout = resolve_gpu_layout(config, cluster_config)
+        num_nodes = layout.num_nodes
+        num_gpus = layout.gpus_per_node
+        console.detail(
+            "GPU layout", f"{num_nodes} node(s) x {num_gpus} GPUs = {layout.total_gpus} total"
+        )
 
         nemo_rl_config = self._resolve_nemo_rl_config(config)
         self._auto_correct_sequence_parallel(nemo_rl_config, backend)
+        self._auto_correct_sequence_length_divisibility(nemo_rl_config, backend)
         self._validate_parallelism_config(nemo_rl_config, backend, num_nodes, num_gpus)
         self._validate_sequence_packing_for_cp(nemo_rl_config, backend)
 
@@ -381,13 +480,11 @@ class GRPOStage(BaseStage):
         parallel = self._get_parallelism_config(policy, backend)
         seq_k = policy.get("max_total_sequence_length", 32768) // 1024
         model_short = Path(hf_model_name).name.lower().replace("_", "-")
-        run_name = (
-            f"grpo-{model_short}-{num_nodes}n-tp{parallel['tp']}-cp{parallel['cp']}-seq{seq_k}k"
-        )
+        run_name = f"grpo-{model_short}-{layout.total_gpus}g-tp{parallel['tp']}-cp{parallel['cp']}-seq{seq_k}k"
         output_dir = str(Path(config["output_dir"]) / run_name)
 
         judge_mode, judge_job_info = self._inject_judge_config(
-            config, nemo_rl_config, output_dir, cluster
+            config, nemo_rl_config, output_dir, cluster_config
         )
 
         return PreparedGRPOConfig(
@@ -412,10 +509,17 @@ class GRPOStage(BaseStage):
 
         console.status("Preparing GRPO training job (NeMo-RL + NeMo-Gym)")
         console.detail("Model", prepared.hf_model_name)
-        if config.get("training_data"):
-            console.detail("Training data", config["training_data"])
-        if config.get("validation_data"):
-            console.detail("Validation data", config["validation_data"])
+        if config.get("training_datasets"):
+            datasets = config["training_datasets"]
+            console.detail("Training data", f"{len(datasets)} datasets (multi-environment)")
+            for ds in datasets:
+                repeat_str = f" (repeat={ds['repeat']})" if ds.get("repeat", 1) > 1 else ""
+                console.detail("  Dataset", f"{ds['data_path']}{repeat_str}")
+            val_datasets = config.get("validation_datasets", [])
+            console.detail("Validation data", f"{len(val_datasets)} datasets")
+        else:
+            console.detail("Training data", config.get("training_data", "(from config)"))
+            console.detail("Validation data", config.get("validation_data", "(from config)"))
         console.detail("Cluster", f"{prepared.num_nodes}×{prepared.num_gpus} = {world_size} GPUs")
 
         if prepared.backend == "fsdp":
@@ -432,11 +536,7 @@ class GRPOStage(BaseStage):
             f"generations/prompt={grpo.get('num_generations_per_prompt', '?')}",
         )
 
-        env = prepared.nemo_rl_config.get("env", {})
-        config_paths = env.get("nemo_gym", {}).get("config_paths", [])
-        env_names = [Path(p).stem for p in config_paths if "resources_servers" in p]
-        if env_names:
-            console.detail("NeMo-Gym environment", ", ".join(env_names))
+        console.detail("NeMo-Gym environments", ", ".join(config["environments"].keys()))
 
         log_judge_details(console, config, prepared.judge_mode)
         if prepared.judge_job_info:
@@ -446,242 +546,342 @@ class GRPOStage(BaseStage):
             )
         console.blank()
 
-    def _write_config_yaml(self, prepared: PreparedGRPOConfig) -> str:
-        """Write the full NeMo-RL config as a YAML file and return its container path."""
-        output_path = resolve_host_path(prepared.output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        config_file = output_path / "grpo_config.yaml"
+    def _config_shell_snippet(self, prepared: PreparedGRPOConfig) -> tuple[str, str]:
+        """Return a shell snippet that writes the NeMo-RL config YAML at job runtime.
 
-        with open(config_file, "w") as f:
-            f.write("# Auto-generated GRPO config (preset + overrides)\n")
-            f.write("# Passed to run_grpo_nemo_gym.py via --config\n\n")
-            yaml.dump(
-                prepared.nemo_rl_config,
-                f,
-                default_flow_style=False,
-                sort_keys=False,
-                allow_unicode=True,
+        The config is base64-encoded and decoded inside the Slurm job,
+        avoiding any host-side filesystem writes.  Same pattern used by
+        ``PrepareDataForGRPOStage._overlay_shell_snippet``.
+        """
+        content = yaml.dump(
+            prepared.nemo_rl_config,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+        encoded = base64.b64encode(content.encode()).decode()
+        config_path = f"{prepared.output_dir}/grpo_config.yaml"
+        snippet = f"mkdir -p {prepared.output_dir} && echo {encoded} | base64 -d > {config_path}"
+        return snippet, config_path
+
+    def _build_train_cmd(
+        self,
+        prepared: PreparedGRPOConfig,
+        config: dict[str, Any],
+        config_snippet: str,
+        config_path: str,
+        cluster_config: dict,
+    ) -> str:
+        """Build the training command string for run_grpo_nemo_gym.py."""
+        from nemo_skills.pipeline.nemo_rl.grpo import get_timeout_str
+
+        stage_kwargs = config.get("stage_kwargs", {})
+        partition = stage_kwargs.get("partition")
+        timeout = config.get("overrides", {}).get("checkpointing", {}).get(
+            "checkpoint_must_save_by"
+        ) or get_timeout_str(cluster_config, partition)
+        hf_model = config.get("hf_checkpoint_path", config["model_name"])
+
+        cmd = (
+            f"{config_snippet} && "
+            f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/NeMo-RL && "
+            f"export UV_PROJECT=/opt/NeMo-RL && "
+            f"echo 'Starting training' && "
+            f"uv run --active python /opt/NeMo-RL/examples/nemo_gym/run_grpo_nemo_gym.py "
+            f"  --config {config_path}"
+            f"  ++policy.model_name={hf_model}"
+            f"  ++cluster.gpus_per_node={prepared.num_gpus}"
+            f"  ++cluster.num_nodes={prepared.num_nodes}"
+            f"  ++checkpointing.checkpoint_must_save_by={timeout}"
+            f"  ++logger.log_dir={prepared.output_dir}/training-logs"
+            f"  ++checkpointing.checkpoint_dir={prepared.output_dir}/checkpoints"
+        )
+
+        if prepared.backend == "megatron":
+            cmd += " ++policy.dtensor_cfg.enabled=false ++policy.megatron_cfg.enabled=true"
+            cmd += " ++policy.optimizer=None ++policy.dynamic_batching.enabled=false"
+        else:
+            cmd += " ++policy.dtensor_cfg.enabled=true ++policy.megatron_cfg.enabled=false"
+
+        if config.get("training_data"):
+            cmd += f" ++data.train.data_path={config['training_data']}"
+        if config.get("validation_data"):
+            cmd += f" ++data.validation.data_path={config['validation_data']}"
+        wandb_mode = config.get("wandb_mode", "disabled")
+        if wandb_mode == "disabled":
+            cmd += " ++logger.wandb_enabled=false"
+        elif wandb_mode == "offline":
+            cmd += " ++logger.wandb_enabled=true ++logger.wandb_mode=offline"
+        elif wandb_mode == "online":
+            wandb_project = config.get("wandb_project", "finance-grpo")
+            cmd += (
+                f" ++logger.wandb_enabled=true"
+                f" ++logger.wandb.project={wandb_project}"
+                f" ++logger.wandb.name={prepared.expname}"
+                f" ++logger.wandb.group={prepared.expname}"
             )
 
-        console.detail("Config YAML written to", str(config_file))
-        return f"{prepared.output_dir}/grpo_config.yaml"
-
-    def _submit_grpo_job(
-        self, prepared: PreparedGRPOConfig, cluster: str, config: dict[str, Any]
-    ) -> None:
-        """Submit GRPO training job via nemo-skills grpo_nemo_rl()."""
-        from nemo_skills.pipeline.cli import grpo_nemo_rl, wrap_arguments
-
-        self._save_grpo_metadata(prepared, config)
-        config_path = self._write_config_yaml(prepared)
-
-        wandb_mode = config.get("wandb_mode", "disabled")
         extra_parts = []
         if base_args := config.get("extra_arguments"):
             extra_parts.append(base_args)
-        if stage_args := config.get("stage_kwargs", {}).get("extra_arguments"):
+        if stage_args := stage_kwargs.get("extra_arguments"):
             extra_parts.append(stage_args)
-        extra_arguments = " ".join(extra_parts) if extra_parts else None
+        if extra_parts:
+            cmd += " " + " ".join(extra_parts)
 
-        args = f"--config {config_path}"
-        if config.get("training_data"):
-            args = f"{args} ++data.train_jsonl_fpath={config['training_data']}"
-        if config.get("validation_data"):
-            args = f"{args} ++data.validation_jsonl_fpath={config['validation_data']}"
-        if wandb_mode == "disabled":
-            args = f"{args} ++logger.wandb_enabled=false"
-        elif wandb_mode == "offline":
-            args = f"{args} ++logger.wandb_enabled=true ++logger.wandb_mode=offline"
-        if extra_arguments:
-            args = f"{args} {extra_arguments}"
+        return cmd
 
-        grpo_kwargs: dict[str, Any] = {
-            "ctx": wrap_arguments(args),
-            "cluster": cluster,
-            "expname": prepared.expname,
-            "backend": prepared.backend,
-            "output_dir": prepared.output_dir,
-            "hf_model": config.get("hf_checkpoint_path", config["model_name"]),
-            "num_gpus": prepared.num_gpus,
-            "num_nodes": prepared.num_nodes,
-            "dependent_jobs": config.get("dependent_jobs", 0),
-            "installation_command": config.get("installation_command"),
-        }
+    def _submit_grpo_job(
+        self, prepared: PreparedGRPOConfig, cluster_config: dict, config: dict[str, Any]
+    ) -> None:
+        """Submit GRPO training job via direct add_task() + run_exp()."""
+        from nemo_skills.pipeline.nemo_rl.grpo import parse_kwargs
+        from nemo_skills.pipeline.utils.exp import add_task, get_exp, run_exp
 
-        if prepared.run_after:
-            grpo_kwargs["run_after"] = prepared.run_after
+        config_snippet, config_path = self._config_shell_snippet(prepared)
+
+        train_cmd = self._build_train_cmd(
+            prepared, config, config_snippet, config_path, cluster_config
+        )
         stage_kwargs = config.get("stage_kwargs", {})
-        if "partition" in stage_kwargs:
-            grpo_kwargs["partition"] = stage_kwargs["partition"]
-        if wandb_mode == "online" and config.get("wandb_project"):
-            grpo_kwargs["wandb_project"] = config["wandb_project"]
+        partition = stage_kwargs.get("partition")
+        sbatch_kwargs = parse_kwargs(stage_kwargs.get("sbatch_kwargs", ""))
+
+        dependent_jobs = config.get("dependent_jobs", 0)
 
         if prepared.judge_job_info is not None:
-            self._submit_judge_and_training(prepared, grpo_kwargs, cluster)
+            self._submit_judge_and_training(
+                prepared,
+                train_cmd,
+                cluster_config,
+                config,
+                partition,
+                sbatch_kwargs,
+                dependent_jobs,
+            )
         else:
-            grpo_nemo_rl(**grpo_kwargs)
+            with get_exp(prepared.expname, cluster_config) as exp:
+                prev_task = None
+                for job_id in range(dependent_jobs + 1):
+                    prev_task = add_task(
+                        exp,
+                        cmd=train_cmd,
+                        task_name=f"{prepared.expname}-grpo-{job_id}",
+                        log_dir=f"{prepared.output_dir}/training-logs",
+                        container=cluster_config["containers"]["nemo-rl"],
+                        num_gpus=prepared.num_gpus,
+                        num_nodes=prepared.num_nodes,
+                        cluster_config=cluster_config,
+                        with_ray=True,
+                        sbatch_kwargs=sbatch_kwargs,
+                        installation_command=config.get("installation_command"),
+                        partition=partition,
+                        run_after=prepared.run_after,
+                        task_dependencies=[prev_task] if prev_task else None,
+                    )
+                run_exp(exp, cluster_config, sequential=False)
 
         console.success("GRPO training job submitted")
 
     def _submit_judge_and_training(
         self,
         prepared: PreparedGRPOConfig,
-        grpo_kwargs: dict[str, Any],
-        cluster: str,
+        train_cmd: str,
+        cluster_config: dict,
+        config: dict[str, Any],
+        partition: str | None,
+        sbatch_kwargs: dict | None,
+        dependent_jobs: int = 0,
     ) -> None:
-        """Submit judge vLLM and training as two separate Slurm jobs."""
-        from nemo_skills.pipeline.cli import grpo_nemo_rl, wrap_arguments
-        from nemo_skills.pipeline.utils.cluster import get_cluster_config
-        from nemo_skills.pipeline.utils.exp import add_task, get_exp
+        """Submit paired (judge + training) Slurm jobs.
+
+        Each training job gets its own judge vLLM server so the judge
+        doesn't time out when ``dependent_jobs > 0``.  For the default
+        case (``dependent_jobs = 0``), this produces one judge + one
+        training job, same as before.
+
+        The training job is submitted first so the judge can use
+        ``--dependency=after:<training_job_id>`` to avoid allocating
+        GPUs before training is actually running.  A background
+        health-check inside the training command detects judge
+        failures and triggers graceful Ray shutdown via the ENDED
+        file mechanism.
+        """
+        from nemo_skills.pipeline.utils.cluster import get_slurm_timeout_str
+        from nemo_skills.pipeline.utils.exp import add_task, get_exp, run_exp
 
         judge = prepared.judge_job_info
-        cluster_config = get_cluster_config(cluster)
-
-        # Poll for the judge hostname file (300 × 2s = 10 min timeout),
-        # then inject the URL as a CLI override for the training job.
-        host_file = judge["host_file"]
-        wait_and_cat = (
-            f"n=0; while [ ! -f {host_file} ] && [ $n -lt 300 ]; do"
-            f" sleep 2; n=$((n+1)); done; cat {host_file}"
-        )
-        judge_url_override = (
-            "++env.nemo_gym.judge_model.responses_api_models.vllm_model.base_url="
-            f"http://$({wait_and_cat})/v1"
-        )
-
-        original_args = " ".join(grpo_kwargs["ctx"].args)
-        grpo_kwargs["ctx"] = wrap_arguments(f"{original_args} {judge_url_override}")
-
-        resolve_host_path(host_file).unlink(missing_ok=True)
+        base_host_file = judge["host_file"]
+        log_dir = f"{prepared.output_dir}/training-logs"
+        training_timeout = get_slurm_timeout_str(cluster_config, partition, with_save_delay=False)
 
         with get_exp(prepared.expname, cluster_config) as exp:
-            add_task(
-                exp,
-                cmd=judge["server_cmd"],
-                task_name=f"{prepared.expname}-judge",
-                log_dir=f"{prepared.output_dir}/training-logs",
-                container=judge["container"],
-                num_gpus=judge["num_gpus"],
-                num_nodes=judge["num_nodes"],
-                cluster_config=cluster_config,
-                run_after=prepared.run_after,
+            prev_train_task = None
+
+            for job_id in range(dependent_jobs + 1):
+                if dependent_jobs > 0:
+                    host_file_i = base_host_file.replace(".txt", f"_{job_id}.txt")
+                else:
+                    host_file_i = base_host_file
+
+                raw_judge_cmd = judge["server_cmd"].replace(base_host_file, host_file_i)
+                judge_cmd_i = f"rm -f {host_file_i} && {raw_judge_cmd}"
+
+                wait_and_cat = (
+                    f"n=0; while [ ! -f {host_file_i} ] && [ $n -lt 300 ]; do"
+                    f" sleep 2; n=$((n+1)); done; cat {host_file_i}"
+                )
+                judge_url_override = (
+                    "++env.nemo_gym.judge_model.responses_api_models.vllm_model.base_url="
+                    f"http://$({wait_and_cat})/v1"
+                )
+
+                judge_health_check = (
+                    "{ _nvflow_jhc() { "
+                    f"while [ ! -f {host_file_i} ]; do sleep 10; done; "
+                    f'JH=$(cat {host_file_i} 2>/dev/null || echo ""); '
+                    '[ -z "$JH" ] && return; '
+                    'echo "[nvflow] Judge host=$JH, waiting for /health..."; '
+                    'while ! curl -sf "http://$JH/health" >/dev/null 2>&1; do sleep 15; done; '
+                    'echo "[nvflow] Judge healthy, monitoring started"; '
+                    "F=0; "
+                    "while true; do "
+                    "  sleep 60; "
+                    '  if ! curl -sf "http://$JH/health" >/dev/null 2>&1; then '
+                    "    F=$((F+1)); "
+                    '    echo "[nvflow] Judge health check failed ($F/3)"; '
+                    "    [ $F -ge 3 ] && { "
+                    '      echo "[nvflow] Judge unreachable, triggering shutdown..."; '
+                    f"      touch {log_dir}/ENDED; "
+                    "      return; }; "
+                    "  else F=0; fi; "
+                    "done; "
+                    "}; _nvflow_jhc & } && "
+                )
+
+                train_cmd_i = f"{judge_health_check}{train_cmd} {judge_url_override}"
+
+                prev_train_task = add_task(
+                    exp,
+                    cmd=train_cmd_i,
+                    task_name=f"{prepared.expname}-grpo-{job_id}",
+                    log_dir=log_dir,
+                    container=cluster_config["containers"]["nemo-rl"],
+                    num_gpus=prepared.num_gpus,
+                    num_nodes=prepared.num_nodes,
+                    cluster_config=cluster_config,
+                    with_ray=True,
+                    sbatch_kwargs=sbatch_kwargs,
+                    installation_command=config.get("installation_command"),
+                    partition=partition,
+                    run_after=prepared.run_after,
+                    task_dependencies=[prev_train_task] if prev_train_task else None,
+                )
+
+                judge_sbatch = {"dependency_type": "after", "time": training_timeout}
+                add_task(
+                    exp,
+                    cmd=judge_cmd_i,
+                    task_name=f"{prepared.expname}-judge-{job_id}",
+                    log_dir=log_dir,
+                    container=judge["container"],
+                    num_gpus=judge["num_gpus"],
+                    num_nodes=judge["num_nodes"],
+                    cluster_config=cluster_config,
+                    task_dependencies=[prev_train_task],
+                    sbatch_kwargs=judge_sbatch,
+                    partition=partition,
+                )
+
+            num_pairs = dependent_jobs + 1
+            console.detail(
+                "Judge + training jobs",
+                f"{num_pairs} pair(s) submitted",
             )
-            console.detail("Judge vLLM job", "submitted (separate Slurm job)")
-
-            grpo_kwargs["_reuse_exp"] = exp
-            grpo_nemo_rl(**grpo_kwargs)
-
-            self._submit_judge_cleanup(exp, prepared, cluster_config)
+            run_exp(exp, cluster_config, sequential=False)
+            self._submit_judge_cleanup(exp, prepared, cluster_config, num_pairs=num_pairs)
 
     def _submit_judge_cleanup(
-        self, exp, prepared: PreparedGRPOConfig, cluster_config: dict
+        self,
+        exp,
+        prepared: PreparedGRPOConfig,
+        cluster_config: dict,
+        num_pairs: int = 1,
     ) -> None:
-        """Submit a bare sbatch job that cancels the judge after training."""
-        import subprocess
+        """Submit per-pair cleanup jobs that cancel each judge after its training job.
 
+        ``exp.jobs`` is ordered ``[grpo-0, judge-0, grpo-1, judge-1, ...]``.
+        For each pair *i*, a lightweight CPU job is submitted with
+        ``--dependency=afterany:<grpo-i>`` that runs
+        ``scancel --name=<judge-i>``.
+        """
         if not exp.jobs:
             return
 
-        last_handle = exp.jobs[-1].handle
-        if not last_handle:
-            return
-
-        # Handle format: "<scheme>://<empty>/<job_id>/master/0"
-        try:
-            _, _, path_str = last_handle.partition("://")
-            slurm_job_id = path_str.split("/")[1]
-            int(slurm_job_id)  # validate it's numeric
-        except (ValueError, IndexError):
-            console.warning(
-                f"Could not extract Slurm job ID from handle '{last_handle}', "
-                "skipping judge cleanup job"
-            )
-            return
-
         prefix = cluster_config.get("job_name_prefix", "")
-        judge_job_name = f"{prefix}{prepared.expname}-judge"
         account = cluster_config.get("account", "")
         partition = cluster_config.get("cpu_partition") or cluster_config.get("partition", "batch")
-        log_file = f"{prepared.output_dir}/training-logs/judge-cleanup-%j.log"
+        host_log_dir = resolve_host_path(f"{prepared.output_dir}/training-logs")
+        log_file = f"{host_log_dir}/judge-cleanup-%j.log"
 
-        sbatch_script = (
-            "#!/bin/bash\n"
-            f"#SBATCH --job-name={prefix}{prepared.expname}-judge-cleanup\n"
-            f"#SBATCH --account={account}\n"
-            f"#SBATCH --partition={partition}\n"
-            "#SBATCH --nodes=1\n"
-            "#SBATCH --ntasks=1\n"
-            "#SBATCH --time=00:05:00\n"
-            f"#SBATCH --output={log_file}\n"
-            f"#SBATCH --error={log_file}\n"
-            f"#SBATCH --dependency=afterany:{slurm_job_id}\n"
-            f"scancel --name={judge_job_name} --user=$USER 2>/dev/null || true\n"
-        )
+        for pair_idx in range(num_pairs):
+            train_job_idx = pair_idx * 2  # grpo-0 at 0, grpo-1 at 2, ...
 
-        try:
-            result = subprocess.run(
-                ["sbatch"],
-                input=sbatch_script,
-                capture_output=True,
-                text=True,
-                timeout=30,
+            try:
+                handle = exp.jobs[train_job_idx].handle
+            except IndexError:
+                continue
+            if not handle:
+                continue
+
+            # Handle format: "<scheme>://<empty>/<job_id>/master/0"
+            try:
+                _, _, path_str = handle.partition("://")
+                slurm_job_id = path_str.split("/")[1]
+                int(slurm_job_id)
+            except (ValueError, IndexError):
+                console.warning(
+                    f"Could not extract Slurm job ID from handle '{handle}', "
+                    f"skipping cleanup for pair {pair_idx}"
+                )
+                continue
+
+            judge_name = f"{prefix}{prepared.expname}-judge-{pair_idx}"
+            sbatch_script = (
+                "#!/bin/bash\n"
+                f"#SBATCH --job-name={prefix}{prepared.expname}-judge-cleanup-{pair_idx}\n"
+                f"#SBATCH --account={account}\n"
+                f"#SBATCH --partition={partition}\n"
+                "#SBATCH --nodes=1\n"
+                "#SBATCH --ntasks=1\n"
+                "#SBATCH --gpus-per-node=0\n"
+                "#SBATCH --time=00:05:00\n"
+                f"#SBATCH --output={log_file}\n"
+                f"#SBATCH --error={log_file}\n"
+                f"#SBATCH --dependency=afterany:{slurm_job_id}\n"
+                f"scancel --name={judge_name} --user=$USER 2>/dev/null || true\n"
             )
-            if result.returncode == 0:
-                console.detail(
-                    "Judge cleanup job",
-                    f"submitted ({result.stdout.strip()})",
+
+            try:
+                result = subprocess.run(
+                    ["sbatch"],
+                    input=sbatch_script,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
-            else:
-                console.warning(f"Failed to submit judge cleanup job: {result.stderr.strip()}")
-        except Exception as e:
-            console.warning(f"Could not submit judge cleanup job: {e}")
-
-    def _save_grpo_metadata(self, prepared: PreparedGRPOConfig, config: dict[str, Any]) -> None:
-        """Save run metadata YAML for reproducibility."""
-        slurm_job_id = os.environ.get("SLURM_JOB_ID")
-        run_id = f"job_{slurm_job_id}" if slurm_job_id else datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        judge_info = prepared.judge_job_info
-        metadata = {
-            "start_time": datetime.now().isoformat(),
-            "slurm_job_id": slurm_job_id,
-            "status": "submitted",
-            "format": "nemo_rl_grpo",
-            "preset": config.get("preset"),
-            "backend": prepared.backend,
-            "run_name": prepared.run_name,
-            "output_dir": prepared.output_dir,
-            "hf_model_name": prepared.hf_model_name,
-            "num_nodes": prepared.num_nodes,
-            "num_gpus": prepared.num_gpus,
-            "installation_command": config.get("installation_command"),
-            "extra_arguments": config.get("extra_arguments"),
-            "judge_mode": prepared.judge_mode,
-            "judge_job_info": {
-                "num_gpus": judge_info["num_gpus"],
-                "port": judge_info["port"],
-                "host_file": judge_info["host_file"],
-            }
-            if judge_info
-            else None,
-            "nemo_rl_config": prepared.nemo_rl_config,
-        }
-
-        output_path = resolve_host_path(prepared.output_dir)
-        try:
-            output_path.mkdir(parents=True, exist_ok=True)
-            metadata_file = output_path / f"run_metadata_{run_id}.yaml"
-
-            with open(metadata_file, "w") as f:
-                f.write(f"# GRPO Run Metadata - {run_id}\n")
-                f.write("# Auto-generated for reproducibility (NeMo-RL + NeMo-Gym)\n\n")
-                yaml.dump(
-                    metadata, f, default_flow_style=False, sort_keys=False, allow_unicode=True
-                )
-
-            console.detail("Run metadata saved", str(metadata_file))
-        except (OSError, PermissionError) as e:
-            console.warning(f"Could not save metadata: {e}")
+                if result.returncode == 0:
+                    console.detail(
+                        f"Judge cleanup (pair {pair_idx})",
+                        f"submitted ({result.stdout.strip()}), depends on grpo job {slurm_job_id}",
+                    )
+                else:
+                    console.warning(
+                        f"Failed to submit judge cleanup for pair {pair_idx}: "
+                        f"{result.stderr.strip()}"
+                    )
+            except Exception as e:
+                console.warning(f"Could not submit judge cleanup for pair {pair_idx}: {e}")
 
     def execute(
         self,
@@ -690,23 +890,108 @@ class GRPOStage(BaseStage):
         expname: str,
         run_after: list[str] | None = None,
     ) -> None:
-        """Prepare config, display summary, and submit GRPO training job."""
-        prepared = self._prepare_grpo_config(config, cluster, expname, run_after=run_after)
-        self._display_grpo_summary(prepared, config)
-        self._submit_grpo_job(prepared, cluster, config)
+        """Prepare config, display summary, and submit GRPO training job.
+
+        Single-environment mode (one env selected or only one defined):
+            Trains on that environment's data with a single ``data.train``
+            entry.  Output goes to ``{output_dir}/{env_name}/``.
+
+        Multi-environment mode (multiple envs, via ``-e env1 env2`` or all):
+            Builds ``data.train`` as a list of per-environment dataset
+            entries (leveraging NeMo-RL's native multi-dataset support).
+            NeMo-Gym routes each sample to the correct agent via
+            ``agent_ref``.  Output goes to ``{output_dir}/{env1+env2+...}/``.
+        """
+        from nemo_skills.pipeline.utils.cluster import get_cluster_config
+
+        from nvflow.lib.rl.helpers import resolve_environments
+
+        environments = resolve_environments(config)
+        data_source_dir = config["data_source_dir"]
+        train_filename = config.get("train_filename", "train.jsonl")
+        val_filename = config.get("val_filename", "validation.jsonl")
+        cluster_config = get_cluster_config(cluster)
+
+        if len(environments) == 1:
+            env_name = next(iter(environments))
+            env_cfg = environments[env_name]
+            env_config = {
+                **config,
+                "output_dir": f"{config['output_dir']}/{env_name}",
+                "training_data": f"{data_source_dir}/{env_name}/{train_filename}",
+                "validation_data": f"{data_source_dir}/{env_name}/{val_filename}",
+                "environments": {env_name: env_cfg},
+                "judge_vllm": env_cfg.get("judge_vllm") or {},
+            }
+            console.status(f"Training for environment: {env_name}")
+            prepared = self._prepare_grpo_config(
+                env_config,
+                cluster,
+                f"{expname}-{env_name}",
+                run_after=run_after,
+                cluster_config=cluster_config,
+            )
+            self._display_grpo_summary(prepared, env_config)
+            self._submit_grpo_job(prepared, cluster_config, env_config)
+        else:
+            env_names = list(environments.keys())
+            combined_label = "+".join(env_names)
+            combined_dir = f"{config['output_dir']}/{combined_label}"
+
+            train_datasets = []
+            val_datasets = []
+            for env_name, env_cfg in environments.items():
+                train_entry: dict[str, Any] = {
+                    "data_path": f"{data_source_dir}/{env_name}/{train_filename}",
+                }
+                repeat = env_cfg.get("training_repeat", 1)
+                if repeat > 1:
+                    train_entry["repeat"] = repeat
+                train_datasets.append(train_entry)
+                val_datasets.append(
+                    {
+                        "data_path": f"{data_source_dir}/{env_name}/{val_filename}",
+                    }
+                )
+
+            combined_judge_vllm: dict[str, Any] = {}
+            for ecfg in environments.values():
+                jv = ecfg.get("judge_vllm") or {}
+                if jv.get("model_path") or jv.get("base_url") or jv.get("openai_base_url"):
+                    combined_judge_vllm = jv
+                    break
+
+            combined_config = {
+                **config,
+                "output_dir": combined_dir,
+                "training_datasets": train_datasets,
+                "validation_datasets": val_datasets,
+                "environments": dict(environments),
+                "judge_vllm": combined_judge_vllm,
+            }
+            console.status(f"Training on combined environments: {combined_label}")
+            prepared = self._prepare_grpo_config(
+                combined_config,
+                cluster,
+                f"{expname}-{combined_label}",
+                run_after=run_after,
+                cluster_config=cluster_config,
+            )
+            self._display_grpo_summary(prepared, combined_config)
+            self._submit_grpo_job(prepared, cluster_config, combined_config)
 
     def validate_config(self, config: dict[str, Any]) -> None:
         """Validate configuration."""
-        required = ["output_dir", "model_name"]
+        required = ["output_dir", "model_name", "data_source_dir"]
         for required_field in required:
             if required_field not in config:
                 raise ValueError(f"'{required_field}' is required in GRPO config")
+
+        if not config.get("environments"):
+            raise ValueError("'environments' dict is required in GRPO training config")
 
         preset_name = config.get("preset")
         if preset_name and preset_name not in self.presets:
             raise ValueError(
                 f"Unknown preset '{preset_name}'. Available: {', '.join(self.presets.keys())}"
             )
-
-        if config.get("dependent_jobs", 0) > 0 and not config.get("training_data"):
-            raise ValueError("'training_data' is required when dependent_jobs > 0.")

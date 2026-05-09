@@ -63,7 +63,7 @@ The NVFlow architecture is documented across multiple files, each serving a spec
 3. Core framework components (detailed)
 4. Hierarchical organization (Recipe → Workflow → Stage)
 5. Complete execution flow with sequence diagrams
-6. Finance recipe architecture (all 27 stages)
+6. Finance recipe architecture (all 42 stages)
 7. Deployment architecture and topology
 8. Technology stack and integrations
 9. Data flow diagrams
@@ -115,7 +115,7 @@ The NVFlow architecture is documented across multiple files, each serving a spec
 
 2. **[finance-pipeline.mmd](../diagrams/finance-pipeline.mmd)**
    - Complete finance recipe pipeline
-   - All 6 workflows with 27 stages
+   - All 6 workflows with 42 stages
    - Data flow from SEC filings to evaluation
 
 3. **[execution-flow.mmd](../diagrams/execution-flow.mmd)**
@@ -201,7 +201,7 @@ The NVFlow architecture is documented across multiple files, each serving a spec
 **Main Files:**
 
 1. **[README.md](../recipes/finance/README.md)** - Recipe overview
-   - 6 workflows, 27 stages
+   - 6 workflows, 42 stages
    - Pipeline architecture
    - Getting started guide
    - Command reference
@@ -221,7 +221,7 @@ The NVFlow architecture is documented across multiple files, each serving a spec
    - 06-finance-agent-eval.md
 
 4. **Stage Reference** (in `stages/`)
-   - Technical specifications for all 27 stages
+   - Technical specifications for all 42 stages
    - Input/output formats
    - Configuration options
 
@@ -264,7 +264,7 @@ NVFlow Documentation
    │  │  ├─ README.md ................... Recipe overview
    │  │  ├─ quick-start.md .............. 30-min demo
    │  │  ├─ workflows/ .................. 7 workflow guides
-   │  │  ├─ stages/ ..................... 27 stage specifications
+   │  │  ├─ stages/ ..................... 42 stage specifications
 │  │  └─ troubleshooting.md .......... Common issues
 │  │
 │  └─ nvflow/recipes/example/ ..... Example recipe (learning)

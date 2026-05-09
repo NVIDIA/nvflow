@@ -75,7 +75,7 @@ stages:
 
     # Cluster configuration for 30B MoE model
     # Despite 30B total params, only 3.5B active - similar compute to smaller models
-    num_nodes: 32             # 32 nodes × 8 GPUs = 256 GPUs (scaled from 4 nodes)
+    total_gpus: 256
     dependent_jobs: 4         # Chain 5 jobs total: 1 done + 4 more (to complete Epoch 1)
 
     # Use base preset with model-specific overrides
@@ -228,7 +228,7 @@ stages:
     backend: fsdp
 
     # Cluster configuration for 30B MoE model
-    num_nodes: 2              # 2 nodes × 8 GPUs = 16 GPUs
+    total_gpus: 16
     dependent_jobs: 0         # No dependent jobs for demo
 
     # Use base preset with model-specific overrides
@@ -270,7 +270,7 @@ stages:
   # --------------------------------------------------------------------------
   eval:
     eval_steps: [1400, 2600]
-    checkpoint_path: ${directories.step-4-training}/model-nvidia-nemotron-3-nano-30b-a3b-bf16-32n-tp4-pp1-cp8-seq48k
+    checkpoint_path: ${directories.step-4-training}/model-nvidia-nemotron-3-nano-30b-a3b-bf16-256g-tp4-pp1-cp8-seq48k
     base_output_dir: ${base_output_dir}
     format: megatron
     baseline_model: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16

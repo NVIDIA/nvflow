@@ -94,7 +94,7 @@ stages:
   eval:
     eval_steps: [2600, 5000, 7408]
     checkpoint_path: ${directories.step-4-training}/model-name
-    format: megatron        # Use "hf" for GRPO checkpoints
+    format: megatron        # Use "fsdp" for GRPO demo, "megatron" for GRPO production
     baseline_model: /hf_models/Qwen/Qwen3-14B
     server_type: vllm
     gpus: 1
@@ -110,7 +110,7 @@ stages:
 |-----------|------|-------------|
 | `eval_steps` | list[int] | Training steps to evaluate |
 | `checkpoint_path` | path | Base path to training checkpoints |
-| `format` | str | `"megatron"` (SFT) or `"hf"` (GRPO) |
+| `format` | str | `"megatron"` (SFT), `"fsdp"` (GRPO demo), or `"megatron"` (GRPO production) |
 | `baseline_model` | path | HF model path for baseline comparison |
 | `server_type` | str | Inference server: `"vllm"`, `"openai"` |
 | `gpus` | int | GPUs for model server |

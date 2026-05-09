@@ -27,6 +27,7 @@ Example structure:
             - prepare_data
 """
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -115,13 +116,19 @@ class StageRegistry:
         recipe_dir = Path(__file__).parent.parent / "recipes" / recipe
         for filename in ("recipe.yaml", "recipe.yml"):
             config_path = recipe_dir / filename
-            if config_path.exists():
-                try:
-                    with open(config_path) as f:
-                        cls._recipe_configs[recipe] = yaml.safe_load(f)
-                    return cls._recipe_configs[recipe]
-                except (OSError, yaml.YAMLError):
-                    pass  # Fall back to default behavior
+            if not config_path.exists():
+                continue
+            try:
+                with open(config_path) as f:
+                    cls._recipe_configs[recipe] = yaml.safe_load(f)
+                return cls._recipe_configs[recipe]
+            except (OSError, yaml.YAMLError) as exc:
+                print(
+                    f"[nvflow] WARNING: failed to load {config_path}: "
+                    f"{type(exc).__name__}: {exc} -- workflow ordering for "
+                    f"recipe '{recipe}' will fall back to alphabetical.",
+                    file=sys.stderr,
+                )
 
         cls._recipe_configs[recipe] = None
         return None

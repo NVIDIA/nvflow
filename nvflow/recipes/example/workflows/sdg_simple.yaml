@@ -10,7 +10,7 @@ workflow:
 
 cluster: my_cluster
 
-# Repo is mounted at /workspace on cluster (see cluster_configs/nrt.yaml)
+# Repo is mounted at /workspace on cluster (see cluster_configs/my_cluster.yaml)
 base_data_dir: /workspace/outputs/example/sdg_simple
 
 pipeline_stages:
@@ -26,8 +26,8 @@ stages:
     dependencies: []
     stage_kwargs:
       # Model server configuration
-      model: /hf_models/Qwen/Qwen3-4B-Instruct-2507  # Update with your model path
-      server_type: sglang         # or vllm, trtllm
+      model: /hf_models/Qwen/Qwen3-4B
+      server_type: vllm           # or sglang, trtllm
       server_gpus: 1
       server_nodes: 1
 
@@ -35,5 +35,5 @@ stages:
       num_random_seeds: 1
       num_chunks: 1
 
-      # Slurm configuration (optional overrides)
-      partition: interactive
+      # Slurm configuration
+      # partition is resolved from cluster config (partition / cpu_partition)

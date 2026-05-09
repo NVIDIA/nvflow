@@ -25,13 +25,12 @@ pipeline_stages:
   - gemma-3-4b-it
   - gpt-oss-20b
 
-# Demo uses only SecQUE and FinanceBench (skip finance_agent to save time)
+# Demo uses only SecQUE and FinanceBench
 benchmarks:
   secque:
     seeds: 5
   financebench:
     seeds: 5
-  finance_agent: null
 
 stages:
   prepare_data:
@@ -50,8 +49,8 @@ models:
       ++inference.top_k=20
       ++inference.tokens_to_generate=16384
       ++chat_template_kwargs.enable_thinking=true
-    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"
-    gpus: 1
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3 --tensor-parallel-size 2"
+    gpus: 4
     nodes: 1
 
   gemma-3-4b-it:
@@ -62,8 +61,8 @@ models:
     inference_args: >-
       ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.tokens_to_generate=8192
-    server_args: "--max-model-len 40960 --async-scheduling"
-    gpus: 1
+    server_args: "--max-model-len 40960 --async-scheduling --tensor-parallel-size 2"
+    gpus: 4
     nodes: 1
 
   gpt-oss-20b:
@@ -74,6 +73,6 @@ models:
       ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.tokens_to_generate=32768
       ++chat_template_kwargs.reasoning_effort=high
-    server_args: "--max-model-len 65536 --async-scheduling"
-    gpus: 1
+    server_args: "--max-model-len 65536 --async-scheduling --tensor-parallel-size 4"
+    gpus: 4
     nodes: 1

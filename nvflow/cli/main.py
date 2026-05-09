@@ -40,22 +40,47 @@ Examples:
 
     # Run workflow
     nflow run-all --config nvflow/recipes/finance/workflows/training_sft.yaml
+
+    # GRPO: run a single stage
+    nflow run collect_rollouts --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+
+    # GRPO: run a single stage for one environment
+    nflow run collect_rollouts -c nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
+
+    # GRPO: run a stage for multiple environments
+    nflow run training -c nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e mcqa -e equivalence_llm_judge
+
+    # GRPO: run all stages
+    nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
 """
 
-import sys
-from collections import defaultdict
-from pathlib import Path
-from typing import Annotated
+import os  # noqa: E402
 
-import typer
-from omegaconf import OmegaConf
-from rich import print
-from rich.table import Table
+# Limit BLAS/OpenMP thread pools to 1 on the login node. The nflow CLI only
+# orchestrates Slurm jobs -- it never does BLAS compute. Without this cap,
+# importing scipy/numpy spawns nproc threads (~96-188 on shared login nodes),
+# causing a kernel futex storm that hangs the process for 2-30 minutes.
+# Uses setdefault so users can override (e.g., OMP_NUM_THREADS=4 nflow ...).
+# Slurm jobs are unaffected -- they run inside containers with their own env.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
+import sys  # noqa: E402
+from collections import defaultdict  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Annotated  # noqa: E402
+
+import typer  # noqa: E402
+import yaml  # noqa: E402
+from omegaconf import OmegaConf  # noqa: E402
+from omegaconf.errors import OmegaConfBaseException  # noqa: E402
+from rich import print  # noqa: E402
+from rich.table import Table  # noqa: E402
 
 # Auto-discover all recipes and stages (must be after core imports)
-import nvflow.recipes.finance  # noqa: E402, F401 - import for side-effect
-from nvflow import __version__
-from nvflow.core import BaseStage, StageRegistry, WorkflowRunner
+import nvflow.recipes  # noqa: E402, F401 - triggers recipe auto-discovery
+from nvflow import __version__  # noqa: E402
+from nvflow.core import BaseStage, StageRegistry, WorkflowRunner  # noqa: E402
 
 app = typer.Typer(
     name="nflow",
@@ -64,61 +89,73 @@ app = typer.Typer(
 )
 
 
-def _get_stage_order(recipe_name: str, workflow_name: str) -> list[str] | None:
-    """Get pipeline_stages order from workflow config file.
-
-    Args:
-        recipe_name: Recipe name (e.g., "finance")
-        workflow_name: Workflow name (e.g., "training_sft")
+def _get_stage_order(
+    recipe_name: str, workflow_name: str
+) -> tuple[list[str] | None, list[str] | None]:
+    """Get pipeline_stages order and stages config keys from workflow config.
 
     Returns:
-        List of stage names in pipeline order, or None if not found
+        (pipeline_order, stages_config_keys) -- either may be None.
+        *pipeline_order* is the active ``pipeline_stages`` list.
+        *stages_config_keys* is the key order from the ``stages:``
+        section (preserves YAML insertion order), used as a secondary
+        hint for ordering optional stages not in pipeline_stages.
     """
-    try:
-        # Look for workflow config file
-        workflow_dir = Path(__file__).parent.parent / "recipes" / recipe_name / "workflows"
-        if not workflow_dir.exists():
-            return None
+    workflow_dir = Path(__file__).parent.parent / "recipes" / recipe_name / "workflows"
+    if not workflow_dir.exists():
+        return None, None
 
-        # Try to find matching workflow config (search subdirectories too)
-        for config_file in workflow_dir.glob("**/*.yaml"):
-            try:
-                cfg = OmegaConf.load(config_file)
-                cfg_workflow_name = cfg.get("workflow", {}).get("name")
-                if cfg_workflow_name == workflow_name:
-                    return cfg.get("pipeline_stages", [])
-            except Exception:
-                continue
-        return None
-    except Exception:
-        return None
+    parse_failures: list[tuple[Path, BaseException]] = []
+    for config_file in workflow_dir.glob("**/*.yaml"):
+        try:
+            cfg = OmegaConf.load(config_file)
+        except (OmegaConfBaseException, yaml.YAMLError, OSError) as exc:
+            parse_failures.append((config_file, exc))
+            continue
+        if cfg.get("workflow", {}).get("name") == workflow_name:
+            pipeline = cfg.get("pipeline_stages", [])
+            stages_keys = list(cfg.get("stages", {}).keys())
+            return pipeline, stages_keys or None
+
+    if parse_failures:
+        print(
+            f"[nvflow] WARNING: failed to parse {len(parse_failures)} workflow "
+            f"YAML(s) under {workflow_dir}; stage order falling back to "
+            "alphabetical:",
+            file=sys.stderr,
+        )
+        for path, err in parse_failures:
+            print(
+                f"  - {path}: {type(err).__name__}: {err}",
+                file=sys.stderr,
+            )
+    return None, None
 
 
-def _order_stages(stages: list[str], pipeline_order: list[str] | None) -> list[str]:
-    """Order stages based on pipeline config, fallback to alphabetical.
+def _order_stages(
+    stages: list[str],
+    pipeline_order: list[str] | None,
+    stages_config_keys: list[str] | None = None,
+) -> list[str]:
+    """Order stages based on config, fallback to alphabetical.
 
-    Args:
-        stages: List of stage names to order
-        pipeline_order: Desired order from config, or None
-
-    Returns:
-        Ordered list of stage names
+    Uses *stages_config_keys* (the ``stages:`` section key order) when
+    available -- this includes optional stages like ``compute_rewards``
+    in their logical position even when they are commented out of
+    ``pipeline_stages``.  Falls back to *pipeline_order*, then
+    alphabetical.
     """
-    if not pipeline_order:
+    order_source = stages_config_keys or pipeline_order
+    if not order_source:
         return sorted(stages)
 
-    # Maintain pipeline order, append remaining stages alphabetically
     ordered = []
     remaining = set(stages)
-
-    for stage in pipeline_order:
+    for stage in order_source:
         if stage in remaining:
             ordered.append(stage)
             remaining.remove(stage)
-
-    # Add any stages not in config (e.g., newly registered)
     ordered.extend(sorted(remaining))
-
     return ordered
 
 
@@ -222,8 +259,8 @@ def list_stages(
                 print(f"  [cyan]{workflow_name}:[/cyan]")
 
                 stages = by_recipe[recipe_name][workflow_name]
-                pipeline_order = _get_stage_order(recipe_name, workflow_name)
-                ordered_stages = _order_stages(stages, pipeline_order)
+                pipeline_order, stages_config_keys = _get_stage_order(recipe_name, workflow_name)
+                ordered_stages = _order_stages(stages, pipeline_order, stages_config_keys)
 
                 for stage_name in ordered_stages:
                     print(f"    • {stage_name}")
@@ -244,12 +281,16 @@ def run(
     config: Annotated[
         str, typer.Option("--config", "-c", help="Path to workflow configuration file")
     ],
+    environment: Annotated[
+        list[str] | None,
+        typer.Option("--environment", "-e", help="Run for specific environment(s) only"),
+    ] = None,
 ):
     """Run one or more specific stages."""
 
     try:
         runner = WorkflowRunner(config)
-        runner.run(stages=stages)
+        runner.run(stages=stages, environment=environment)
     except Exception as e:
         print(f"[red]Error:[/red] {e}")
         sys.exit(1)
@@ -258,12 +299,16 @@ def run(
 @app.command(name="run-all")
 def run_all(
     config: str = typer.Option(..., "--config", "-c", help="Path to workflow configuration file"),
+    environment: Annotated[
+        list[str] | None,
+        typer.Option("--environment", "-e", help="Run for specific environment(s) only"),
+    ] = None,
 ):
     """Run all stages defined in the workflow config."""
 
     try:
         runner = WorkflowRunner(config)
-        runner.run()  # No stages argument = run all
+        runner.run(environment=environment)
     except Exception as e:
         print(f"[red]Error:[/red] {e}")
         sys.exit(1)

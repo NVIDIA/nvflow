@@ -41,16 +41,26 @@ from typing import Any
 from nvflow.core import console
 
 from .helpers import (
+    CONTAINER_CODE_DIR,
+    SERVER_CONTAINER,
     SHELL_FIND_FREE_PORT,
     SHELL_WAIT_FOR_SERVER,
     build_config_paths_str,
     build_judge_ng_run_overrides,
+    check_launcher_cwd,
     compute_num_gpus,
     determine_judge_mode,
+    get_env_from_environments,
     log_judge_details,
     resolve_host_path,
 )
-from .rollout import _build_aggregate_cmd, _build_filter_cmd, _make_bash_script, _make_server_script
+from .rollout import (
+    _build_port_read_preamble,
+    build_aggregate_cmd,
+    build_filter_cmd,
+    make_bash_script,
+    make_server_script,
+)
 
 # ---------------------------------------------------------------------------
 # Inline command builders
@@ -71,7 +81,14 @@ def _build_verify_cmd(
     environment_name: str,
     judge_ng_run_overrides: str,
 ) -> str:
-    return (
+    """Build the re-judge (verify) bash script.
+
+    Generated script structure:
+      1. Start NeMo-Gym servers via ``ng_run`` (judge only, no policy)
+      2. Re-judge rollouts via ``verify_worker``
+    """
+    # -- Shell variables & shared functions --------------------------------
+    variables = (
         "set -e\n"
         "\n"
         f'OUTPUT_DIR="{output_dir}"\n'
@@ -83,6 +100,9 @@ def _build_verify_cmd(
         f'NUM_PARALLEL="{num_parallel}"\n'
         f'JOB_LABEL="{job_label}"\n'
         f'ENVIRONMENT_NAME="{environment_name}"\n'
+    )
+
+    setup = (
         "\n"
         'mkdir -p "$OUTPUT_DIR/logs" "$OUTPUT_DIR/rejudge"\n'
         "\n" + SHELL_FIND_FREE_PORT + "\n"
@@ -97,6 +117,9 @@ def _build_verify_cmd(
         "}\n"
         "trap cleanup EXIT\n"
         "\n" + SHELL_WAIT_FOR_SERVER + "\n"
+    )
+
+    banner = (
         'echo "============================================================"\n'
         'echo "Compute Rewards (re-judge)  [$JOB_LABEL]"\n'
         'echo "============================================================"\n'
@@ -105,6 +128,10 @@ def _build_verify_cmd(
         f'echo "Judge mode:   {judge_mode}"\n'
         'echo "Environment:  $ENVIRONMENT_NAME"\n'
         'echo "============================================================"\n'
+    )
+
+    # -- Step 1: Start NeMo-Gym servers (judge only) ----------------------
+    step1_ng_run = (
         "\n"
         'cd "$GYM_PATH"\n'
         "source .venv/bin/activate\n"
@@ -122,21 +149,31 @@ def _build_verify_cmd(
         "NG_RUN_PID=$!\n"
         "\n"
         'wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" $NG_RUN_PID 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log"\n'
+    )
+
+    # -- Step 2: Re-judge rollouts ----------------------------------------
+    step2_rejudge = (
         "\n"
         'echo ""\n'
         'echo "[Step 2/2] Re-judging rollouts ..."\n'
-        "PYTHONPATH=/workspace python3 -m nvflow.lib.rl.verify_worker \\\n"
+        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.verify_worker \\\n"
         '    "$INPUT_FILE" \\\n'
         '    "$OUTPUT_FILE-async" \\\n'
         '    "127.0.0.1" \\\n'
         '    "$HEAD_SERVER_PORT" \\\n'
         '    "$ENVIRONMENT_NAME" \\\n'
         '    "$NUM_PARALLEL"\n'
+    )
+
+    # -- Finalize: rename output, mark done -------------------------------
+    finalize = (
         "\n"
         'mv "$OUTPUT_FILE-async" "$OUTPUT_FILE"\n'
         'touch "$DONE_FILE"\n'
         'echo "Done [$JOB_LABEL]. Cleanup via trap."\n'
     )
+
+    return variables + setup + banner + step1_ng_run + step2_rejudge + finalize
 
 
 def _build_analysis_cmd(
@@ -158,7 +195,7 @@ def _build_analysis_cmd(
     for seed_label, rewards_file in analysis_entries:
         parts.append(
             f'echo "Analyzing {seed_label} ..."\n'
-            f"PYTHONPATH=/workspace python3 -m {analyze_module} \\\n"
+            f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {analyze_module} \\\n"
             f'    "{rewards_file}" \\\n'
             f'    "{rejudge_dir}/analysis_{seed_label}" \\\n'
             '    "REWARD RE-COMPUTATION ANALYSIS"\n'
@@ -208,6 +245,8 @@ def verify(
         filter_module: Python module for training data filtering
             (invoked as ``python3 -m <module>``).
     """
+    check_launcher_cwd()
+
     import nemo_skills.pipeline.utils as pipeline_utils
     from nemo_skills.pipeline.utils.declarative import (
         Command,
@@ -219,7 +258,8 @@ def verify(
     output_dir = config["output_dir"]
     gym_path = config["gym_path"]
     client_container = config["container"]
-    server_container = "vllm"
+    post_container = config.get("post_container", client_container)
+    server_container = SERVER_CONTAINER
     installation_command = config.get("installation_command")
 
     rcfg = config["rejudge"]
@@ -227,11 +267,15 @@ def verify(
     num_parallel = rcfg.get("num_samples_in_parallel", 8)
     num_gpus = compute_num_gpus(rcfg, has_policy=False)
     rerun_done = rcfg.get("rerun_done", False)
-    environment_name = rcfg["environment_name"]
+
+    rcfg_with_env = {**rcfg, "environments": config["environments"]}
+    environment_name, env_inner_name, _ = get_env_from_environments(rcfg_with_env)
+    rcfg_with_env["environment_name"] = environment_name
+    rcfg_with_env["environment_inner_name"] = env_inner_name
 
     judge_mode = determine_judge_mode(rcfg, allow_policy_as_judge=False)
-    config_paths_str = build_config_paths_str(rcfg)
-    judge_ng_run_overrides = build_judge_ng_run_overrides(rcfg, judge_mode)
+    config_paths_str = build_config_paths_str(rcfg_with_env)
+    judge_ng_run_overrides = build_judge_ng_run_overrides(rcfg_with_env, judge_mode)
 
     cluster_config = pipeline_utils.get_cluster_config(cluster)
 
@@ -276,6 +320,7 @@ def verify(
     # -- Build Pipeline jobs ---------------------------------------------
     jcfg = rcfg.get("judge_vllm") or {}
     need_judge_server = judge_mode == "local_vllm" and jcfg.get("model_path")
+    job_log_dir = f"{output_dir}/logs"
 
     jobs: list[dict] = []
     verify_job_specs: list[dict] = []
@@ -284,15 +329,25 @@ def verify(
         seed_label = rollout_file.stem.replace("output-", "")
         job_label = f"rejudge_{seed_label}"
 
-        judge_script = _make_server_script(jcfg, cluster_config) if need_judge_server else None
+        judge_script = (
+            make_server_script(
+                jcfg, cluster_config, role="judge", log_dir=job_log_dir, job_label=job_label
+            )
+            if need_judge_server
+            else None
+        )
 
         if judge_script is not None:
-            judge_vllm_url = f"http://127.0.0.1:{judge_script.port}/v1"
+            judge_vllm_url = "http://127.0.0.1:$JUDGE_PORT/v1"
             job_judge_overrides = build_judge_ng_run_overrides(
-                rcfg, judge_mode, judge_url_var=judge_vllm_url
+                rcfg_with_env, judge_mode, judge_url_var=judge_vllm_url
             )
         else:
             job_judge_overrides = judge_ng_run_overrides
+
+        port_preamble = _build_port_read_preamble(
+            job_log_dir, job_label, has_judge=judge_script is not None
+        )
 
         client_cmd_str = _build_verify_cmd(
             output_dir=output_dir,
@@ -307,6 +362,8 @@ def verify(
             environment_name=environment_name,
             judge_ng_run_overrides=job_judge_overrides,
         )
+        if port_preamble:
+            client_cmd_str = port_preamble + client_cmd_str
 
         components: list[Command] = []
         max_nodes = 1
@@ -317,7 +374,7 @@ def verify(
             )
             max_nodes = max(max_nodes, judge_script.num_nodes)
 
-        client_script = _make_bash_script(
+        client_script = make_bash_script(
             client_cmd_str,
             installation_command=installation_command,
         )
@@ -336,7 +393,7 @@ def verify(
         job_spec = {
             "name": f"{expname}-{seed_label}",
             "group": cmd_group,
-            "dependencies": run_after if run_after else None,
+            "dependencies": run_after or None,
         }
         jobs.append(job_spec)
         verify_job_specs.append(job_spec)
@@ -355,8 +412,8 @@ def verify(
         )
 
         analysis_cmd = Command(
-            script=_make_bash_script(analysis_cmd_str),
-            container=client_container,
+            script=make_bash_script(analysis_cmd_str),
+            container=post_container,
             name="analysis",
         )
         analysis_group = CommandGroup(
@@ -378,14 +435,14 @@ def verify(
     agg_job_spec: dict | None = None
 
     if run_aggregate:
-        agg_cmd_str = _build_aggregate_cmd(
+        agg_cmd_str = build_aggregate_cmd(
             rollout_dir=rejudge_dir,
             aggregate_module=aggregate_module,
         )
 
         agg_cmd = Command(
-            script=_make_bash_script(agg_cmd_str),
-            container=client_container,
+            script=make_bash_script(agg_cmd_str),
+            container=post_container,
             name="aggregate",
         )
         agg_group = CommandGroup(
@@ -403,19 +460,18 @@ def verify(
 
     # -- Filter job (CPU, depends on aggregate) --------------------------
     if filter_module and filter_cfg:
-        filter_cmd_str = _build_filter_cmd(
+        filter_cmd_str = build_filter_cmd(
             output_dir=output_dir,
             difficulty_dir=rejudge_dir,
             filter_module=filter_module,
             train_data=filter_cfg["input_data"],
             validation_data=filter_cfg.get("validation_data", ""),
-            min_pass_rate=filter_cfg.get("min_pass_rate", 0.0),
-            max_pass_rate=filter_cfg.get("max_pass_rate", 1.0),
+            min_reward_std=filter_cfg.get("min_reward_std", 1e-6),
         )
 
         filter_cmd = Command(
-            script=_make_bash_script(filter_cmd_str),
-            container=client_container,
+            script=make_bash_script(filter_cmd_str),
+            container=post_container,
             name="filter",
         )
         filter_group = CommandGroup(

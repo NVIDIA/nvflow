@@ -42,31 +42,69 @@ class CollectRolloutsStage(BaseStage):
         expname: str,
         run_after: list[str] | None = None,
     ) -> None:
+        from nvflow.lib.rl.helpers import resolve_environments
         from nvflow.lib.rl.rollout import rollout
 
-        rollout(
-            config,
-            cluster,
-            expname,
-            run_after,
-            analyze_module=f"{_UTILS}.analyze_rollouts",
-            enrich_module=f"{_UTILS}.enrich_rollouts",
-            aggregate_module=f"{_UTILS}.aggregate_seeds",
-            filter_module=f"{_UTILS}.filter_training_data",
-        )
+        environments = resolve_environments(config)
+        base_output_dir = config["output_dir"]
+        prepare_data_dir = config["prepare_data_dir"]
+
+        for env_name, env_cfg in environments.items():
+            env_output_dir = f"{base_output_dir}/{env_name}"
+            env_prepare_dir = f"{prepare_data_dir}/{env_name}"
+
+            env_config = {
+                **config,
+                "output_dir": env_output_dir,
+                "environments": {env_name: env_cfg},
+            }
+            env_judge_vllm = env_cfg.get("judge_vllm") or {}
+            env_policy_vllm = env_cfg.get("policy_vllm") or {}
+            env_rcp = env_cfg.get("responses_create_params") or {}
+
+            base_rollout = config.get("rollout", {})
+            merged_policy_vllm = {**base_rollout.get("policy_vllm", {}), **env_policy_vllm}
+            merged_rcp = {**base_rollout.get("responses_create_params", {}), **env_rcp}
+
+            env_config["rollout"] = {
+                **base_rollout,
+                "policy_vllm": merged_policy_vllm,
+                "responses_create_params": merged_rcp,
+                "input_data": f"{env_prepare_dir}/train.jsonl",
+                "prepare_data_dir": env_prepare_dir,
+                "judge_vllm": env_judge_vllm,
+            }
+            env_config["filter"] = {
+                **config.get("filter", {}),
+                "input_data": f"{env_prepare_dir}/train.jsonl",
+                # No pre-rollout validation.jsonl -- prepare_data now emits a
+                # single train.jsonl (the post-rollout train_validation_split
+                # stage produces the final val set).  filter_training_data
+                # treats validation_path as optional.
+            }
+
+            rollout(
+                env_config,
+                cluster,
+                f"{expname}-{env_name}",
+                run_after,
+                analyze_module=f"{_UTILS}.analyze_rollouts",
+                enrich_module=f"{_UTILS}.enrich_rollouts",
+                aggregate_module=f"{_UTILS}.aggregate_seeds",
+                filter_module=f"{_UTILS}.filter_training_data",
+            )
 
     def validate_config(self, config: dict[str, Any]) -> None:
         from nvflow.lib.rl.helpers import determine_judge_mode, validate_judge_config
 
-        for field in ("output_dir", "gym_path", "container"):
+        for field in ("output_dir", "gym_path", "container", "prepare_data_dir"):
             if not config.get(field):
                 raise ValueError(f"'{field}' is required in collect_rollouts config")
 
-        rcfg = config.get("rollout") or {}
-        for field in ("input_data", "agent_name", "environment_name", "nemo_gym_config_paths"):
-            if not rcfg.get(field):
-                raise ValueError(f"'rollout.{field}' is required in collect_rollouts config")
+        if not config.get("environments"):
+            raise ValueError("'environments' dict is required in collect_rollouts config")
 
+        rcfg = config.get("rollout") or {}
         pcfg = rcfg.get("policy_vllm") or {}
         if not pcfg.get("model_path") and not pcfg.get("base_url"):
             raise ValueError(
@@ -74,5 +112,7 @@ class CollectRolloutsStage(BaseStage):
                 "'rollout.policy_vllm.base_url' (external server) is required"
             )
 
-        determine_judge_mode(rcfg)
-        validate_judge_config(rcfg)
+        for _env_name, env_cfg in config["environments"].items():
+            env_judge = {**rcfg, "judge_vllm": env_cfg.get("judge_vllm") or {}}
+            determine_judge_mode(env_judge)
+            validate_judge_config(env_judge)

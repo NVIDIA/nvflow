@@ -15,14 +15,16 @@
 """RL infrastructure library -- rollout collection and reward computation.
 
 Submodules:
-    rollout       -- Slurm pipeline for collecting rollouts
-    verify        -- Slurm pipeline for re-judging rollouts
-    helpers       -- shared utilities (vLLM config, judge config, shell templates)
-    resume_filter -- standalone worker: fine-grained resume filtering
-    verify_worker -- standalone worker: re-judges rollouts via NeMo-Gym ServerClient
+    rollout        -- Slurm pipeline for collecting rollouts
+    verify         -- Slurm pipeline for re-judging rollouts
+    helpers        -- shared utilities (vLLM config, judge config, shell templates)
+    create_overlay -- standalone worker: creates symlinked model overlay dirs
+    resume_filter  -- standalone worker: fine-grained resume filtering
+    verify_worker  -- standalone worker: re-judges rollouts via NeMo-Gym ServerClient
 
-Worker scripts (resume_filter, verify_worker) run inside the Slurm
-container's Gym venv.  This __init__.py is intentionally kept
-import-free so that ``python -m nvflow.lib.rl.<worker>`` does not
-trigger the nemo_skills dependency chain.
+Worker scripts (create_overlay, resume_filter, verify_worker) run
+inside the Slurm container with ``PYTHONPATH=/workspace``.  This
+__init__.py is intentionally kept import-free so that
+``python -m nvflow.lib.rl.<worker>`` does not trigger the nemo_skills
+dependency chain.
 """

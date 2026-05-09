@@ -44,8 +44,8 @@ The NVFlow stage handles cluster integration and output management while the bun
 
 ## Configuration Files
 
-- **Demo:** `configs/demo.yaml` - 7 companies (NVDA, AAPL, GOOG, MSFT, CSCO, META, IBM)
-- **Production:** `configs/sp500.yaml` - 500+ S&P 500 companies
+- **Demo:** `nvflow/recipes/finance/configs/demo.yaml` - 7 companies (NVDA, AAPL, GOOG, MSFT, CSCO, META, IBM)
+- **Production:** `nvflow/recipes/finance/configs/sp500.yaml` - 500+ S&P 500 companies
 
 ## Workflow Overview
 
@@ -152,7 +152,7 @@ ls outputs/finance/demo/workflow-2-download-sec/step-0-download/data/ | wc -l
 # Demo: 7, Production: 500+
 
 # Check metadata
-python -c "import pandas as pd; df = pd.read_parquet('outputs/finance/demo/workflow-2-download-sec/step-0-download/sec_metadata.parquet'); print(f'Total filings: {len(df[df.file_type ==\"primary_document\"])}')"
+uv run python -c "import pandas as pd; df = pd.read_parquet('outputs/finance/demo/workflow-2-download-sec/step-0-download/sec_metadata.parquet'); print(f'Total filings: {len(df[df.file_type ==\"primary_document\"])}')"
 
 # Check storage used
 du -sh outputs/finance/demo/workflow-2-download-sec/step-0-download/

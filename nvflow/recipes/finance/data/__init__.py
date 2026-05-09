@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Auto-discover data stages."""
+"""Auto-discover data modules."""
 
-import importlib
 from pathlib import Path
 
-_current_dir = Path(__file__).parent
-for file in _current_dir.glob("*.py"):
-    if file.stem != "__init__":
-        importlib.import_module(f".{file.stem}", package=__package__)
+from nvflow.core.discovery import import_stage_modules
+
+import_stage_modules(__package__, Path(__file__).parent)

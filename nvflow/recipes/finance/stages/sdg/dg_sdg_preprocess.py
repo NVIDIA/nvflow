@@ -75,10 +75,10 @@ class DGSDGPreprocessStage(BaseStage):
         console.detail("Seed", str(seed))
         console.blank()
 
-        preprocess_script = "/workspace/nvflow/recipes/finance/utils/sdg/dg_sdg_data_preprocess.py"
+        preprocess_module = "nvflow.recipes.finance.utils.sdg.dg_sdg_data_preprocess"
 
         full_cmd = (
-            f"python {preprocess_script} "
+            f"python3 -m {preprocess_module} "
             f"--input_dir {input_dir} "
             f"--output_dir {output_dir} "
             f"--distribution_dir {distribution_dir} "
@@ -91,15 +91,11 @@ class DGSDGPreprocessStage(BaseStage):
 
         console.status("Running SEC data preprocessing")
 
-        preprocess_kwargs = config.get("preprocess_kwargs", {})
-        partition = preprocess_kwargs.get("partition", "cpu")
-
         run_cmd(
             ctx=wrap_arguments(full_cmd),
             cluster=cluster,
             expname=expname,
             run_after=run_after,
-            partition=partition,
         )
 
         console.success("SEC data preprocessing job submitted")

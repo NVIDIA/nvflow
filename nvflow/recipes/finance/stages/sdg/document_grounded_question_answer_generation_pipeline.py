@@ -17,6 +17,7 @@
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.vllm_compat import inject_server_entrypoint
 
 
 @StageRegistry.register(
@@ -52,7 +53,6 @@ class DocumentGroundedQuestionAnswerGenerationPipelineStage(BaseStage):
         output_dir = config["output_dir"]
 
         # Question pipeline config
-        question_preprocess_kwargs = config.get("question_preprocess_kwargs", {})
         question_generation_kwargs = config.get("question_generation_kwargs", {})
         question_verify_kwargs = config.get("question_verify_kwargs", {})
 
@@ -73,7 +73,7 @@ class DocumentGroundedQuestionAnswerGenerationPipelineStage(BaseStage):
         a_generate_input_file = f"{answer_output_dir}/answer_input.jsonl"
         a_generate_output_dir = f"{answer_output_dir}/generated"
 
-        script_path = "/workspace/nvflow/recipes/finance/utils/sdg/document_grounded_preprocess.py"
+        module = "nvflow.recipes.finance.utils.sdg.document_grounded_preprocess"
 
         # =====================================================================
         # Step 1: Construct question generate input
@@ -82,16 +82,13 @@ class DocumentGroundedQuestionAnswerGenerationPipelineStage(BaseStage):
         console.detail("Input folder", input_folder)
         console.detail("Output file", q_generate_input_file)
 
-        partition = question_preprocess_kwargs.get("partition", "cpu")
-
-        cmd = f"python {script_path} construct_question_generate_input --input_folder {input_folder} --output_file {q_generate_input_file}"
+        cmd = f"python3 -m {module} construct_question_generate_input --input_folder {input_folder} --output_file {q_generate_input_file}"
 
         run_cmd(
             ctx=wrap_arguments(cmd),
             cluster=cluster,
             expname=f"{expname}-step1-q-prep",
             run_after=run_after,
-            partition=partition,
         )
         console.success("Step 1 job submitted")
 
@@ -101,6 +98,9 @@ class DocumentGroundedQuestionAnswerGenerationPipelineStage(BaseStage):
         console.status("Step 2/6: Generating questions")
 
         q_gen_args = question_generation_kwargs.get("args", {}).copy()
+        q_gen_args = inject_server_entrypoint(
+            q_gen_args, q_gen_args.get("model", "")
+        )  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
         q_gen_ctx_args = question_generation_kwargs.get("ctx_args", "")
 
         # Handle skip_filled
@@ -125,14 +125,13 @@ class DocumentGroundedQuestionAnswerGenerationPipelineStage(BaseStage):
         # =====================================================================
         console.status("Step 3/6: Preparing data for question verification")
 
-        cmd = f"python {script_path} construct_question_verify_input --input_dir {q_generate_output_dir} --output_file {q_verify_input_file}"
+        cmd = f"python3 -m {module} construct_question_verify_input --input_dir {q_generate_output_dir} --output_file {q_verify_input_file}"
 
         run_cmd(
             ctx=wrap_arguments(cmd),
             cluster=cluster,
             expname=f"{expname}-step3-q-verify-prep",
             run_after=[f"{expname}-step2-q-gen"],
-            partition=partition,
         )
         console.success("Step 3 job submitted")
 
@@ -142,6 +141,9 @@ class DocumentGroundedQuestionAnswerGenerationPipelineStage(BaseStage):
         console.status("Step 4/6: Verifying questions")
 
         verify_args = question_verify_kwargs.get("args", {}).copy()
+        verify_args = inject_server_entrypoint(
+            verify_args, verify_args.get("model", "")
+        )  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
         verify_ctx_args = question_verify_kwargs.get("ctx_args", "")
 
         # Handle skip_filled
@@ -171,18 +173,16 @@ class DocumentGroundedQuestionAnswerGenerationPipelineStage(BaseStage):
         console.detail("Input dir", answer_input_dir)
         console.detail("Output file", a_generate_input_file)
 
-        partition = answer_preprocess_kwargs.get("partition", "cpu")
         threshold = answer_preprocess_kwargs.get("threshold", 0.5)
         sbatch_kwargs = answer_preprocess_kwargs.get("sbatch_kwargs", "")
 
-        cmd = f"python {script_path} construct_answer_generate_input --input_dir {answer_input_dir} --output_file {a_generate_input_file} --threshold {threshold}"
+        cmd = f"python3 -m {module} construct_answer_generate_input --input_dir {answer_input_dir} --output_file {a_generate_input_file} --threshold {threshold}"
 
         run_cmd(
             ctx=wrap_arguments(cmd),
             cluster=cluster,
             expname=f"{expname}-step5-a-prep",
             run_after=[f"{expname}-step4-q-verify"],
-            partition=partition,
             sbatch_kwargs=sbatch_kwargs,
         )
         console.success("Step 5 job submitted")
@@ -194,6 +194,9 @@ class DocumentGroundedQuestionAnswerGenerationPipelineStage(BaseStage):
         console.status("Step 6/6: Generating answers")
 
         a_gen_args = answer_generation_kwargs.get("args", {}).copy()
+        a_gen_args = inject_server_entrypoint(
+            a_gen_args, a_gen_args.get("model", "")
+        )  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
         a_gen_ctx_args = answer_generation_kwargs.get("ctx_args", "")
 
         # Handle skip_filled

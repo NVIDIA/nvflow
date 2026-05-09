@@ -17,6 +17,7 @@
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.vllm_compat import inject_server_entrypoint
 
 # Run with uv run nflow run generate_answers --config=nvflow/recipes/finance/workflows/sdg/template-based-sdg.yaml
 
@@ -50,6 +51,10 @@ class GenerateAnswersStage(BaseStage):
         console.detail("Inline args", str(inline_args))
         console.blank()
 
+        stage_kwargs = inject_server_entrypoint(  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
+            config.get("stage_kwargs", {}),
+            config.get("stage_kwargs", {}).get("model", ""),
+        )
         ctx = wrap_arguments(f"++prompt_config={prompt_config} {inline_args}")
         generate(
             ctx=ctx,
@@ -58,7 +63,7 @@ class GenerateAnswersStage(BaseStage):
             output_dir=output_dir,
             expname=expname,
             run_after=run_after,
-            **config.get("stage_kwargs", {}),
+            **stage_kwargs,
             rerun_done=True,
         )
 

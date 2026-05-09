@@ -17,6 +17,7 @@
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.vllm_compat import inject_server_entrypoint
 
 # Run with uv run nflow run genselect_answers --config=nvflow/recipes/finance/workflows/sdg/template-based-sdg.yaml
 
@@ -63,7 +64,7 @@ class GenselectAnswersStage(BaseStage):
         console.status("Step 1: Preparing genselect data")
         run_cmd(
             ctx=wrap_arguments(
-                f"python /workspace/nvflow/recipes/finance/utils/sdg/prepare_genselect_data.py --input_dir={input_dir} --output_file={prepped_file}"
+                f"python3 -m nvflow.recipes.finance.utils.sdg.prepare_genselect_data --input_dir={input_dir} --output_file={prepped_file}"
             ),
             cluster=cluster,
             expname=f"{expname}-prep",
@@ -71,10 +72,14 @@ class GenselectAnswersStage(BaseStage):
             run_after=run_after,
         )
 
-        postprocess_cmd = f"python /workspace/nvflow/recipes/finance/utils/sdg/postprocess_genselect.py --input_dir={output_dir} --output_file={output_file}"
+        postprocess_cmd = f"python3 -m nvflow.recipes.finance.utils.sdg.postprocess_genselect --input_dir={output_dir} --output_file={output_file}"
 
         console.status("Generating answers with genselect")
 
+        stage_kwargs = inject_server_entrypoint(  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
+            config.get("stage_kwargs", {}),
+            config.get("stage_kwargs", {}).get("model", ""),
+        )
         ctx = wrap_arguments(f"++prompt_config={prompt_config} {inline_args}")
         generate(
             ctx=ctx,
@@ -83,7 +88,7 @@ class GenselectAnswersStage(BaseStage):
             output_dir=output_dir,
             expname=expname,
             run_after=[f"{expname}-prep"],
-            **config.get("stage_kwargs", {}),
+            **stage_kwargs,
             rerun_done=True,
             postprocess_cmd=postprocess_cmd,
         )

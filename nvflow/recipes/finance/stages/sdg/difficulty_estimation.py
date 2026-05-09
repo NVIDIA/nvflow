@@ -17,6 +17,7 @@
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.vllm_compat import inject_server_entrypoint
 
 
 @StageRegistry.register(
@@ -78,24 +79,22 @@ class DifficultyEstimationStage(BaseStage):
         judge_input_dir = f"{work_dir}/judge_inputs"
         judge_output_dir = f"{work_dir}/judged"
 
-        script_path = "/workspace/nvflow/recipes/finance/utils/sdg/difficulty_estimation.py"
+        module = "nvflow.recipes.finance.utils.sdg.difficulty_estimation"
 
         # =====================================================================
         # Step 1: Prepare input (keep reference_answer for later comparison)
         # =====================================================================
         console.status("Step 1/4: Preparing input for small model")
 
-        prep_cmd = f"python {script_path} prepare_input --input_file {input_file} --output_file {prep_file}"
-
-        preprocess_kwargs = config.get("preprocess_kwargs", {})
-        partition = preprocess_kwargs.get("partition", "cpu")
+        prep_cmd = (
+            f"python3 -m {module} prepare_input --input_file {input_file} --output_file {prep_file}"
+        )
 
         run_cmd(
             ctx=wrap_arguments(prep_cmd),
             cluster=cluster,
             expname=f"{expname}-prep",
             run_after=run_after,
-            partition=partition,
         )
         console.success("Step 1 job submitted")
 
@@ -105,6 +104,9 @@ class DifficultyEstimationStage(BaseStage):
         console.status(f"Step 2/4: Generating answers with small model ({num_seeds} seeds)")
 
         answer_args = answer_model_kwargs.get("args", {}).copy()
+        answer_args = inject_server_entrypoint(
+            answer_args, answer_args.get("model", "")
+        )  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
         answer_ctx_args = answer_model_kwargs.get("ctx_args", "")
 
         if answer_prompt:
@@ -130,14 +132,13 @@ class DifficultyEstimationStage(BaseStage):
         console.status("Step 3/4: Preparing input for judge model")
 
         max_answer_chars = config.get("max_answer_chars", 20000)
-        judge_prep_cmd = f"python {script_path} prepare_judge --input_dir {answer_dir} --output_dir {judge_input_dir} --max_answer_chars {max_answer_chars}"
+        judge_prep_cmd = f"python3 -m {module} prepare_judge --input_dir {answer_dir} --output_dir {judge_input_dir} --max_answer_chars {max_answer_chars}"
 
         run_cmd(
             ctx=wrap_arguments(judge_prep_cmd),
             cluster=cluster,
             expname=f"{expname}-judge-prep",
             run_after=[f"{expname}-answer"],
-            partition=partition,
         )
         console.success("Step 3 job submitted")
 
@@ -147,6 +148,9 @@ class DifficultyEstimationStage(BaseStage):
         console.status(f"Step 4/5: Judging answers ({num_seeds} separate jobs)")
 
         judge_args = judge_model_kwargs.get("args", {}).copy()
+        judge_args = inject_server_entrypoint(
+            judge_args, judge_args.get("model", "")
+        )  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
         judge_ctx_args = judge_model_kwargs.get("ctx_args", "")
 
         if judge_prompt:
@@ -181,14 +185,13 @@ class DifficultyEstimationStage(BaseStage):
         # Wait for all judge jobs to complete
         judge_job_names = [f"{expname}-judge-rs{i}" for i in range(num_seeds)]
 
-        aggregate_cmd = f"python {script_path} aggregate --input_dir {judge_output_dir} --output_file {output_file} --num_seeds {num_seeds}"
+        aggregate_cmd = f"python3 -m {module} aggregate --input_dir {judge_output_dir} --output_file {output_file} --num_seeds {num_seeds}"
 
         run_cmd(
             ctx=wrap_arguments(aggregate_cmd),
             cluster=cluster,
             expname=expname,  # Use base expname for downstream dependencies
             run_after=judge_job_names,
-            partition=partition,
         )
         console.success("Step 5 job submitted")
 

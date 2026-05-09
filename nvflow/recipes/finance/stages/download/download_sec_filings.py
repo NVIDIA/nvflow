@@ -24,6 +24,7 @@ from nvflow.core import BaseStage, StageRegistry, console
 
 @StageRegistry.register(recipe="finance", workflow="download-sec", stage="sap-500")
 @StageRegistry.register(recipe="finance", workflow="download-sec", stage="demo")
+@StageRegistry.register(recipe="finance", workflow="download-sec", stage="smoke")
 class DownloadSecFilingsStage(BaseStage):
     """Download SEC filings (10-K, 10-Q, 8-K) from EDGAR and extract sections."""
 

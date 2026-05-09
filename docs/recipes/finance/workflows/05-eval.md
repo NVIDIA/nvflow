@@ -105,7 +105,7 @@ stages:
   eval:
     eval_steps: [1000, 3000, 5000]
     checkpoint_path: ${directories.step-4-training}/model-name
-    format: megatron        # Use "hf" for GRPO checkpoints
+    format: megatron        # Use "fsdp" for GRPO demo, "megatron" for GRPO production
     baseline_model: /hf_models/Qwen/Qwen3-14B
     server_type: vllm
     gpus: 1
@@ -170,7 +170,7 @@ stages:
   eval:
     eval_steps: [100, 500, 1000]
     checkpoint_path: ${directories.step-4-training}/model-my-model-name
-    format: megatron
+    format: megatron        # Use "fsdp" for GRPO demo checkpoints
     baseline_model: /hf_models/MyOrg/MyModel
     server_type: vllm
     gpus: 1

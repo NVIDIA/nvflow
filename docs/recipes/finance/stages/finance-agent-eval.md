@@ -1,5 +1,7 @@
 # Finance Agent Eval Stages Reference
 
+> **Status:** finance_agent evaluation is currently disabled in `eval/base.yaml` pending further validation. The configuration below is preserved for re-enablement.
+
 Technical reference for the finance-agent evaluation stages (vals-ai/finance-agent benchmark).
 
 > **Note:** Finance agent evaluation is now integrated into the main eval workflow. The `finance_agent` benchmark is defined in `workflows/eval/base.yaml` and runs alongside SEC-QUE and FinanceBench. See [Eval Workflow](../workflows/05-eval.md) for usage.

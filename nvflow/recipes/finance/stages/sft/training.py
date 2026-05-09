@@ -14,24 +14,25 @@
 #
 """Supervised Fine-Tuning for financial reasoning models.
 
-This module handles SFT training using NeMo-RL's native config format.
-Config is passed directly to nemo_rl.algorithms.sft.SFTTrainer without translation.
+This module handles SFT training by calling the RL repo's run_sft.py directly
+(same execution pattern as GRPO), bypassing nemo-skills' start_sft.py wrapper.
+
+The full NeMo-RL config is base64-encoded into the Slurm command and decoded
+at job runtime.  Runtime overrides (model_name, cluster, data paths, etc.)
+are applied via ++key=value CLI args.
 
 File organization:
 1. Configuration Schemas - Data classes for prepared configs
 2. SFTStage Class:
    a. Preset Loading - Load sft_presets.yaml
-   b. Config Flattening - Convert dicts to Hydra overrides
-   c. Parallelism Helpers - Unified extraction of TP/PP/CP/EP
-   d. Validation & Auto-Correction - Check configs before submission
-   e. Main Config Preparation - Merge preset + overrides, validate
-   f. Job Submission & Display - Submit to nemo-skills
-   g. Metadata Saving - Save run metadata for reproducibility
+   b. Parallelism Helpers - Unified extraction of TP/PP/CP/EP
+   c. Validation & Auto-Correction - Check configs before submission
+   d. Main Config Preparation - Merge preset + overrides, validate
+   e. Job Submission & Display - Submit via add_task/get_exp/run_exp
 """
 
-import os
+import base64
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ import yaml
 from omegaconf import OmegaConf
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.gpu_layout import resolve_gpu_layout
 
 # ============================================================================
 # Configuration Schemas
@@ -167,49 +169,8 @@ class SFTStage(BaseStage):
         return bool(set(preset.keys()) & self.NEMO_RL_PRESET_KEYS)
 
     # ========================================================================
-    # Config Flattening & Resolution
+    # Config Resolution
     # ========================================================================
-
-    def _flatten_config_to_args(self, config: dict, prefix: str = "") -> list[str]:
-        """Recursively flatten config dict to Hydra override args.
-
-        Converts nested dict like:
-            {"policy": {"dtensor_cfg": {"tensor_parallel_size": 2}}}
-        To:
-            ["++policy.dtensor_cfg.tensor_parallel_size=2"]
-
-        Skips complex nested structures (list of dicts) which should be in YAML presets.
-        Skips env_vars dict to avoid Hydra type conversion issues (stays in merged YAML).
-        """
-        args = []
-        for key, value in config.items():
-            # Skip description field (not a NeMo-RL config)
-            if key == "description":
-                continue
-
-            # Skip env_vars dict - it should stay in the merged config YAML
-            # Flattening to CLI args causes Hydra to convert string values like "720" to int
-            if key == "env_vars" and isinstance(value, dict):
-                continue
-
-            full_key = f"{prefix}.{key}" if prefix else key
-
-            if isinstance(value, dict):
-                # Recurse into nested dicts
-                args.extend(self._flatten_config_to_args(value, full_key))
-            elif isinstance(value, bool):
-                args.append(f"++{full_key}={str(value).lower()}")
-            elif isinstance(value, list):
-                # Skip complex nested structures (e.g., scheduler with list of dicts)
-                # These should be defined in sft_presets.yaml, not flattened to CLI args
-                if value and isinstance(value[0], dict):
-                    continue
-                # Simple lists like betas: [0.9, 0.98] → "[0.9,0.98]"
-                list_str = "[" + ",".join(str(v) for v in value) + "]"
-                args.append(f"++{full_key}={list_str}")
-            elif value is not None:
-                args.append(f"++{full_key}={value}")
-        return args
 
     def _resolve_nemo_rl_config(self, config: dict) -> dict:
         """Resolve NeMo-RL format preset with overrides."""
@@ -254,6 +215,52 @@ class SFTStage(BaseStage):
                 f"Auto-disabling for {backend.upper()} backend."
             )
             cfg["sequence_parallel"] = False
+
+    def _auto_correct_sequence_length_divisibility(
+        self, nemo_rl_config: dict, backend: str
+    ) -> None:
+        """Auto-compute policy.make_sequence_length_divisible_by from parallelism settings.
+
+        Megatron splits individual sequences across CP and TP (when SP=true) ranks,
+        requiring sequence lengths to be divisible by a minimum pad factor:
+          - CP > 1 contributes cp_size * 2  (send/receive pattern)
+          - TP > 1 + SP=true contributes tp_size
+
+        Before NeMo-RL PR #2053, this was auto-computed internally.  That PR
+        changed it to a user-provided validated parameter (for GRPO top-p/top-k
+        sampling which needs higher alignment).  For SFT (no sampling), the
+        minimum is always sufficient, so we restore auto-computation here.
+
+        If the user explicitly set a higher value (e.g., for FP8 alignment),
+        it is preserved.
+        """
+        policy = nemo_rl_config.get("policy", {})
+        parallel = self._get_parallelism_config(policy, backend)
+
+        if backend == "fsdp":
+            cfg = policy.get("dtensor_cfg", {})
+        else:
+            cfg = policy.get("megatron_cfg", {})
+
+        tp = parallel["tp"]
+        cp = parallel["cp"]
+        sp = cfg.get("sequence_parallel", False)
+
+        minimum = 1
+        if cp > 1:
+            minimum *= cp * 2
+        if tp > 1 and sp:
+            minimum *= tp
+
+        current = policy.get("make_sequence_length_divisible_by", 1)
+        corrected = max(current, minimum)
+
+        if corrected != current:
+            console.detail(
+                "Auto-corrected make_sequence_length_divisible_by",
+                f"{current} → {corrected} (CP={cp}, TP={tp}, SP={sp})",
+            )
+            policy["make_sequence_length_divisible_by"] = corrected
 
     def _validate_parallelism_config(
         self, nemo_rl_config: dict, backend: str, num_nodes: int, num_gpus: int
@@ -392,25 +399,13 @@ class SFTStage(BaseStage):
                     f"        train_mb_tokens: {policy.get('max_total_sequence_length', 4096)}"
                 )
 
-    def _build_nemo_rl_training_args(self, nemo_rl_config: dict) -> str:
-        """Build training arguments from NeMo-RL format config.
-
-        Simply flattens the config dict to Hydra override args.
-
-        Args:
-            nemo_rl_config: NeMo-RL format config dict
-
-        Returns:
-            Formatted arguments string
-        """
-        args = self._flatten_config_to_args(nemo_rl_config)
-        return " ".join(args)
-
     # ========================================================================
     # Main Configuration Preparation
     # ========================================================================
 
-    def _prepare_nemo_rl_config(self, config: dict[str, Any], expname: str) -> PreparedNemoRLConfig:
+    def _prepare_nemo_rl_config(
+        self, config: dict[str, Any], expname: str, cluster_config: dict | None = None
+    ) -> PreparedNemoRLConfig:
         """Prepare training configuration for NeMo-RL format presets.
 
         Steps:
@@ -419,10 +414,13 @@ class SFTStage(BaseStage):
         3. Validate parallelism configuration
         4. Generate run name and prepare job submission parameters
         """
-        # Extract basic config
         hf_model_name = config["model_name"]
-        num_nodes = config.get("num_nodes", 1)
-        num_gpus = config.get("num_gpus", 8)
+        layout = resolve_gpu_layout(config, cluster_config)
+        num_nodes = layout.num_nodes
+        num_gpus = layout.gpus_per_node
+        console.detail(
+            "GPU layout", f"{num_nodes} node(s) x {num_gpus} GPUs = {layout.total_gpus} total"
+        )
         # Default to megatron backend (more scalable for large models)
         # Switch to fsdp only when megatron is not supported or has issues
         backend = config.get("backend", "megatron")
@@ -432,6 +430,7 @@ class SFTStage(BaseStage):
 
         # Step 2: Auto-correct invalid settings
         self._auto_correct_sequence_parallel(nemo_rl_config, backend)
+        self._auto_correct_sequence_length_divisibility(nemo_rl_config, backend)
 
         # Step 3: Validate parallelism configuration
         self._validate_parallelism_config(nemo_rl_config, backend, num_nodes, num_gpus)
@@ -445,10 +444,10 @@ class SFTStage(BaseStage):
         seq_len = policy.get("max_total_sequence_length", 131072)
         seq_k = seq_len // 1024
 
-        # Generate run name: model-{name}-{nodes}n-tp{tp}-pp{pp}-cp{cp}-seq{seq}k
+        # Generate run name: model-{name}-{total_gpus}g-tp{tp}-pp{pp}-cp{cp}-seq{seq}k
         model_short = Path(hf_model_name).name.lower().replace("_", "-")
         run_name = (
-            f"model-{model_short}-{num_nodes}n-"
+            f"model-{model_short}-{layout.total_gpus}g-"
             f"tp{parallel['tp']}-pp{parallel['pp']}-cp{parallel['cp']}-seq{seq_k}k"
         )
 
@@ -529,123 +528,134 @@ class SFTStage(BaseStage):
         )
         console.blank()
 
-    def _submit_nemo_rl_job(
+    def _config_shell_snippet(self, prepared: PreparedNemoRLConfig) -> tuple[str, str]:
+        """Return a shell snippet that writes the NeMo-RL config YAML at job runtime.
+
+        The config is base64-encoded and decoded inside the Slurm job,
+        avoiding any host-side filesystem writes.
+        """
+        content = yaml.dump(
+            prepared.nemo_rl_config,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+        encoded = base64.b64encode(content.encode()).decode()
+        config_path = f"{prepared.output_dir}/sft_config.yaml"
+        snippet = f"mkdir -p {prepared.output_dir} && echo {encoded} | base64 -d > {config_path}"
+        return snippet, config_path
+
+    def _build_train_cmd(
         self,
         prepared: PreparedNemoRLConfig,
-        cluster: str,
+        config: dict[str, Any],
+        config_snippet: str,
+        config_path: str,
+        cluster_config: dict,
+    ) -> str:
+        """Build the training command string for run_sft.py."""
+        from nemo_skills.pipeline.nemo_rl.grpo import get_timeout_str
+
+        stage_kwargs = config.get("stage_kwargs", {})
+        partition = stage_kwargs.get("partition")
+        timeout = get_timeout_str(cluster_config, partition)
+        hf_model = config.get("hf_checkpoint_path", config["model_name"])
+
+        cmd = (
+            f"{config_snippet} && "
+            f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/NeMo-RL && "
+            f"export UV_PROJECT=/opt/NeMo-RL && "
+            f"echo 'Starting training' && "
+            f"uv run --active python /opt/NeMo-RL/examples/run_sft.py "
+            f"  --config {config_path}"
+            f"  ++policy.model_name={hf_model}"
+            f"  ++cluster.gpus_per_node={prepared.num_gpus}"
+            f"  ++cluster.num_nodes={prepared.num_nodes}"
+            f"  ++checkpointing.checkpoint_must_save_by={timeout}"
+            f"  ++logger.log_dir={prepared.output_dir}/training-logs"
+            f"  ++checkpointing.checkpoint_dir={prepared.output_dir}/checkpoints"
+        )
+
+        if prepared.backend == "megatron":
+            cmd += " ++policy.dtensor_cfg.enabled=false ++policy.megatron_cfg.enabled=true"
+            cmd += " ++policy.optimizer=None ++policy.dynamic_batching.enabled=false"
+        else:
+            cmd += " ++policy.dtensor_cfg.enabled=true ++policy.megatron_cfg.enabled=false"
+
+        if config.get("training_data"):
+            cmd += f" ++data.train.data_path={config['training_data']}"
+        if config.get("validation_data"):
+            cmd += f" ++data.validation.data_path={config['validation_data']}"
+        else:
+            cmd += " ++data.validation=null"
+
+        wandb_mode = config.get("wandb_mode", "disabled")
+        if wandb_mode == "disabled":
+            cmd += " ++logger.wandb_enabled=false"
+        elif wandb_mode == "offline":
+            cmd += " ++logger.wandb_enabled=true ++logger.wandb_mode=offline"
+        elif wandb_mode == "online":
+            wandb_project = config.get("wandb_project", "finance-sft")
+            cmd += (
+                f" ++logger.wandb_enabled=true"
+                f" ++logger.wandb.project={wandb_project}"
+                f" ++logger.wandb.name={prepared.expname}"
+                f" ++logger.wandb.group={prepared.expname}"
+            )
+
+        extra_parts = []
+        if base_args := config.get("extra_arguments"):
+            extra_parts.append(base_args)
+        if stage_args := stage_kwargs.get("extra_arguments"):
+            extra_parts.append(stage_args)
+        if extra_parts:
+            cmd += " " + " ".join(extra_parts)
+
+        return cmd
+
+    def _submit_sft_job(
+        self,
+        prepared: PreparedNemoRLConfig,
+        cluster_config: dict,
         config: dict[str, Any],
         run_after: list[str] | None = None,
     ) -> None:
-        """Submit SFT training job using NeMo-RL format config."""
-        from nemo_skills.pipeline.cli import sft_nemo_rl, wrap_arguments
+        """Submit SFT training job via direct add_task() + run_exp()."""
+        from nemo_skills.pipeline.nemo_rl.grpo import parse_kwargs
+        from nemo_skills.pipeline.utils.exp import add_task, get_exp, run_exp
 
-        self._save_nemo_rl_metadata(prepared)
+        config_snippet, config_path = self._config_shell_snippet(prepared)
+        train_cmd = self._build_train_cmd(
+            prepared, config, config_snippet, config_path, cluster_config
+        )
 
-        # Build training arguments by flattening the NeMo-RL config
-        args = self._build_nemo_rl_training_args(prepared.nemo_rl_config)
-
-        # Debug: Display generated training arguments
-        console.blank()
-        console.info("=" * 80)
-        console.info("GENERATED TRAINING ARGUMENTS (Hydra overrides):")
-        console.info("-" * 80)
-        # Split args for readability (show each ++key=value on separate line)
-        for arg in args.split(" ++"):
-            if arg.startswith("++"):
-                console.info(f"  {arg}")
-            elif arg:
-                console.info(f"  ++{arg}")
-        console.info("=" * 80)
-        console.blank()
-
-        # Add W&B configuration to training args
-        if prepared.wandb_mode == "disabled":
-            args = f"{args} ++logger.wandb_enabled=false"
-        elif prepared.wandb_mode == "offline":
-            args = f"{args} ++logger.wandb_enabled=true ++logger.wandb_mode=offline"
-
-        # Append extra_arguments from stage_kwargs
         stage_kwargs = config.get("stage_kwargs", {})
-        if extra_args := stage_kwargs.get("extra_arguments"):
-            args = f"{args} {extra_args}"
-            console.detail("Extra arguments", extra_args)
+        partition = stage_kwargs.get("partition")
+        sbatch_kwargs = parse_kwargs(stage_kwargs.get("sbatch_kwargs", ""))
+        dependent_jobs = config.get("dependent_jobs", 0)
 
-        # Build job submission kwargs
-        sft_kwargs: dict[str, Any] = {
-            "ctx": wrap_arguments(args),
-            "cluster": cluster,
-            "expname": prepared.expname,
-            "backend": prepared.backend,
-            "output_dir": prepared.output_dir,
-            "hf_model": prepared.hf_checkpoint_path,
-            "training_data": prepared.training_data,
-            "num_gpus": prepared.num_gpus,
-            "num_nodes": prepared.num_nodes,
-            "dependent_jobs": prepared.dependent_jobs,
-        }
-
-        if run_after:
-            sft_kwargs["run_after"] = run_after
-
-        # Optional kwargs from stage_kwargs
-        for key in ("partition", "installation_command"):
-            if key in stage_kwargs:
-                sft_kwargs[key] = stage_kwargs[key]
-
-        if prepared.validation_data:
-            sft_kwargs["validation_data"] = prepared.validation_data
-
-        if prepared.wandb_mode == "online" and prepared.wandb_project:
-            sft_kwargs["wandb_project"] = prepared.wandb_project
-
-        sft_nemo_rl(**sft_kwargs)
-        console.success("SFT training job submitted")
-
-    # ========================================================================
-    # Metadata & Utilities
-    # ========================================================================
-
-    def _save_nemo_rl_metadata(self, prepared: PreparedNemoRLConfig) -> None:
-        """Save run metadata YAML for NeMo-RL format config."""
-        slurm_job_id = os.environ.get("SLURM_JOB_ID")
-        run_id = f"job_{slurm_job_id}" if slurm_job_id else datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        metadata = {
-            "start_time": datetime.now().isoformat(),
-            "slurm_job_id": slurm_job_id,
-            "status": "submitted",
-            "format": "nemo_rl",
-            "preset": prepared.preset,
-            "backend": prepared.backend,
-            "run_name": prepared.run_name,
-            "output_dir": prepared.output_dir,
-            "hf_model_name": prepared.hf_model_name,
-            "num_nodes": prepared.num_nodes,
-            "num_gpus": prepared.num_gpus,
-            "nemo_rl_config": prepared.nemo_rl_config,
-        }
-
-        output_path = self._resolve_output_path(prepared.output_dir)
-        try:
-            output_path.mkdir(parents=True, exist_ok=True)
-            metadata_file = output_path / f"run_metadata_{run_id}.yaml"
-
-            with open(metadata_file, "w") as f:
-                f.write(f"# Run Metadata - {run_id}\n")
-                f.write("# Auto-generated for reproducibility (NeMo-RL format)\n\n")
-                yaml.dump(
-                    metadata, f, default_flow_style=False, sort_keys=False, allow_unicode=True
+        with get_exp(prepared.expname, cluster_config) as exp:
+            prev_task = None
+            for job_id in range(dependent_jobs + 1):
+                prev_task = add_task(
+                    exp,
+                    cmd=train_cmd,
+                    task_name=f"{prepared.expname}-sft-{job_id}",
+                    log_dir=f"{prepared.output_dir}/training-logs",
+                    container=cluster_config["containers"]["nemo-rl"],
+                    num_gpus=prepared.num_gpus,
+                    num_nodes=prepared.num_nodes,
+                    cluster_config=cluster_config,
+                    with_ray=True,
+                    sbatch_kwargs=sbatch_kwargs,
+                    installation_command=stage_kwargs.get("installation_command"),
+                    partition=partition,
+                    run_after=run_after,
+                    task_dependencies=[prev_task] if prev_task else None,
                 )
+            run_exp(exp, cluster_config, sequential=False)
 
-            console.detail("Run metadata saved", str(metadata_file))
-        except (OSError, PermissionError) as e:
-            console.warning(f"Could not save metadata: {e}")
-
-    def _resolve_output_path(self, output_dir: str) -> Path:
-        """Resolve output path, handling /workspace vs local submission node."""
-        if output_dir.startswith("/workspace/") and not Path("/workspace").exists():
-            return Path(output_dir.replace("/workspace/", "./"))
-        return Path(output_dir)
+        console.success("SFT training job submitted")
 
     # ========================================================================
     # Main Entry Points
@@ -660,17 +670,15 @@ class SFTStage(BaseStage):
     ) -> None:
         """Execute SFT training.
 
-        This is the main entry point for SFT training. It:
-        1. Prepares training configuration (NeMo-RL format)
-        2. Displays training job summary
-        3. Submits training job to cluster
-
-        All presets now use NeMo-RL native format (policy.*, sft.*, etc.)
+        Resolves cluster_config once and passes the dict to all downstream
+        methods (same pattern as GRPO).
         """
-        # Prepare and submit NeMo-RL format job
-        prepared = self._prepare_nemo_rl_config(config, expname)
+        from nemo_skills.pipeline.utils import get_cluster_config
+
+        cluster_config = get_cluster_config(cluster)
+        prepared = self._prepare_nemo_rl_config(config, expname, cluster_config=cluster_config)
         self._display_nemo_rl_summary(prepared)
-        self._submit_nemo_rl_job(prepared, cluster, config, run_after=run_after)
+        self._submit_sft_job(prepared, cluster_config, config, run_after=run_after)
 
     def validate_config(self, config: dict[str, Any]) -> None:
         """Validate configuration.

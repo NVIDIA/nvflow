@@ -60,7 +60,7 @@ stages:
 
     # Cluster configuration for 14B model
     # Training estimates: ~2,575 steps/epoch, ~7,725 total steps (3 epochs)
-    num_nodes: 32             # Full training: 256 GPUs (32 nodes × 8 GPUs)
+    total_gpus: 256
     dependent_jobs: 3         # 4 jobs per launch (~644 steps/job, ~6 ckpts/job)
 
     # Use base preset with model-specific overrides
@@ -111,7 +111,6 @@ stages:
             lr_warmup_init: 1e-7
 
       data:
-        force_reprocess: false
         num_workers: 10
 
   # --------------------------------------------------------------------------
@@ -138,7 +137,7 @@ stages:
   # --------------------------------------------------------------------------
   eval:
     eval_steps: [2600, 5000, 7408]
-    checkpoint_path: ${directories.step-4-training}/model-qwen3-14b-32n-tp4-pp1-cp8-seq48k
+    checkpoint_path: ${directories.step-4-training}/model-qwen3-14b-256g-tp4-pp1-cp8-seq48k
     base_output_dir: ${base_output_dir}
     format: megatron
     baseline_model: /hf_models/Qwen/Qwen3-14B

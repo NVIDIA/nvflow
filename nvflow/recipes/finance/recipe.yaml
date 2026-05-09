@@ -4,10 +4,10 @@
 # This file defines recipe-level settings for the finance recipe.
 #
 # Workflow order defines the logical execution sequence for the pipeline:
-#   1. download-sec            - Download SEC filings
-#   2. template_based_sdg      - Template-based synthetic data generation
-#   3. document_grounded_sdg   - Document-grounded data generation
-#   4. eval                    - Baseline model evaluation (independent)
+#   1. eval                    - Baseline model evaluation (run first to establish baseline)
+#   2. download-sec            - Download SEC filings
+#   3. template_based_sdg      - Template-based synthetic data generation
+#   4. document_grounded_sdg   - Document-grounded data generation
 #   5. sft                     - Supervised fine-tuning (includes checkpoint eval)
 #   6. grpo                    - RL training (includes checkpoint eval)
 # ============================================================================
@@ -17,9 +17,9 @@ description: "End-to-end pipeline for financial model training and evaluation"
 
 # Workflow execution order (logical sequence)
 workflow_order:
-  - download-sec              # Step 1: Download SEC filings
-  - template_based_sdg        # Step 2: Template-based synthetic data generation
-  - document_grounded_sdg     # Step 3: Document-grounded data generation
-  - eval                      # Step 4: Baseline model evaluation
+  - eval                      # Step 1: Baseline model evaluation
+  - download-sec              # Step 2: Download SEC filings
+  - template_based_sdg        # Step 3: Template-based synthetic data generation
+  - document_grounded_sdg     # Step 4: Document-grounded data generation
   - sft                       # Step 5: Supervised fine-tuning + checkpoint eval
   - grpo                      # Step 6: RL training + checkpoint eval

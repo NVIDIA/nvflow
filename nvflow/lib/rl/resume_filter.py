@@ -25,8 +25,8 @@ Fingerprint = md5(json(responses_create_params.input) + "|" + expected_answer).
 Optional ``max_num_samples`` truncates the input before filtering,
 so the original file is used directly without host-side copies.
 
-Standalone script (stdlib only, no nvflow/Gym dependencies) that runs
-inside the Slurm container with python3.
+Standalone script that runs inside the Slurm container with
+``PYTHONPATH=/workspace``.
 
 Usage:
     python -m nvflow.lib.rl.resume_filter <partial_file> <input_file> <remaining_file> [max_num_samples]
@@ -41,11 +41,28 @@ import json
 import os
 import sys
 
+from nvflow.utils import setup_logger
+
+logger = setup_logger(__name__)
+
+
+def _normalize_input(inp: list) -> list:
+    """Strip fields added by the Responses API (e.g. ``type``) so that
+    fingerprints match between the original input file and the async output
+    where the API decorates each message with extra metadata."""
+    normalized = []
+    for msg in inp:
+        if isinstance(msg, dict):
+            normalized.append({k: v for k, v in msg.items() if k not in ("type",)})
+        else:
+            normalized.append(msg)
+    return normalized
+
 
 def fingerprint(row: dict) -> str:
     """Content-based hash for deduplication across async output order."""
     rcp = row.get("responses_create_params", {})
-    inp = rcp.get("input", [])
+    inp = _normalize_input(rcp.get("input", []))
     ea = row.get("expected_answer", "")
     return hashlib.md5((json.dumps(inp, sort_keys=True) + "|" + str(ea)).encode()).hexdigest()
 
@@ -63,7 +80,7 @@ def load_jsonl(path: str) -> list[dict]:
             except json.JSONDecodeError:
                 dropped += 1
     if dropped:
-        print(f"WARNING: Dropped {dropped} malformed line(s) in {path}")
+        logger.warning("Dropped %d malformed line(s) in %s", dropped, path)
     return rows
 
 
@@ -75,15 +92,17 @@ def resume_filter(
 ) -> None:
     inputs = load_jsonl(input_file)
     if 0 < max_num_samples < len(inputs):
-        print(f"Truncating input from {len(inputs)} to {max_num_samples} rows (max_num_samples).")
+        logger.info(
+            "Truncating input from %d to %d rows (max_num_samples).", len(inputs), max_num_samples
+        )
         inputs = inputs[:max_num_samples]
 
     if not os.path.exists(partial_file) or os.path.getsize(partial_file) == 0:
-        print(f"No partial output -- full run ({len(inputs)} rows).")
+        logger.info("No partial output -- full run (%d rows).", len(inputs))
         with open(remaining_file, "w") as f:
             for r in inputs:
                 f.write(json.dumps(r) + "\n")
-        print(f"RESUME_STATUS: remaining={len(inputs)} completed=0 total={len(inputs)}")
+        logger.info("RESUME_STATUS: remaining=%d completed=0 total=%d", len(inputs), len(inputs))
         return
 
     completed = load_jsonl(partial_file)
@@ -94,16 +113,19 @@ def resume_filter(
         for r in remaining:
             f.write(json.dumps(r) + "\n")
 
-    print(
-        f"RESUME_STATUS: remaining={len(remaining)} completed={len(completed)} total={len(inputs)}"
+    logger.info(
+        "RESUME_STATUS: remaining=%d completed=%d total=%d",
+        len(remaining),
+        len(completed),
+        len(inputs),
     )
     if not remaining:
-        print("ALL_DONE")
+        logger.info("ALL_DONE")
 
 
 if __name__ == "__main__":
     if len(sys.argv) not in (4, 5):
-        print(
+        logger.error(
             "Usage: python -m nvflow.lib.rl.resume_filter "
             "<partial_file> <input_file> <remaining_file> [max_num_samples]"
         )

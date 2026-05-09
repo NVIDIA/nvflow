@@ -1,0 +1,144 @@
+# ============================================================================
+# Qwen3-4B GRPO Training — finance_sec_search (Megatron, 64 GPUs)
+# ============================================================================
+# Single-environment config for finance_sec_search GRPO training.
+# Uses Megatron backend (required for YaRN context extension to 131K).
+#
+# Usage:
+#   uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml
+#   uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml
+#
+# Pre-requisites:
+#   Run data prep + rollouts + split from qwen3_4b.yaml first:
+#     uv run nflow run collect_rollouts --config .../qwen3_4b.yaml -e finance_sec_search
+#     uv run nflow run train_validation_split --config .../qwen3_4b.yaml -e finance_sec_search
+# ============================================================================
+
+_base_: base.yaml
+
+data_root: /workspace/outputs/finance/demo
+hf_model_path: /hf_models/Qwen/Qwen3-4B
+model_output_dir: ${base_output_dir}/qwen3_4b
+
+# YaRN rope scaling for 131K context (define once, reuse for vLLM + megatron)
+_rope_scaling_131k: &rope_scaling_131k
+  rope_type: yarn
+  rope_theta: 1000000
+  factor: 3.2                             # 131072 / 40960
+  original_max_position_embeddings: 40960
+  truncate: true
+  beta_fast: 32
+  beta_slow: 1
+  mscale: 1
+  mscale_all_dim: 0
+
+# ============================================================================
+# Judge (GPT-OSS-120B, 2 GPUs)
+# ============================================================================
+_judge_vllm: &judge_vllm
+  model_path: /hf_models/openai/gpt-oss-120b
+  num_gpus: 2
+  server_nodes: 1
+  max_model_len: 32768
+  async_scheduling: true
+  uses_reasoning_parser: true
+
+# ============================================================================
+# Single Environment: finance_sec_search
+# ============================================================================
+environments:
+  finance_sec_search:
+    raw_train_data: ${base_output_dir}/step-0-validate-questions/finance_sec_search
+    config_paths:
+      - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
+      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
+      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_demo.yaml
+    policy_vllm:
+      num_gpus: 4
+      max_model_len: 131072
+      hf_config_overrides:
+        rope_scaling: *rope_scaling_131k
+    judge_vllm: *judge_vllm
+
+# ============================================================================
+# Stages: Training + Eval only
+# ============================================================================
+stages:
+
+  training:
+    model_name: Qwen/Qwen3-4B
+    hf_checkpoint_path: ${hf_model_path}
+    backend: megatron
+    total_gpus: 64
+    dependent_jobs: 0
+    preset: "grpo-base"
+
+    overrides:
+      grpo:
+        num_prompts_per_step: 16
+        num_generations_per_prompt: 8
+        max_num_steps: 20
+        val_period: 10
+
+      checkpointing:
+        save_period: 10
+
+      policy:
+        tokenizer:
+          name: ${stages.training.hf_checkpoint_path}
+        hf_config_overrides:
+          rope_scaling: *rope_scaling_131k
+        max_total_sequence_length: 131072
+        generation:
+          vllm_cfg:
+            max_model_len: 131072
+            http_server_serving_chat_kwargs:
+              reasoning_parser: qwen3
+        train_global_batch_size: 128
+
+        # Megatron: TP=2, CP=8 → model_parallel=16, DP = 64/16 = 4
+        # CP=8 keeps per-rank tokens at 16K (131K/8), halving logits vs CP=4.
+        megatron_cfg:
+          tensor_model_parallel_size: 2
+          pipeline_model_parallel_size: 1
+          context_parallel_size: 8
+          sequence_parallel: true
+          activation_checkpointing: true
+          empty_unused_memory_level: 1
+          defer_fp32_logits: true
+          env_vars:
+            PYTORCH_ALLOC_CONF: "expandable_segments:False"
+
+        sequence_packing:
+          enabled: true
+          train_mb_tokens: 131072
+          logprob_mb_tokens: 131072
+
+        logprob_chunk_size: 2048
+        make_sequence_length_divisible_by: 32  # TP(2) * CP(8) * 2
+
+      logger:
+        wandb:
+          name: "grpo-qwen3-4b-finsec"
+
+  eval:
+    eval_steps: [20]
+    checkpoint_path: ${directories.step-8-training}/finance_sec_search/grpo-qwen3-4b-64g-tp2-cp8-seq128k
+    base_output_dir: ${model_output_dir}/finance_sec_search
+    format: megatron
+    base_model: ${hf_model_path}
+    server_type: vllm
+    gpus: 4
+    benchmarks:
+      secque:
+        seeds: 5
+      financebench:
+        seeds: 5
+    inference_args: >-
+      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++inference.temperature=0.6
+      ++inference.top_p=0.95
+      ++inference.top_k=20
+      ++inference.tokens_to_generate=16384
+      ++chat_template_kwargs.enable_thinking=true
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3 --tensor-parallel-size 2"

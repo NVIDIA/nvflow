@@ -28,7 +28,7 @@ A comprehensive set of architectural diagrams and documentation for the NVFlow o
 
 2. **[finance-pipeline.mmd](../diagrams/finance-pipeline.mmd)** - Finance recipe end-to-end pipeline
    - Complete data flow from SEC filings to model evaluation
-   - All 6 workflows with 27 stages visualized
+   - All 6 workflows with 42 stages visualized
    - Production vs. experimental paths
 
 3. **[execution-flow.mmd](../diagrams/execution-flow.mmd)** - Runtime execution sequence
@@ -142,7 +142,7 @@ Use Case: Understanding system boundaries and component relationships
 ### 2. Finance Pipeline
 ```
 Coverage:
-✓ Complete 6-workflow pipeline (27 stages total)
+✓ Complete 6-workflow pipeline (42 stages total)
 ✓ Data acquisition (SEC filings download)
 ✓ SDG (Template-based & Document-grounded approaches)
 ✓ Data preparation (Transformation, formatting, splitting)
@@ -300,7 +300,7 @@ All architecture diagrams and documentation are part of the NVFlow project and f
 
 Built on the NVIDIA NeMo ecosystem:
 - [NeMo-Skills](https://github.com/NVIDIA/NeMo-Skills)
-- [NeMo-RL](https://github.com/NVIDIA/NeMo-RL)
+- [NeMo-RL](https://github.com/NVIDIA-NeMo/RL)
 - [NeMo Framework](https://github.com/NVIDIA/NeMo)
 
 ---

@@ -17,7 +17,7 @@
 Memory-efficient streaming approach:
 1. Pass 1: Count records per category, apply token length filter
 2. Pass 2: Stream-write to train/val files
-3. Shuffle output files
+3. Shuffle or sort output files (curriculum ordering via --sort_by)
 """
 
 import argparse
@@ -45,6 +45,17 @@ def filter_record(record: dict, output_fields: list[str] | None = None) -> dict:
     return {k: record.get(k, 0 if k == "total_token_length" else "") for k in output_fields}
 
 
+def _resolve_nested(record: dict, dotted_key: str):
+    """Traverse a nested dict via dot-notation (e.g. 'difficulty_profile.avg_reward')."""
+    obj = record
+    for part in dotted_key.split("."):
+        if isinstance(obj, dict):
+            obj = obj.get(part)
+        else:
+            return None
+    return obj
+
+
 def shuffle_file(filepath: Path, seed: int) -> None:
     """Shuffle a JSONL file in place."""
     with open(filepath, encoding="utf-8") as f:
@@ -52,6 +63,35 @@ def shuffle_file(filepath: Path, seed: int) -> None:
     random.Random(seed).shuffle(lines)
     with open(filepath, "w", encoding="utf-8") as f:
         f.writelines(line if line.endswith("\n") else line + "\n" for line in lines)
+
+
+def sort_file(filepath: Path, sort_by: str, descending: bool = True) -> None:
+    """Sort a JSONL file in place by a (possibly nested) numeric field.
+
+    Records missing the field are placed at the end regardless of sort order.
+    """
+    with open(filepath, encoding="utf-8") as f:
+        lines = [line for line in f if line.strip()]
+
+    sentinel = float("-inf") if descending else float("inf")
+
+    def sort_key(line: str):
+        val = _resolve_nested(json.loads(line), sort_by)
+        return val if isinstance(val, int | float) else sentinel
+
+    lines.sort(key=sort_key, reverse=descending)
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.writelines(line if line.endswith("\n") else line + "\n" for line in lines)
+
+    n_missing = sum(
+        1
+        for line in lines
+        if not isinstance(_resolve_nested(json.loads(line), sort_by), int | float)
+    )
+    logger.info(f"Sorted {len(lines):,} records by '{sort_by}' ({'desc' if descending else 'asc'})")
+    if n_missing:
+        logger.info(f"  {n_missing:,} records missing '{sort_by}' placed at end")
 
 
 def perform_split(
@@ -62,6 +102,8 @@ def perform_split(
     seed: int,
     max_tokens: int | None = None,
     keep_all_fields: bool = False,
+    sort_by: str | None = None,
+    sort_order: str = "desc",
 ) -> tuple[int, int, int]:
     """Memory-efficient stratified split with optional token length filtering."""
     train_path = output_dir / "train.jsonl"
@@ -132,9 +174,13 @@ def perform_split(
                 f_train.write(out)
                 train_count += 1
 
-    # Shuffle output files
-    logger.info("Shuffling output files...")
-    shuffle_file(train_path, seed)
+    # Sort or shuffle output files
+    if sort_by:
+        logger.info(f"Sorting train file by '{sort_by}' ({sort_order})...")
+        sort_file(train_path, sort_by, descending=(sort_order == "desc"))
+    else:
+        logger.info("Shuffling output files...")
+        shuffle_file(train_path, seed)
     if val_count > 0:
         shuffle_file(val_path, seed + 1)
 
@@ -154,6 +200,17 @@ def main():
         action="store_true",
         help="Keep all input fields (GRPO). Default: keep only SFT fields.",
     )
+    parser.add_argument(
+        "--sort_by",
+        help="Sort train file by this field instead of shuffling. "
+        "Supports dot-notation for nested fields (e.g. 'difficulty_profile.avg_reward').",
+    )
+    parser.add_argument(
+        "--sort_order",
+        default="desc",
+        choices=["asc", "desc"],
+        help="Sort order when --sort_by is set (default: desc for easy-to-hard curriculum).",
+    )
     args = parser.parse_args()
 
     logger.info("=" * 60)
@@ -166,6 +223,8 @@ def main():
     logger.info(f"Seed:        {args.random_seed}")
     if args.max_token_length:
         logger.info(f"Max tokens:  {args.max_token_length:,}")
+    if args.sort_by:
+        logger.info(f"Sort by:     {args.sort_by} ({args.sort_order})")
     logger.info("")
 
     train_n, val_n, filtered_n = perform_split(
@@ -176,6 +235,8 @@ def main():
         args.random_seed,
         args.max_token_length,
         keep_all_fields=args.keep_all_fields,
+        sort_by=args.sort_by,
+        sort_order=args.sort_order,
     )
 
     total = train_n + val_n

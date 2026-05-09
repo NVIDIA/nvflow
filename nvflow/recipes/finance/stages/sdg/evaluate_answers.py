@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.vllm_compat import inject_server_entrypoint
 
 
 @StageRegistry.register(
@@ -59,7 +60,10 @@ class EvaluateAnswersStage(BaseStage):
         output_file = config.get("output_file")
         prompt_config = config.get("prompt_config")
         inline_args = config.get("inline_args", "")
-        stage_kwargs = config.get("stage_kwargs", {})
+        stage_kwargs = inject_server_entrypoint(  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
+            config.get("stage_kwargs", {}),
+            config.get("stage_kwargs", {}).get("model", ""),
+        )
         num_random_seeds = stage_kwargs.get("num_random_seeds", 1)
 
         console.status("Evaluating answers for correctness and answerability")
@@ -78,7 +82,7 @@ class EvaluateAnswersStage(BaseStage):
 
         console.detail("Generation folder", str(generation_folder))
 
-        script_path = "/workspace/nvflow/recipes/finance/utils/sdg/parse_evaluate_responses.py"
+        module = "nvflow.recipes.finance.utils.sdg.parse_evaluate_responses"
 
         console.status("Running LLM generation to evaluate answers")
         ctx = wrap_arguments(f"++prompt_config={prompt_config} {inline_args}")
@@ -104,8 +108,8 @@ class EvaluateAnswersStage(BaseStage):
                 output_file if output_file else str(generation_folder / "evaluated.jsonl")
             )
 
-            parse_cmd = f"python {script_path} parse --input_file {generated_file} --output_file {parsed_file}"
-            filter_cmd = f"python {script_path} filter --input_file {parsed_file} --output_file {final_output}"
+            parse_cmd = f"python3 -m {module} parse --input_file {generated_file} --output_file {parsed_file}"
+            filter_cmd = f"python3 -m {module} filter --input_file {parsed_file} --output_file {final_output}"
             postprocess_cmd = f"{parse_cmd} && {filter_cmd}"
 
             generate(

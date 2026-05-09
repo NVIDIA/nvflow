@@ -1,0 +1,13 @@
+# Smoke test configuration for SEC filing downloads
+# Only 2 tickers, 1 year for minimal testing
+
+tickers:
+  - "NVDA"
+  - "AAPL"
+
+start_year: 2024
+end_year: 2024
+
+forms:
+  - "10-K"
+  - "10-Q"

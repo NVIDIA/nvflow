@@ -12,7 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Transform raw SDG dataset to standard training format (shared: SFT + GRPO)."""
+"""Transform raw SDG dataset to standard training format (shared: SFT + GRPO).
+
+For GRPO workflows with ``environments``, runs per-environment: each
+environment's ``raw_train_data`` is transformed and written to
+``{output_dir}/{env_name}/``.
+
+For SFT workflows (no ``environments``), runs once with ``input_files``
+and ``output_file`` from config (SFT single-dataset mode).
+"""
 
 from typing import Any
 
@@ -38,23 +46,75 @@ class DataTransformationStage(BaseStage):
         expname: str,
         run_after: list[str] | None = None,
     ) -> None:
-        """Execute data transformation."""
-        from nemo_skills.pipeline.cli import run_cmd, wrap_arguments
+        """Execute data transformation (per-environment when environments present)."""
+        environments = config.get("environments")
+        if environments:
+            self._execute_per_env(config, cluster, expname, run_after)
+        else:
+            self._execute_sft(config, cluster, expname, run_after)
 
+    def _execute_per_env(
+        self,
+        config: dict[str, Any],
+        cluster: str,
+        expname: str,
+        run_after: list[str] | None = None,
+    ) -> None:
+        from nvflow.lib.rl.helpers import resolve_environments
+
+        environments = resolve_environments(config)
+        base_output_dir = config["output_dir"]
+        num_chunks = config.get("num_chunks", 1)
+        # Filenames are YAML-driven (default preserves existing behaviour).
+        input_filename = config.get("input_filename", "final_result.jsonl")
+        output_filename = config.get("output_filename", "final_result.jsonl")
+
+        for env_name, env_cfg in environments.items():
+            raw_data = env_cfg.get("raw_train_data")
+            if not raw_data:
+                console.warning(f"Skipping environment '{env_name}': no raw_train_data configured")
+                continue
+
+            env_output_dir = f"{base_output_dir}/{env_name}"
+            env_output_file = f"{env_output_dir}/{output_filename}"
+            source_format = env_cfg.get("source_format", "separated")
+            reasoning_mode = env_cfg.get("reasoning_mode", "none")
+
+            console.status(f"Transforming dataset for environment: {env_name}")
+            console.detail("Input", f"{raw_data}/{input_filename}")
+            console.detail("Output", f"{env_output_dir}/chunks/ ({num_chunks} chunks)")
+            console.detail("Source format", source_format)
+            console.detail("Reasoning mode", reasoning_mode)
+            console.blank()
+
+            self._submit_transform_job(
+                input_files=[f"{raw_data}/{input_filename}"],
+                output_file=env_output_file,
+                output_dir=env_output_dir,
+                source_format=source_format,
+                reasoning_mode=reasoning_mode,
+                num_chunks=num_chunks,
+                config=config,
+                cluster=cluster,
+                expname=f"{expname}-{env_name}",
+                run_after=run_after,
+            )
+
+    def _execute_sft(
+        self,
+        config: dict[str, Any],
+        cluster: str,
+        expname: str,
+        run_after: list[str] | None = None,
+    ) -> None:
+        """SFT single-dataset mode."""
         input_files = config["input_files"]
         if isinstance(input_files, str):
             input_files = [input_files]
 
         output_file = config["output_file"]
-
-        # Source format - how the SDG data is structured
-        # Options: "separated", "think_tags", "inline"
         source_format = config.get("source_format", "separated")
-
-        # Reasoning mode - how to format generation for training
-        # Options: "thinking", "natural", "none"
         reasoning_mode = config.get("reasoning_mode", "none")
-
         num_chunks = config.get("num_chunks", 1)
         output_dir = config.get("output_dir", "/tmp")
 
@@ -67,7 +127,35 @@ class DataTransformationStage(BaseStage):
         console.detail("Reasoning mode", reasoning_mode)
         console.blank()
 
-        # Build the transformation command with multiple input files
+        self._submit_transform_job(
+            input_files=input_files,
+            output_file=output_file,
+            output_dir=output_dir,
+            source_format=source_format,
+            reasoning_mode=reasoning_mode,
+            num_chunks=num_chunks,
+            config=config,
+            cluster=cluster,
+            expname=expname,
+            run_after=run_after,
+        )
+
+    def _submit_transform_job(
+        self,
+        *,
+        input_files: list[str],
+        output_file: str,
+        output_dir: str,
+        source_format: str,
+        reasoning_mode: str,
+        num_chunks: int,
+        config: dict[str, Any],
+        cluster: str,
+        expname: str,
+        run_after: list[str] | None,
+    ) -> None:
+        from nemo_skills.pipeline.cli import run_cmd, wrap_arguments
+
         input_files_str = " ".join(f"'{f}'" for f in input_files)
         cmd = (
             f"python -m nvflow.recipes.finance.utils.shared.dataset_transformer "
@@ -78,11 +166,9 @@ class DataTransformationStage(BaseStage):
         cmd += f" --source_format {source_format}"
         cmd += f" --reasoning_mode {reasoning_mode}"
 
-        # Add chunking options if enabled
         if num_chunks > 1:
             cmd += f" --num_chunks {num_chunks}"
 
-        # Add filtering options if enabled
         filter_outliers = config.get("filter_outliers", False)
         if filter_outliers:
             cmd += " --filter_outliers"
@@ -98,28 +184,44 @@ class DataTransformationStage(BaseStage):
             cmd += f" --reasoning_min_percentile {reasoning_min}"
             cmd += f" --reasoning_max_percentile {reasoning_max}"
 
-        # Submit transformation job
+        if config.get("deduplicate_by_uuid", False):
+            cmd += " --deduplicate_by_uuid"
+
         run_cmd(
             ctx=wrap_arguments(cmd),
             cluster=cluster,
-            log_dir=f"{config.get('output_dir', '/tmp')}/logs",
+            log_dir=f"{output_dir}/logs",
             expname=expname,
             run_after=run_after,
         )
 
-        # Output always goes to chunks/ directory (consistent structure regardless of num_chunks)
         console.success(
             f"Data transformation job submitted → {output_dir}/chunks/ ({num_chunks} chunks)"
         )
 
     def validate_config(self, config: dict[str, Any]) -> None:
         """Validate that required configuration fields are present."""
-        for field in ("input_files", "output_file"):
-            if field not in config:
-                raise ValueError(f"'{field}' is required in data_transformation config")
-
-        if config.get("source_format") == "inline" and config.get("reasoning_mode") == "thinking":
-            raise ValueError(
-                "Invalid combination: source_format='inline' + reasoning_mode='thinking'. "
-                "Use reasoning_mode='natural' or 'none' for inline source format."
-            )
+        if config.get("environments"):
+            if "output_dir" not in config:
+                raise ValueError("'output_dir' is required in data_transformation config")
+            for env_name, env_cfg in config["environments"].items():
+                sf = env_cfg.get("source_format", "separated")
+                rm = env_cfg.get("reasoning_mode", "none")
+                if sf == "inline" and rm == "thinking":
+                    raise ValueError(
+                        f"Invalid combination in environment '{env_name}': "
+                        f"source_format='inline' + reasoning_mode='thinking'. "
+                        "Use reasoning_mode='natural' or 'none' for inline source format."
+                    )
+        else:
+            for field in ("input_files", "output_file"):
+                if field not in config:
+                    raise ValueError(f"'{field}' is required in data_transformation config")
+            if (
+                config.get("source_format") == "inline"
+                and config.get("reasoning_mode") == "thinking"
+            ):
+                raise ValueError(
+                    "Invalid combination: source_format='inline' + reasoning_mode='thinking'. "
+                    "Use reasoning_mode='natural' or 'none' for inline source format."
+                )

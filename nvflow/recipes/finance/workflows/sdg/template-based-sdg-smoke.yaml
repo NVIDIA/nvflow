@@ -1,0 +1,69 @@
+# ============================================================================
+# Finance SDG Pipeline - Smoke Test Configuration
+# ============================================================================
+# Minimal configuration for full pipeline smoke testing.
+# 2 companies, 5 seed questions, 1 random seed, 1 year.
+# Inherits demo config (which inherits production config).
+#
+# Usage:
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/sdg/template-based-sdg-smoke.yaml
+# ============================================================================
+
+_base_: template-based-sdg-demo.yaml
+
+base_output_dir: /workspace/outputs/finance/smoke/workflow-3-template-based-sdg
+
+filings_dir: /workspace/outputs/finance/smoke/workflow-2-download-sec/step-0-download
+
+pipeline_stages:
+  - create_seed_data
+  - generate_questions
+  - map_questions_to_context
+  - generate_answers
+  - genselect_answers
+
+# ============================================================================
+# Smoke Test Overrides - Minimize data at every stage
+# ============================================================================
+stages:
+
+  create_seed_data:
+    output_file: ${directories.step-0-create-seed-data}/seed_questions_smoke.jsonl
+    company_info_file: ${directories.step-0-create-seed-data}/company_info_smoke.tsv
+    filter_company_list: "NVDA,AAPL"
+    num_seed_questions: 5
+    dependencies: []
+
+  generate_questions:
+    input_file: ${directories.step-0-create-seed-data}/seed_questions_smoke.jsonl
+    company_info_file: ${directories.step-0-create-seed-data}/company_info_smoke.tsv
+    start_year: 2024
+    end_year: 2024
+    inline_args: "++chat_template_kwargs.enable_thinking=false"
+    stage_kwargs:
+      model: /hf_models/Qwen/Qwen3-4B
+      server_type: vllm
+      server_gpus: 1
+      server_nodes: 1
+      server_args: "--max-model-len 16384"
+
+  generate_answers:
+    inline_args: "++chat_template_kwargs.enable_thinking=false"
+    stage_kwargs:
+      model: /hf_models/Qwen/Qwen3-4B
+      server_type: vllm
+      server_gpus: 1
+      server_nodes: 1
+      num_chunks: 1
+      num_random_seeds: 1
+      server_args: "--max-model-len 16384"
+
+  genselect_answers:
+    inline_args: "++chat_template_kwargs.enable_thinking=false"
+    stage_kwargs:
+      model: /hf_models/Qwen/Qwen3-4B
+      server_type: vllm
+      server_gpus: 1
+      server_nodes: 1
+      num_chunks: 1
+      server_args: "--max-model-len 16384"

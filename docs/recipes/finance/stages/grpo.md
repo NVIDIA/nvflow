@@ -1,6 +1,6 @@
 # GRPO Stages Reference
 
-Technical reference for all 9 stages in the GRPO RL training workflow (8 active + 1 optional).
+Technical reference for all 10 stages in the GRPO RL training workflow (9 active + 1 optional).
 
 ## Quick Navigation
 
@@ -232,6 +232,8 @@ Collect model rollouts against a NeMo-Gym environment with reward scoring. Suppo
 | `num_chunks` | int | Split input into N parallel jobs | `1` |
 | `num_random_seeds` | int | Independent runs per chunk | `1` |
 | `starting_seed` | int | First seed value | `0` |
+| `dependent_jobs` | int | Chain N+1 Slurm jobs per chunk via `afterany` for timeout recovery | `0` |
+| `responses_create_params` | dict | Pass-through params for NeMo-Gym (e.g., `max_output_tokens`) | `{}` |
 | `rerun_done` | bool | Force re-execution | `false` |
 | `num_gpus` | int | GPUs per Slurm job | `8` |
 | `tensor_parallel_size` | int | Policy vLLM TP | `2` |
@@ -252,7 +254,7 @@ Collect model rollouts against a NeMo-Gym environment with reward scoring. Suppo
 ### Execution Model
 
 ```
-Total Slurm jobs = num_chunks × num_random_seeds
+Total Slurm jobs = num_chunks × num_random_seeds × (dependent_jobs + 1)
 ```
 
 Each job is self-contained:
@@ -263,7 +265,7 @@ Each job is self-contained:
 5. Write `.done` file on completion
 
 After all chunk jobs complete, a merge job per seed:
-1. Concatenates chunk files → `rollouts-rs{seed}.jsonl`
+1. Concatenates chunk files → `output-rs{seed}.jsonl`
 2. Enriches rollouts with input metadata (uuid, question, etc.)
 3. Runs reward analysis (distribution, verdicts, difficulty)
 4. Deletes individual chunk files
@@ -276,20 +278,33 @@ After all chunk jobs complete, a merge job per seed:
 - Reward distribution (correct / incorrect / partial)
 - Judge verdict breakdown
 - RL signal assessment (warns if rewards are too uniform)
-- Difficulty analysis (per-question pass rates when `num_repeats > 1`)
+- Difficulty analysis (per-question `reward_std`, `reward_min`, `reward_max` when `num_repeats > 1`)
+
+**Aggregation** (`aggregate_seeds.py`): When multiple random seeds are used, aggregates per-question statistics across seeds to compute cross-seed `reward_std` and `pass@k` metrics. Output is written to the `aggregate/` subdirectory.
+
+**Filtering** (`filter_training_data.py`): Filters the training data based on difficulty metrics (e.g., `min_reward_std`) to remove questions that are too easy (all correct) or too hard (all incorrect), keeping only questions with meaningful reward variance for RL training.
+
+### Resume and Robustness
+
+- **`.done` markers**: Each chunk writes a `.done` file on successful completion. Subsequent runs (including `dependent_jobs` chains) skip completed chunks automatically.
+- **`.prev` backup**: Before merging, the previous merged output is saved as `.prev` to prevent data loss if the merge job is interrupted.
+- **Self-heal**: If a chunk job is interrupted mid-write, the next job in the `dependent_jobs` chain detects incomplete files and re-runs from the last checkpoint.
+- **`dependent_jobs` retry**: Jobs are chained via Slurm `afterany`, so the next job runs regardless of how the previous one exited (success, timeout, or failure).
 
 ### Outputs
 
 ```
 ${output_dir}/
-├── rollouts-rs0.jsonl           # Merged, enriched rollouts
-├── analysis_rs0/
-│   ├── summary.txt              # Human-readable analysis
-│   ├── correct.jsonl            # Samples with reward == 1.0
-│   ├── incorrect.jsonl          # Samples with reward == 0.0
-│   ├── partial.jsonl            # Samples with 0 < reward < 1
-│   ├── judge_failed.jsonl       # Samples with no judge evaluations
-│   └── difficulty.jsonl         # Per-question pass rates (if repeats)
+├── rollout/
+│   ├── output-rs0.jsonl         # Merged, enriched rollouts
+│   ├── analysis_rs0/
+│   │   ├── summary.txt          # Human-readable analysis
+│   │   ├── best.jsonl           # Samples with highest reward
+│   │   ├── worst.jsonl          # Samples with lowest reward
+│   │   ├── partial.jsonl        # Samples with 0 < reward < 1
+│   │   ├── judge_failed.jsonl   # Samples with no judge evaluations
+│   │   └── difficulty.jsonl     # Per-question reward_std, reward_min, reward_max
+│   └── aggregate/               # Cross-seed aggregation (reward_std, pass@k)
 ├── scripts/                     # Generated Slurm scripts
 └── logs/                        # vLLM, ng_run, and merge logs
 ```
@@ -365,8 +380,7 @@ Run GRPO reinforcement learning using NeMo-RL with online NeMo-Gym environment r
 | `hf_checkpoint_path` | path | Model weights path | Required |
 | `preset` | string | GRPO preset name from `grpo_presets.yaml` | Required |
 | `backend` | string | `"fsdp"` or `"megatron"` | `"fsdp"` |
-| `num_nodes` | int | Number of nodes | `1` |
-| `num_gpus` | int | GPUs per node | `8` |
+| `total_gpus` | int | Total GPUs for training (auto-split across nodes) | `16` (demo) / `64` (production) |
 | `dependent_jobs` | int | Multi-job chaining for long runs | `0` |
 | `training_data` | path | Training JSONL (from prepare_data) | Required |
 | `validation_data` | path | Validation JSONL | Required |
@@ -417,7 +431,7 @@ ${output_dir}/grpo-{model}-{nodes}n-tp{tp}-cp{cp}-seq{seq}k/
 
 | Model Size | GPUs | Runtime (demo) |
 |------------|------|----------------|
-| 4B | 8 (1 node) | ~20 min |
+| 4B | 16 (2 nodes) | ~20 min |
 | 14B | 64 (8 nodes) | TBD |
 
 ---
@@ -440,7 +454,7 @@ Also registered for the SFT workflow, making it a shared evaluation stage across
 | `eval_output_dir` | path | Output directory for evaluation results | Required |
 | `eval_steps` | list | Checkpoint steps to evaluate | `[]` |
 | `checkpoint_path` | path | Path to training checkpoints | Required |
-| `format` | string | Checkpoint format: `"hf"`, `"fsdp"`, `"megatron"` | `"megatron"` |
+| `format` | string | Checkpoint format: `"hf"`, `"fsdp"`, `"megatron"` | `"fsdp"` (demo) / `"megatron"` (production) |
 | `baseline_model` | path | Baseline model for comparison evaluation | Optional |
 | `server_type` | string | Inference server type | `"vllm"` |
 | `gpus` | int | GPUs for inference server | `1` |

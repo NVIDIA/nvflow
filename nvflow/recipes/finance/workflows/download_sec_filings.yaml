@@ -13,10 +13,25 @@ cluster: my_cluster
 output_dir: /workspace/outputs/finance
 
 pipeline_stages:
+  - smoke
   - demo
   - sap-500
 
 stages:
+
+  # Smoke stage: 2 companies, 1 year for pipeline smoke testing
+  smoke:
+    output_dir: ${output_dir}/smoke/workflow-2-download-sec/step-0-download
+    config: nvflow/recipes/finance/configs/smoke.yaml
+    sec_identity_email: your.email@email.com  # UPDATE: Your email (required by SEC)
+    sec_identity_company: YourCompany         # UPDATE: Your company name
+    dependencies: []
+    stage_kwargs:
+      installation_command: >-
+        pip install -q --root-user-action=ignore
+        edgartools==5.20.2 sec-parser pandas pyarrow tqdm httpx tzdata &&
+        ln -sfn $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo
+        /usr/share/zoneinfo 2>/dev/null || true
 
   # Demo stage: 7 companies for quick testing
   demo:
@@ -29,8 +44,8 @@ stages:
       installation_command: >-
         pip install -q --root-user-action=ignore
         edgartools==5.20.2 sec-parser pandas pyarrow tqdm httpx tzdata &&
-        ln -sfn $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo
-        /usr/share/zoneinfo 2>/dev/null || true
+        rm -rf /usr/share/zoneinfo &&
+        ln -s $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo /usr/share/zoneinfo
 
   # Production stage: Full S&P 500
   sap-500:
@@ -43,5 +58,5 @@ stages:
       installation_command: >-
         pip install -q --root-user-action=ignore
         edgartools==5.20.2 sec-parser pandas pyarrow tqdm httpx tzdata &&
-        ln -sfn $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo
-        /usr/share/zoneinfo 2>/dev/null || true
+        rm -rf /usr/share/zoneinfo &&
+        ln -s $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo /usr/share/zoneinfo

@@ -41,11 +41,11 @@ Workflow (Pipeline: download, sdg, sft, eval, grpo)
 Stage (Task: generate_answers, training, evaluate)
 ```
 
-**Example Path:** `finance.training_sft.sft` → `SFTStage` class
+**Example Path:** `finance.sft.sft` → `SFTStage` class
 
 ---
 
-## 📊 Finance Recipe Pipeline (6 Workflows, 27 Stages)
+## 📊 Finance Recipe Pipeline (6 Workflows, 42 Stages)
 
 ```
 1. download-sec (1 stage)
@@ -63,7 +63,7 @@ Stage (Task: generate_answers, training, evaluate)
 5. eval (2 stages, dynamically expanded)
    └─ Prepare → Evaluate checkpoints → Compare → Results
 
-6. grpo
+6. grpo (10 stages: 9 active + 1 optional)
    └─ GRPO reinforcement learning workflow
 ```
 
@@ -105,7 +105,7 @@ nvflow/
 ├── core/              # Framework (BaseStage, Registry, Runner)
 ├── cli/               # CLI interface (nflow commands)
 └── recipes/           # Domain-specific implementations
-    ├── finance/       # 27 stages, 6 workflows
+    ├── finance/       # 42 stages, 6 workflows
     │   ├── stages/    # Stage implementations
     │   ├── workflows/ # YAML configs
     │   └── prompts/   # Prompt templates
@@ -121,7 +121,7 @@ nvflow/
 nflow list-stages --recipe finance
 
 # Get stage info
-nflow stage-info finance.training_sft.sft
+nflow stage-info finance.sft.sft
 
 # Run single stage
 nflow run sft --config workflow.yaml

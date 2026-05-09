@@ -77,7 +77,7 @@ stages:
     backend: fsdp
 
     # Cluster configuration for 1B model
-    num_nodes: 1             # 1 node × 8 GPUs = 8 GPUs (demo)
+    total_gpus: 8
     dependent_jobs: 0        # No dependent jobs for demo
 
     # Use base preset with model-specific overrides
@@ -147,7 +147,7 @@ stages:
     backend: megatron
 
     # Cluster configuration for 1B model
-    num_nodes: 1             # 1 node × 8 GPUs = 8 GPUs (demo)
+    total_gpus: 8
     dependent_jobs: 0        # No dependent jobs for demo
 
     # Use base preset with model-specific overrides

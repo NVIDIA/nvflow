@@ -1,0 +1,7 @@
+# Scope: demo (small dataset for development & smoke tests).
+# Pairs with data_root: /workspace/outputs/finance/demo in the model config.
+finance_sec_search_resources_server:
+  resources_servers:
+    finance_sec_search:
+      cache_dir: /workspace/outputs/finance/demo/workflow-5-grpo/cache/finance_sec_search
+      sec_dump_path: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download/data

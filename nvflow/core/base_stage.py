@@ -62,7 +62,7 @@ class BaseStage(ABC):
             >>> config = {
             ...     "input_dir": "/data/raw",
             ...     "output_dir": "/data/processed",
-            ...     "stage_kwargs": {"partition": "cpu"}
+            ...     "stage_kwargs": {"installation_command": "pip install -q pandas"}
             ... }
             >>> stage.execute(config, "nrt", "my-exp-data-download", run_after=None)
         """

@@ -19,12 +19,17 @@ Recipe-agnostic utilities used by ``nvflow.lib.rl.rollout`` and
 
 General utilities:
   - ``resolve_host_path``: maps /workspace/ container paths to host paths.
+  - ``check_launcher_cwd``: preflight check -- fails fast if cwd is not the
+    nvflow project root (required by ``resolve_host_path``).
   - ``build_config_paths_str``: assembles NeMo-Gym config_paths with overlay.
 
 vLLM server configuration:
   - ``build_vllm_server_args``: converts vLLM YAML config to ``--key value``
     CLI args suitable for ``nemo_skills.pipeline.utils.scripts.ServerScript(server_args=...)``.
   - ``compute_num_gpus``: auto-compute Slurm GPU request from per-endpoint num_gpus.
+  - ``_overlay_path`` / ``_build_overlay_setup_cmd``: content-addressed model
+    overlay directories for per-environment HF config overrides (e.g. YaRN).
+    The overlay is created inside the Slurm job via :mod:`nvflow.lib.rl.create_overlay`.
 
 Judge configuration:
   - ``determine_judge_mode``, ``validate_judge_config``: mode detection & validation.
@@ -36,8 +41,12 @@ Judge configuration:
 
 Shell / script templates:
   - ``SHELL_WAIT_FOR_SERVER``: reusable bash function for health-check polling.
+  - ``CONTAINER_WORKSPACE``: mount point for the nvflow project root inside
+    Slurm containers (used for ``PYTHONPATH`` in inline bash scripts).
 """
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -46,29 +55,118 @@ from typing import Any
 # ============================================================================
 
 
+CONTAINER_WORKSPACE = "/workspace"
+"""Mount point for the nvflow project root inside Slurm containers."""
+
+CONTAINER_CODE_DIR = "/nemo_run/code"
+"""Snapshot of the nvflow codebase inside Slurm containers (nemo-run packager)."""
+
+_WORKSPACE_PREFIX = CONTAINER_WORKSPACE + "/"
+
+
 def resolve_host_path(container_path: str) -> Path:
-    """Map a /workspace/ container path to the host filesystem.
+    """Map a ``/workspace/`` container path to the host filesystem.
 
-    The Lustre mount maps the nvflow project root to /workspace inside the
-    container (see cluster_configs/my_cluster.yaml mounts).  On the submission host
-    /workspace doesn't exist, so we replace the prefix with "./" which
-    resolves to the same Lustre directory.
+    The Slurm container mounts the nvflow project root at
+    :data:`CONTAINER_WORKSPACE` (``/workspace``).  On the submission host
+    that path doesn't exist, so the prefix is replaced with ``./`` which
+    resolves to the same Lustre directory -- provided the launcher is run
+    from the nvflow project root.
 
-    IMPORTANT: Assumes ``uv run nflow ...`` is executed from the nvflow
-    project root.  ``uv run`` enforces this by default.
+    **Launcher requirement**: the process calling this function must be
+    running on a host that has Lustre mounted and the cwd must be the
+    nvflow project root (``uv run nflow ...`` enforces this by default).
+    Call :func:`check_launcher_cwd` early to fail fast with a clear
+    message if this assumption is violated.
     """
-    if container_path.startswith("/workspace/") and not Path("/workspace").exists():
-        return Path(container_path.replace("/workspace/", "./"))
+    if container_path.startswith(_WORKSPACE_PREFIX) and not Path(CONTAINER_WORKSPACE).exists():
+        return Path(container_path.replace(_WORKSPACE_PREFIX, "./"))
     return Path(container_path)
+
+
+def check_launcher_cwd() -> None:
+    """Validate that the launcher is running from the nvflow project root.
+
+    :func:`resolve_host_path` maps container paths to ``./`` relative
+    paths, which only works when the cwd is the nvflow project root on a
+    Lustre-mounted host.  This function checks for the ``pyproject.toml``
+    marker file and raises early with a clear message if it's missing.
+    """
+    marker = Path("pyproject.toml")
+    if not marker.exists():
+        raise RuntimeError(
+            f"Launcher must run from the nvflow project root "
+            f"(expected '{marker}' in cwd={Path.cwd()}). "
+            f"Use 'uv run nflow ...' which enforces this automatically."
+        )
+
+
+VLLM_MODEL = "responses_api_models/vllm_model/configs/vllm_model.yaml"
+VLLM_MODEL_FOR_TRAINING = "responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
+SERVER_CONTAINER = "vllm"
+"""Container name for vLLM server jobs (matches cluster_configs key)."""
+
+
+def resolve_environments(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the environments to process based on the ``_environment`` filter.
+
+    ``config["_environment"]`` may be a single name (``str``), a list of
+    names (``list[str]``), or ``None``.  When set, only the matching
+    entries are returned (preserving order).  When ``None``, all
+    environments from ``config["environments"]`` are returned.
+
+    Raises ``ValueError`` if a requested environment doesn't exist.
+    """
+    envs = config.get("environments", {})
+    if not envs:
+        raise ValueError("'environments' dict is required but missing from config")
+    selected = config.get("_environment")
+    if selected:
+        names = [selected] if isinstance(selected, str) else list(selected)
+        for name in names:
+            if name not in envs:
+                available = ", ".join(envs.keys())
+                raise ValueError(f"Unknown environment '{name}'. Available: {available}")
+        return {name: envs[name] for name in names}
+    return envs
+
+
+def get_env_from_environments(config: dict[str, Any]) -> tuple[str, str, str]:
+    """Derive NeMo-Gym identifiers from the ``environments`` dict.
+
+    Returns ``(resources_server_name, env_inner_name, agent_name)`` where:
+
+    - *resources_server_name*: NeMo-Gym top-level config key.  Defaults to
+      the env dict key but can be overridden via ``resources_server_name``
+      in the environment config (needed when the NeMo-Gym YAML uses a
+      different top-level key, e.g. ``finance_sec_search_resources_server``).
+    - *env_inner_name*: the env dict key, which always matches the inner
+      ``resources_servers`` key in NeMo-Gym configs.
+    - *agent_name*: for single-env returns the configured agent name; for
+      multi-env returns empty (triggers ``agent_ref`` routing).
+    """
+    environments = config["environments"]
+    env_names = list(environments.keys())
+    if len(env_names) == 1:
+        env_cfg = environments[env_names[0]]
+        rs_name = env_cfg.get("resources_server_name", env_names[0])
+        return rs_name, env_names[0], env_cfg.get("agent_name", f"{env_names[0]}_simple_agent")
+    env_cfg = environments[env_names[0]]
+    rs_name = env_cfg.get("resources_server_name", env_names[0])
+    return rs_name, env_names[0], ""
 
 
 def build_config_paths_str(config: dict[str, Any]) -> str:
     """Build the comma-separated NeMo-Gym config_paths string.
 
-    Starts from ``nemo_gym_config_paths`` and appends the agent config
-    overlay from ``prepare_data_dir`` if set.
+    Prepends ``vllm_model.yaml`` and combines all environment
+    config_paths from the ``environments`` dict.  Appends the agent
+    config overlay from ``prepare_data_dir`` if set.
     """
-    config_paths = list(config["nemo_gym_config_paths"])
+    environments = config["environments"]
+    config_paths = [VLLM_MODEL]
+    for env_cfg in environments.values():
+        config_paths.extend(env_cfg.get("config_paths", []))
     prepare_data_dir = config.get("prepare_data_dir")
     if prepare_data_dir:
         config_paths.append(f"{prepare_data_dir}/agent_config_overlay.yaml")
@@ -76,10 +174,10 @@ def build_config_paths_str(config: dict[str, Any]) -> str:
 
 
 # ============================================================================
-# Judge configuration
+# vLLM & judge configuration
 # ============================================================================
 
-JUDGE_NON_VLLM_KEYS = frozenset(
+NON_VLLM_KEYS = frozenset(
     {
         "num_gpus",
         "server_nodes",
@@ -91,9 +189,16 @@ JUDGE_NON_VLLM_KEYS = frozenset(
         "uses_reasoning_parser",
         "tensor_parallel_size",
         "trust_remote_code",
+        "hf_config_overrides",
+        "server_entrypoint",
     }
 )
-"""Keys in ``judge_vllm`` config that are NOT vLLM server CLI flags."""
+"""Keys in vLLM config dicts that are NOT ``vllm serve`` CLI flags.
+
+Used by both policy and judge vLLM configs -- callers strip these before
+passing the remaining keys to :func:`build_vllm_server_args`.
+``hf_config_overrides`` is handled separately via model overlay (see :func:`_overlay_path`).
+"""
 
 
 def _judge_cfg(config: dict[str, Any]) -> dict[str, Any]:
@@ -191,9 +296,46 @@ def build_vllm_server_args(overrides: dict[str, Any]) -> str:
         if isinstance(value, bool):
             if value:
                 parts.append(cli_key)
+        elif isinstance(value, str) and value.startswith("{"):
+            parts.append(f"{cli_key} '{value}'")
         else:
             parts.append(f"{cli_key} {value}")
     return " ".join(parts)
+
+
+def _overlay_path(model_path: str, hf_config_overrides: dict[str, Any]) -> str:
+    """Compute the deterministic overlay directory path for *model_path*.
+
+    The overlay name is content-addressed: it includes a hash of the
+    serialized *hf_config_overrides* so a new overlay is created only
+    when the overrides change.
+    """
+    override_json = json.dumps(hf_config_overrides, sort_keys=True)
+    digest = hashlib.sha256(override_json.encode()).hexdigest()[:12]
+    model_name = model_path.rstrip("/").rsplit("/", 1)[-1]
+    overlay_name = f"{model_name}-overlay-{digest}"
+    return model_path.rstrip("/").rsplit("/", 1)[0] + "/" + overlay_name
+
+
+def _build_overlay_setup_cmd(
+    model_path: str,
+    overlay_path: str,
+    hf_config_overrides: dict[str, Any],
+) -> str:
+    """Return a bash snippet that creates a symlinked model overlay.
+
+    The snippet is designed to run **inside the Slurm job** (where
+    container mounts are available) before the vLLM server starts.
+    It invokes :mod:`nvflow.lib.rl.create_overlay` which is mounted
+    at ``/nemo_run/code/`` inside the container.
+    """
+    overrides_json = json.dumps(hf_config_overrides, sort_keys=True)
+    return (
+        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.create_overlay"
+        f" --model-path {model_path}"
+        f" --overlay-path {overlay_path}"
+        f" --overrides '{overrides_json}'"
+    )
 
 
 def build_judge_ng_run_overrides(
@@ -204,7 +346,9 @@ def build_judge_ng_run_overrides(
 ) -> str:
     """Build ng_run CLI overrides that configure the judge model server.
 
-    Reads from ``config["judge_vllm"]`` and ``config["environment_name"]``.
+    Reads from ``config["judge_vllm"]``, ``config["environment_name"]``
+    (NeMo-Gym top-level key), and ``config["environment_inner_name"]``
+    (inner ``resources_servers`` key, defaults to ``environment_name``).
     For policy_as_judge: returns empty string (judge uses policy_model).
 
     Args:
@@ -212,8 +356,9 @@ def build_judge_ng_run_overrides(
     """
     jcfg = _judge_cfg(config)
     env_name = config["environment_name"]
+    inner_name = config.get("environment_inner_name", env_name)
     judge_server_override = (
-        f'    "+{env_name}.resources_servers.{env_name}.judge_model_server.name=judge_model" \\\n'
+        f'    "+{env_name}.resources_servers.{inner_name}.judge_model_server.name=judge_model" \\\n'
     )
 
     if judge_mode in ("local_vllm", "external_vllm"):
@@ -244,6 +389,7 @@ def build_judge_ng_run_overrides(
         ]
         return "".join(lines)
 
+    # policy_as_judge: no judge overrides needed
     return ""
 
 
@@ -251,7 +397,8 @@ def build_judge_nemo_gym_config(
     config: dict[str, Any],
     judge_mode: str,
     *,
-    environment_name: str = "equivalence_llm_judge",
+    environment_name: str,
+    environment_inner_name: str = "",
     judge_url_var: str = "",
 ) -> dict[str, Any]:
     """Build a dict fragment to merge into NeMo-Gym ``initial_global_config_dict``.
@@ -273,7 +420,12 @@ def build_judge_nemo_gym_config(
     Args:
         config: Stage config containing ``judge_vllm`` sub-config.
         judge_mode: One of the modes returned by :func:`determine_judge_mode`.
-        environment_name: NeMo-Gym resource server name (top-level config key).
+        environment_name: NeMo-Gym top-level config key (may differ from
+            the inner ``resources_servers`` key for environments that use
+            the ``_resources_server`` suffix convention).
+        environment_inner_name: Inner ``resources_servers`` key.  Defaults
+            to *environment_name* when empty (backward compatible with
+            environments where both keys are the same).
         judge_url_var: For ``local_vllm`` mode, the URL (or shell variable)
             where the judge vLLM engine will be reachable.  Ignored for other
             modes.
@@ -282,11 +434,12 @@ def build_judge_nemo_gym_config(
         return {}
 
     jcfg = _judge_cfg(config)
+    inner_name = environment_inner_name or environment_name
 
     judge_server_name_override = {
         environment_name: {
             "resources_servers": {
-                environment_name: {
+                inner_name: {
                     "judge_model_server": {"name": "judge_model"},
                 },
             },
@@ -313,22 +466,20 @@ def build_judge_nemo_gym_config(
             **judge_server_name_override,
         }
 
-    if judge_mode == "openai":
-        return {
-            "judge_model": {
-                "responses_api_models": {
-                    "openai_model": {
-                        "entrypoint": "app.py",
-                        "openai_base_url": jcfg["openai_base_url"],
-                        "openai_api_key": jcfg.get("openai_api_key", ""),
-                        "openai_model": jcfg["openai_model"],
-                    },
+    # judge_mode == "openai"
+    return {
+        "judge_model": {
+            "responses_api_models": {
+                "openai_model": {
+                    "entrypoint": "app.py",
+                    "openai_base_url": jcfg["openai_base_url"],
+                    "openai_api_key": jcfg.get("openai_api_key", ""),
+                    "openai_model": jcfg["openai_model"],
                 },
             },
-            **judge_server_name_override,
-        }
-
-    return {}
+        },
+        **judge_server_name_override,
+    }
 
 
 # ============================================================================
@@ -341,6 +492,22 @@ def build_judge_nemo_gym_config(
 SHELL_FIND_FREE_PORT = """\
 find_free_port() {
     python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()"
+}
+"""
+
+SHELL_READ_PORT_FILE = """\
+read_port_file() {
+    local path="$1" name="$2" timeout="${3:-120}"
+    local elapsed=0
+    while [ ! -f "$path" ]; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+        if [ $elapsed -ge $timeout ]; then
+            echo "ERROR: $name port file not found after ${timeout}s: $path" >&2
+            exit 1
+        fi
+    done
+    cat "$path"
 }
 """
 

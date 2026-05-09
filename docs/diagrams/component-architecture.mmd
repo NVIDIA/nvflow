@@ -66,7 +66,7 @@ classDiagram
 
     %% Concrete Stage Examples
     class SFTStage {
-        +workflow: "training_sft"
+        +workflow: "sft"
         +execute(config, cluster, expname, run_after)
         +validate_config(config)
     }
@@ -127,9 +127,9 @@ classDiagram
     EvaluateStage ..> NemoSkills : delegates to
 
     %% Notes
-    note for BaseStage "All stages inherit from BaseStage\nand implement execute() method.\nStages are registered via decorator:\n@StageRegistry.register(\n  recipe='finance',\n  workflow='training_sft',\n  stage='sft'\n)"
+    note for BaseStage "All stages inherit from BaseStage\nand implement execute() method.\nStages are registered via decorator:\n@StageRegistry.register(\n  recipe='finance',\n  workflow='sft',\n  stage='sft'\n)"
 
-    note for StageRegistry "Hierarchical registry:\nRecipe → Workflow → Stage\n\nExample:\nfinance.training_sft.sft\n↓\nSFTStage class"
+    note for StageRegistry "Hierarchical registry:\nRecipe → Workflow → Stage\n\nExample:\nfinance.sft.sft\n↓\nSFTStage class"
 
     note for WorkflowRunner "Loads YAML configs with\ninheritance support (_base_ key)\nManages stage dependencies\nGenerates unique expnames"
 

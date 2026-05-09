@@ -1,87 +1,108 @@
 # ============================================================================
-# SFT Model Presets (NeMo-RL Native Format)
+# SFT Training Presets - NeMo-RL Direct (Full Preset)
 # ============================================================================
-# All presets use NeMo-RL's native config structure for direct pass-through
-# to nemo_rl.algorithms.sft.SFTTrainer via start_sft.py.
+# Model-independent default configurations for SFT training.
+# These presets are merged with model-specific overrides in workflow YAMLs.
 #
-# Design Philosophy (matches NeMo-RL):
-#   - Base preset contains model-independent defaults
-#   - Model-specific overrides go in workflow YAML files
+# This is a FULL preset -- every parameter we pass is explicit.
+# Model configs (e.g., qwen3_4b.yaml) override model-specific values.
 #
-# NeMo-RL pattern:
-#   sft.yaml (base) → sft-nanov3.yaml (workflow overrides)
+# Aligned with NeMo-RL's examples/configs/sft.yaml
+# targeting NeMo-RL main branch (mounted as overlay at /opt/NeMo-RL).
 #
-# Our pattern:
-#   sft-base preset → {model}_workflow.yaml (workflow overrides)
+# Deviations from the NeMo-RL example are marked with:
+#   [FINANCE] -- intentional change for our setup
+#   [MANAGED] -- key is set at runtime via ++key=value CLI args
+#                (last-write-wins) by training.py _build_train_cmd()
+#
+# The full preset is written as a YAML file and passed to
+# run_sft.py via --config.  Runtime overrides
+# (model_name, cluster, checkpoint_dir, data paths, etc.) are applied
+# on top via ++key=value CLI args by training.py.
 # ============================================================================
 
 presets:
 
   # ==========================================================================
-  # Base Preset (model-independent defaults, matches NeMo-RL sft.yaml)
+  # Base Preset (model-independent defaults)
   # ==========================================================================
-  # Use this preset for all new models and provide model-specific overrides
-  # in your workflow YAML file.
-  #
   # Example usage in workflow:
   #   training:
   #     preset: "sft-base"
-  #     backend: fsdp
+  #     backend: megatron
   #     overrides:
   #       policy:
   #         max_total_sequence_length: 49152
-  #         dtensor_cfg:
-  #           tensor_parallel_size: 2
+  #         megatron_cfg:
+  #           tensor_model_parallel_size: 4
   # ==========================================================================
 
   sft-base:
-    description: "Base SFT configuration - model-independent defaults (matches NeMo-RL v0.5.0 schema)"
-
-    # Training algorithm settings
+    # ========================================================================
+    # SFT Algorithm Configuration
+    # ========================================================================
     sft:
       max_num_epochs: 1
       max_num_steps: 1000000
       val_period: 100
+      val_batches: 8
+      val_global_batch_size: 32
+      val_micro_batch_size: 1
       val_at_start: true
+      val_at_end: true
+      seed: 42
 
-    # Checkpointing (NEW FORMAT - use val:metric_name)
+    # ========================================================================
+    # Checkpointing Configuration
+    # ========================================================================
     checkpointing:
       enabled: true
-      save_period: 100
+      # [MANAGED] checkpoint_dir and checkpoint_must_save_by are set by
+      # training.py _build_train_cmd() at runtime via CLI args.
+      checkpoint_dir: "results/sft"
+      checkpoint_must_save_by: null
+      metric_name: "val:val_loss"
+      higher_is_better: false
       keep_top_k: 50
-      metric_name: "val:val_loss"  # NEW: prefix with "val:" or "train:"
+      save_period: 100
+      save_optimizer: true
 
-    # Policy (model) configuration
+    # ========================================================================
+    # Policy Configuration (Model + Training)
+    # ========================================================================
     policy:
+      # [MANAGED] model_name is set by training.py from hf_checkpoint_path.
+      model_name: null                 # e.g., "Qwen/Qwen3-4B"
+      tokenizer:
+        name: ${policy.model_name}     # OmegaConf resolver -- resolved after ++policy.model_name override
+        chat_template: null            # Passthrough: our data has pre-formatted <|im_start|> tags
+        chat_template_kwargs: null
+
       train_global_batch_size: 128
       train_micro_batch_size: 1
       max_total_sequence_length: 4096
       precision: "bfloat16"
       max_grad_norm: 1.0
-
-      # NEW: Makes sequence length divisible by TP for sequence parallel
+      # [MANAGED] Auto-computed by training.py from CP, TP, SP settings.
+      # Ensures sequences are padded for correct CP/SP splitting.
+      # User overrides to higher values (e.g., FP8 alignment) are preserved.
       make_sequence_length_divisible_by: 1
-
-      # NEW: Optional optimizer offload for logprob computation
       offload_optimizer_for_logprob: false
 
       # ----------------------------------------------------------------------
       # FSDP/DTensor configuration (used when backend=fsdp)
-      # NEW FIELDS: _v2, env_vars, lora_cfg
       # ----------------------------------------------------------------------
       dtensor_cfg:
-        _v2: true  # NEW: Version flag for new schema
-        # enabled field removed - nemo-skills handles backend switching
-        env_vars: {}  # NEW: Environment variables for DTensor
+        _v2: true
+        env_vars: {}
         cpu_offload: false
         tensor_parallel_size: 1
         context_parallel_size: 1
-        expert_parallel_size: 1  # NEW: For MoE models
+        expert_parallel_size: 1
         sequence_parallel: false
         activation_checkpointing: false
         custom_parallel_plan: null
 
-        # NEW: LoRA configuration for FSDP
         lora_cfg:
           enabled: false
           target_modules: []
@@ -94,27 +115,23 @@ presets:
           lora_A_init: "xavier"
           use_triton: true
 
-      # NEW: Dynamic batching configuration
       dynamic_batching:
         enabled: false
-        train_mb_tokens: 4096  # Will be overridden by OmegaConf resolver
+        train_mb_tokens: 4096
         sequence_length_round: 64
 
-      # NEW: Sequence packing configuration
       sequence_packing:
         enabled: false
-        train_mb_tokens: 4096  # Will be overridden by OmegaConf resolver
+        train_mb_tokens: 4096
         algorithm: "modified_first_fit_decreasing"
         sequence_length_round: 64
 
       # ----------------------------------------------------------------------
       # Megatron configuration (used when backend=megatron)
-      # NEW FIELDS: env_vars, empty_unused_memory_level, peft
       # ----------------------------------------------------------------------
       megatron_cfg:
-        # enabled field removed - nemo-skills handles backend switching
-        env_vars: {}  # NEW: Environment variables for Megatron
-        empty_unused_memory_level: 1  # NEW: 1 is safer (was 0 in old schema)
+        env_vars: {}
+        empty_unused_memory_level: 1
         activation_checkpointing: false
         tensor_model_parallel_size: 1
         pipeline_model_parallel_size: 1
@@ -126,10 +143,9 @@ presets:
         num_layers_in_first_pipeline_stage: null
         num_layers_in_last_pipeline_stage: null
         freeze_moe_router: false
-        # MoE parameters (safe defaults for both MoE and dense models)
-        moe_router_dtype: "fp32"                        # Changed from null to fp32
-        moe_router_load_balancing_type: "none"          # Changed from "aux_loss" (has Megatron bug)
-        moe_aux_loss_coeff: 0.0                         # Added: required with aux_loss disabled
+        moe_router_dtype: "fp32"
+        moe_router_load_balancing_type: "none"
+        moe_aux_loss_coeff: 0.0
         moe_router_bias_update_rate: 1e-3
         moe_permute_fusion: false
         apply_rope_fusion: true
@@ -140,8 +156,10 @@ presets:
         moe_enable_deepep: false
         moe_token_dispatcher_type: "allgather"
         moe_shared_expert_overlap: false
+        gradient_accumulation_fusion: false  # Required by v0.6.0 community_import.py
+        use_linear_ce_fusion_loss: false
+        linear_ce_fusion_chunk_size: 256
 
-        # NEW: PEFT/LoRA configuration for Megatron
         peft:
           enabled: false
           target_modules: []
@@ -155,7 +173,12 @@ presets:
           a2a_experimental: false
           lora_dtype: null
 
-        # Megatron optimizer
+        fp8_cfg:
+          enabled: false
+          fp8: "e4m3"
+          fp8_recipe: "blockwise"
+          fp8_param: false
+
         optimizer:
           optimizer: "adam"
           lr: 5.0e-6
@@ -163,28 +186,26 @@ presets:
           weight_decay: 0.01
           bf16: true
           fp16: false
-          # params_dtype removed - SFT uses model dtype (bfloat16), not float32
+          params_dtype: "float32"
           adam_beta1: 0.9
           adam_beta2: 0.98
           adam_eps: 1e-5
           sgd_momentum: 0.9
           use_distributed_optimizer: true
-          # use_precision_aware_optimizer removed - GRPO-only setting
+          use_precision_aware_optimizer: true
           clip_grad: 1.0
           optimizer_cpu_offload: false
           optimizer_offload_fraction: 0.0
 
-        # Megatron scheduler (default: cosine decay for SFT)
         scheduler:
           start_weight_decay: 0.01
           end_weight_decay: 0.01
           weight_decay_incr_style: "constant"
-          lr_decay_style: "cosine"  # SFT uses cosine (GRPO uses constant)
+          lr_decay_style: "cosine"
           lr_decay_iters: 1000
-          lr_warmup_iters: 100      # Standard SFT warmup (was 0)
-          lr_warmup_init: 1e-7      # Warmup from small value (was 5e-6)
+          lr_warmup_iters: 100
+          lr_warmup_init: 1e-7
 
-        # Megatron DDP config
         distributed_data_parallel_config:
           grad_reduce_in_fp32: false
           overlap_grad_reduce: true
@@ -194,7 +215,6 @@ presets:
 
       # ----------------------------------------------------------------------
       # FSDP Optimizer (PyTorch native, at policy level)
-      # CRITICAL: This is REQUIRED for FSDP backend!
       # ----------------------------------------------------------------------
       optimizer:
         name: "torch.optim.AdamW"
@@ -203,27 +223,31 @@ presets:
           weight_decay: 0.1
           betas: [0.9, 0.98]
           eps: 1e-5
-          foreach: false  # Must be false for DTensor
-          fused: false    # Must be false for DTensor
+          foreach: false
+          fused: false
 
       # ----------------------------------------------------------------------
       # FSDP Scheduler (PyTorch native, at policy level)
       # Default: Linear warmup (2000 steps) + Cosine annealing decay
-      # Override in workflow YAML if different schedule needed
       # ----------------------------------------------------------------------
       scheduler:
         - name: "torch.optim.lr_scheduler.LinearLR"
           kwargs:
-            start_factor: 0.033    # Warmup from ~1e-7 to full LR
+            start_factor: 0.033
             end_factor: 1.0
-            total_iters: 2000      # 2000 step warmup
+            total_iters: 2000
         - name: "torch.optim.lr_scheduler.CosineAnnealingLR"
           kwargs:
-            T_max: 100000          # Total training steps
-            eta_min: 5.0e-7        # Min LR (10x lower than base)
-        - milestones: [0]          # Start warmup immediately
+            T_max: 100000
+            eta_min: 5.0e-7
+        - milestones: [0]
 
-    # Data settings
+    # ========================================================================
+    # Data Configuration (NeMo-RL main format)
+    # ========================================================================
+    # train.data_path and validation.data_path are injected at runtime
+    # via ++data.train.data_path=... by training.py _build_train_cmd().
+    # When no validation data, training.py sets ++data.validation=null.
     data:
       max_input_seq_length: 4096
       add_bos: true
@@ -231,3 +255,44 @@ presets:
       add_generation_prompt: false
       shuffle: true
       num_workers: 10
+      train: {}
+      validation: {}
+      default:
+        dataset_name: ResponseDataset
+        input_key: input
+        output_key: output
+        processor: "sft_processor"
+
+    # ========================================================================
+    # Logger Configuration
+    # ========================================================================
+    # [MANAGED] log_dir is set by training.py at runtime.
+    logger:
+      log_dir: "logs"
+      wandb_enabled: false
+      swanlab_enabled: false
+      tensorboard_enabled: true
+      mlflow_enabled: false
+      monitor_gpus: true
+      wandb:
+        project: "finance-sft"
+        name: "sft-training"
+      swanlab:
+        project: "finance-sft"
+        name: "sft-training"
+      tensorboard: {}
+      mlflow:
+        experiment_name: "finance-sft"
+        run_name: "sft-training"
+      gpu_monitoring:
+        collection_interval: 10
+        flush_interval: 10
+
+    # ========================================================================
+    # Cluster Configuration
+    # ========================================================================
+    # [MANAGED] cluster.gpus_per_node and cluster.num_nodes are set by
+    # training.py _build_train_cmd() at runtime via CLI args.
+    cluster:
+      gpus_per_node: 8
+      num_nodes: 1

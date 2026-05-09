@@ -40,6 +40,44 @@ logger = setup_logger(__name__)
 # ============================================================================
 
 
+_BASE_MODEL_FILES = [
+    # Tokenizer files (Bridge re-serializes via transformers, corrupting them)
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "chat_template.jinja",
+    "special_tokens_map.json",
+    "vocab.json",
+    "merges.txt",
+    "tokenizer.model",
+    "added_tokens.json",
+    # Model config files (Bridge rewrites with newer transformers format,
+    # which can change field names/structure that vLLM depends on)
+    "config.json",
+    "generation_config.json",
+]
+
+
+def _copy_from_base(base_model_path: Path, hf_output_path: Path) -> None:
+    """Copy config and tokenizer files from the base model to the converted checkpoint.
+
+    Megatron Bridge re-serializes these files via transformers, which can
+    corrupt them (e.g. renaming fields, restructuring rope config).
+    Fine-tuning (SFT/GRPO) does not modify the architecture or tokenizer,
+    so the base model's files are canonical.
+    """
+    import shutil
+
+    copied = []
+    for name in _BASE_MODEL_FILES:
+        src = base_model_path / name
+        if src.exists():
+            shutil.copy2(src, hf_output_path / name)
+            copied.append(name)
+
+    if copied:
+        logger.info(f"Copied from base model: {', '.join(copied)}")
+
+
 def convert_checkpoint(
     megatron_path: str | Path,
     hf_output_path: str | Path,
@@ -110,6 +148,8 @@ def convert_checkpoint(
     if not (hf_output_path / "config.json").exists():
         raise RuntimeError(f"Conversion failed - {hf_output_path}/config.json not found")
 
+    _copy_from_base(Path(model_name), hf_output_path)
+
     logger.info("")
     logger.info(f"✓ Conversion complete: {hf_output_path}")
     logger.info("=" * 60)
@@ -126,7 +166,7 @@ def get_hf_output_paths(run_path: str | Path, step: int) -> tuple[Path, Path]:
     Derive HF model and log paths for a given training run and step.
 
     Given a training run at:
-        .../model-qwen3-14b-32n-tp4-pp1-cp8-seq48k
+        .../model-qwen3-14b-256g-tp4-pp1-cp8-seq48k
 
     Returns paths for step 5000:
         HF model: .../hf_models/step_5000
@@ -183,14 +223,19 @@ def build_dcp_conversion_script(
     step: int,
     hf_output_path: str | Path,
 ) -> str:
-    """Build a bash script that converts a DCP (FSDP) checkpoint to HF format.
+    """Build a bash script that converts a DTensor checkpoint to HF format.
+
+    Supports both checkpoint formats:
+    - **v1 (DCP)**: ``.metadata`` file → calls ``convert_dcp_to_hf.py``
+    - **v2 (safetensors)**: ``shard-*.safetensors`` files → calls ``offline_hf_consolidation.py``
 
     The script runs ON THE CLUSTER. It resolves the run subdirectory under
-    checkpoint_path (flat or GRPO layout), then calls NeMo-RL's converter.
+    checkpoint_path (flat or GRPO layout), auto-detects the format, then
+    calls the appropriate converter.
 
     Args:
-        checkpoint_path: Parent dir (e.g. .../step-7-training) — may contain
-            a nested run dir like grpo-qwen3-4b-.../checkpoints/step_N/...
+        checkpoint_path: Parent dir (e.g. .../step-8-training/equivalence_llm_judge)
+            — may contain a nested run dir like grpo-qwen3-4b-.../checkpoints/step_N/...
         step: Checkpoint step number
         hf_output_path: Where to write HF model (known at submit time)
     """
@@ -220,23 +265,52 @@ else
         fi
     done
     if [ -z "$RUN_PATH" ]; then
-        echo "ERROR: No DCP checkpoint for $STEP_NAME under $CKPT_ROOT" >&2
+        echo "ERROR: No checkpoint for $STEP_NAME under $CKPT_ROOT" >&2
         exit 1
     fi
 fi
 
 STEP_DIR="$RUN_PATH/checkpoints/$STEP_NAME"
+WEIGHTS_DIR="$STEP_DIR/policy/weights"
+MODEL_DIR="$WEIGHTS_DIR/model"
 echo "Resolved run path: $RUN_PATH"
-echo "Converting DCP checkpoint: $STEP_DIR -> $HF_OUTPUT"
 
-cd /opt/NeMo-RL
-uv run examples/converters/convert_dcp_to_hf.py \\
-    --config="$STEP_DIR/config.yaml" \\
-    --dcp-ckpt-path="$STEP_DIR/policy/weights" \\
-    --hf-ckpt-path="$HF_OUTPUT"
+mkdir -p "$HF_OUTPUT"
 
-rsync -ahP "$STEP_DIR/policy/tokenizer/" "$HF_OUTPUT/"
-echo "DCP conversion complete: $HF_OUTPUT"
+# Auto-detect format: v2 safetensors (shard-*.safetensors) or v1 DCP (.metadata)
+if ls "$MODEL_DIR"/shard-*.safetensors 1>/dev/null 2>&1; then
+    echo "Detected DTensor v2 (safetensors) checkpoint"
+    echo "Consolidating: $MODEL_DIR -> $HF_OUTPUT"
+
+    # Recreate .hf_metadata if missing (offline_hf_consolidation.py deletes it after use)
+    if [ ! -d "$MODEL_DIR/.hf_metadata" ]; then
+        echo "Recreating .hf_metadata from base model index..."
+        PYTHONPATH=/workspace python3 -m nvflow.recipes.finance.utils.evaluation.checkpoint_converter \\
+            --recreate-hf-metadata "$MODEL_DIR" "$STEP_DIR/config.yaml"
+    fi
+
+    cd /opt/NeMo-RL
+    export UV_PROJECT=/opt/NeMo-RL
+    uv run --extra automodel python /opt/NeMo-RL/3rdparty/Automodel-workspace/Automodel/tools/offline_hf_consolidation.py \\
+        --model-name unused \\
+        --input-dir "$MODEL_DIR" \\
+        --output-dir "$HF_OUTPUT"
+
+    rsync -ahP "$STEP_DIR/policy/tokenizer/" "$HF_OUTPUT/"
+    echo "Safetensors consolidation complete: $HF_OUTPUT"
+else
+    echo "Detected DTensor v1 (DCP) checkpoint"
+    echo "Converting: $STEP_DIR -> $HF_OUTPUT"
+
+    cd /opt/NeMo-RL
+    uv run examples/converters/convert_dcp_to_hf.py \\
+        --config="$STEP_DIR/config.yaml" \\
+        --dcp-ckpt-path="$WEIGHTS_DIR" \\
+        --hf-ckpt-path="$HF_OUTPUT"
+
+    rsync -ahP "$STEP_DIR/policy/tokenizer/" "$HF_OUTPUT/"
+    echo "DCP conversion complete: $HF_OUTPUT"
+fi
 """
     return script
 
@@ -246,33 +320,130 @@ echo "DCP conversion complete: $HF_OUTPUT"
 # ============================================================================
 
 
+def recreate_hf_metadata(model_dir: str, training_config: str) -> None:
+    """Recreate .hf_metadata from the base HF model index.
+
+    offline_hf_consolidation.py destructively removes .hf_metadata after use.
+    This function rebuilds it from the base model so consolidation can be
+    re-run on the same checkpoint.
+
+    Args:
+        model_dir: Directory containing shard-*.safetensors
+        training_config: Path to training config.yaml (to find base model path)
+    """
+    import json
+    import shutil
+
+    import yaml
+
+    cfg = yaml.safe_load(open(training_config))
+    base_model = cfg["policy"]["model_name"]
+    base_path = Path(base_model)
+
+    index_file = base_path / "model.safetensors.index.json"
+    if not index_file.exists():
+        raise FileNotFoundError(f"Base model index not found: {index_file}")
+
+    index = json.load(open(index_file))
+    weight_map = index["weight_map"]
+
+    file_list = sorted(set(weight_map.values()))
+    file_to_idx = {f: i + 1 for i, f in enumerate(file_list)}
+    fqn_mapping = {k: file_to_idx[v] for k, v in weight_map.items()}
+
+    hf_meta_dir = Path(model_dir) / ".hf_metadata"
+    hf_meta_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(hf_meta_dir / "fqn_to_file_index_mapping.json", "w") as f:
+        json.dump(fqn_mapping, f, indent=2, sort_keys=True)
+    logger.info(f"Wrote fqn_to_file_index_mapping.json ({len(fqn_mapping)} tensors)")
+
+    for name in ("config.json", "generation_config.json"):
+        src = base_path / name
+        if src.exists():
+            shutil.copy2(str(src), str(hf_meta_dir / name))
+
+    for name in (
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "vocab.json",
+        "merges.txt",
+        "chat_template.jinja",
+        "special_tokens_map.json",
+        "tokenizer.model",
+    ):
+        src = base_path / name
+        if src.exists():
+            shutil.copy2(str(src), str(hf_meta_dir / name))
+
+    logger.info(f"Recreated .hf_metadata from {base_model}")
+
+
+def patch_torch_dtype(training_config_path: str, hf_config_path: str) -> None:
+    """Patch torch_dtype in HF config.json from training config.
+
+    WORKAROUND: nemo_automodel's consolidation saves fp32 master weights
+    and does not set torch_dtype. Without this, HF/vLLM defaults to fp32.
+
+    Args:
+        training_config_path: Path to training config.yaml (has policy.precision)
+        hf_config_path: Path to HF config.json to patch
+    """
+    import json
+
+    import yaml
+
+    cfg = yaml.safe_load(open(training_config_path))
+    hf_cfg = json.load(open(hf_config_path))
+    hf_cfg["torch_dtype"] = cfg["policy"]["precision"]
+    json.dump(hf_cfg, open(hf_config_path, "w"), indent=2)
+    logger.info(f"Patched torch_dtype: {hf_cfg['torch_dtype']}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert Megatron checkpoint to HuggingFace format"
     )
     parser.add_argument(
         "--megatron-path",
-        required=True,
         help="Path to Megatron checkpoint (e.g., .../checkpoints/step_5000)",
     )
     parser.add_argument(
         "--hf-output-path",
-        required=True,
         help="Where to save HF model (e.g., .../hf_models/step_5000)",
     )
     parser.add_argument(
         "--model-name",
-        required=True,
         help="HF model name for tokenizer/architecture (e.g., Qwen/Qwen3-14B)",
+    )
+    parser.add_argument(
+        "--patch-dtype",
+        nargs=2,
+        metavar=("CONFIG_YAML", "HF_CONFIG_JSON"),
+        help="Patch torch_dtype in HF config.json from training config.yaml",
+    )
+    parser.add_argument(
+        "--recreate-hf-metadata",
+        nargs=2,
+        metavar=("MODEL_DIR", "CONFIG_YAML"),
+        help="Recreate .hf_metadata from base model index (for re-running consolidation)",
     )
     args = parser.parse_args()
 
     try:
-        convert_checkpoint(
-            megatron_path=args.megatron_path,
-            hf_output_path=args.hf_output_path,
-            model_name=args.model_name,
-        )
+        if args.recreate_hf_metadata:
+            recreate_hf_metadata(args.recreate_hf_metadata[0], args.recreate_hf_metadata[1])
+        elif args.patch_dtype:
+            patch_torch_dtype(args.patch_dtype[0], args.patch_dtype[1])
+        elif args.megatron_path:
+            convert_checkpoint(
+                megatron_path=args.megatron_path,
+                hf_output_path=args.hf_output_path,
+                model_name=args.model_name,
+            )
+        else:
+            parser.print_help()
+            return 1
         return 0
     except (FileNotFoundError, RuntimeError) as e:
         logger.error(f"✗ ERROR: {e}")

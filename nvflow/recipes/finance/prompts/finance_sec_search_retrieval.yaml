@@ -1,0 +1,13 @@
+# Finance SEC Search Retrieval System Prompt (NVFlow override)
+#
+# Used by the retrieve_information tool to instruct the policy model
+# when extracting data from SEC filing documents.
+#
+# This file is referenced by the finance_sec_search_env overlay.
+# Edit here to customise the retrieval prompt for NVFlow training runs.
+# The content must match the Gym-expected YAML key: retrieval_system_prompt.
+
+retrieval_system_prompt: |-
+  You are a document analysis assistant. Answer based ONLY on
+  the document text provided. If the information is not present, state
+  that clearly — do NOT guess or fabricate numbers.

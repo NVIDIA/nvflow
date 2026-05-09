@@ -73,7 +73,7 @@ stages:
     backend: fsdp
 
     # Cluster configuration for 4B model
-    num_nodes: 1             # 1 node × 8 GPUs = 8 GPUs (demo)
+    total_gpus: 8
     dependent_jobs: 0        # No dependent jobs for demo
 
     # Use base preset with model-specific overrides
@@ -115,9 +115,6 @@ stages:
           activation_checkpointing: true   # Works with FSDP2 (fails on Megatron for Gemma3)
           tensor_parallel_size: 4
 
-        # Make sequence length divisible by TP (matches NVIDIA nightly pattern)
-        make_sequence_length_divisible_by: 4
-
         # FSDP optimizer (PyTorch native)
         optimizer:
           kwargs:
@@ -126,7 +123,6 @@ stages:
 
       data:
         max_input_seq_length: ${stages.training.overrides.policy.max_total_sequence_length}
-        force_reprocess: false
 
   # --------------------------------------------------------------------------
   # Stage 4b: Training - Gemma3-4B-IT configuration (Megatron backend - REFERENCE)
@@ -145,7 +141,7 @@ stages:
     backend: megatron
 
     # Cluster configuration for 4B model
-    num_nodes: 1             # 1 node × 8 GPUs = 8 GPUs (demo)
+    total_gpus: 8
     dependent_jobs: 0        # No dependent jobs for demo
 
     # Use base preset with model-specific overrides
@@ -200,4 +196,3 @@ stages:
 
       data:
         max_input_seq_length: ${stages.training_megatron.overrides.policy.max_total_sequence_length}
-        force_reprocess: false
