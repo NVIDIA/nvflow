@@ -7,8 +7,9 @@ Quick setup guide for NVFlow - a lightweight orchestration tool for Slurm cluste
 1. [Prerequisites](#prerequisites)
 2. [Setup Containers](#setup-containers)
 3. [Download Models](#download-models)
-4. [Configure Your Cluster](#configure-your-cluster)
-5. [Verify Installation](#verify-installation)
+4. [Setup NeMo-RL & NeMo-Gym Sources (for GRPO)](#setup-nemo-rl--nemo-gym-sources-for-grpo)
+5. [Configure Your Cluster](#configure-your-cluster)
+6. [Verify Installation](#verify-installation)
 
 ---
 
@@ -37,9 +38,11 @@ yq --version
 # macOS
 brew install yq
 
-# Linux
+# Linux (auto-detects architecture)
+# Supported platforms: linux_amd64, linux_arm64, linux_arm, linux_386, etc.
 mkdir -p $HOME/bin
-wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O $HOME/bin/yq
+ARCH=$(uname -m); case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; armv7l) ARCH=arm ;; i686) ARCH=386 ;; esac
+wget "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}" -O $HOME/bin/yq
 chmod +x $HOME/bin/yq
 
 # Add to PATH (if $HOME/bin not already in PATH)
@@ -66,12 +69,13 @@ NeMo-Skills requires Docker containers converted to `.sqsh` format for running o
 
 **Required containers (4):**
 
-| Container | Source | Action |
-|-----------|--------|--------|
-| `nemo-skills` | NeMo-Skills Dockerfiles | **Build** (see Step 1) |
-| `vllm` | NeMo-Skills Dockerfiles or `vllm/vllm-openai` | **Build** or pull from Docker Hub |
-| `sglang` | `lmsysorg/sglang` | Pull from Docker Hub |
-| `nemo-rl` | NeMo-Skills Dockerfiles | **Build** (see Step 1) |
+| Container | Source | Tested Version | Action |
+|-----------|--------|----------------|--------|
+| `nemo-skills` | NeMo-Skills Dockerfiles | NeMo-Skills @ `0229040` | **Build** (see Step 1a) |
+| `vllm` | Docker Hub | `vllm/vllm-openai:v0.18.1` | **Pull** (standalone SDG/eval) |
+| `vllm-grpo` | Docker Hub | `vllm/vllm-openai:v0.17.1` | **Pull** (standalone GRPO rollouts/judge) |
+| `sglang` | Docker Hub | `lmsysorg/sglang:v0.5.10.post1` | **Pull** (no build needed) |
+| `nemo-rl` | NGC | `nvcr.io/nvidia/nemo-rl:v0.6.0` | **Pull** from NGC (no build needed) |
 
 **Optional containers** (not currently used by any NVFlow recipes):
 
@@ -80,9 +84,9 @@ NeMo-Skills requires Docker containers converted to `.sqsh` format for running o
 | `megatron` | NeMo-Skills Dockerfiles | Build |
 | `sandbox` | NeMo-Skills Dockerfiles | Build |
 | `verl` | NeMo-Skills Dockerfiles | Build |
-| `trtllm` | `nvcr.io/nvidia/tensorrt-llm/release` | Pull from NGC |
+| `trtllm` | `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8` | Pull from NGC |
 
-### Step 1: Build Docker Images
+### Step 1a: Build NeMo-Skills Containers
 
 Clone the NeMo-Skills repo at the **exact commit pinned by NVFlow** to ensure compatibility. The pinned commit is defined in [`pyproject.toml`](pyproject.toml):
 
@@ -90,68 +94,95 @@ Clone the NeMo-Skills repo at the **exact commit pinned by NVFlow** to ensure co
 # Clone NeMo-Skills and check out the pinned commit
 git clone https://github.com/NVIDIA/NeMo-Skills.git
 cd NeMo-Skills
-git checkout 7d6c49a51efb441b61db3e78f6ffa2f04c9a68ef
+git checkout 022904023ad7a83a87662a313cf72e7df5891d55
 ```
 
 > **Tip:** Always use the commit hash from `pyproject.toml` (search for `nemo-skills @`). Building from a different version may cause incompatibilities.
 
-Build the required images using the [NeMo-Skills Dockerfiles](https://github.com/NVIDIA/NeMo-Skills/tree/7d6c49a51efb441b61db3e78f6ffa2f04c9a68ef/dockerfiles):
+Build the `nemo-skills` container using the [NeMo-Skills Dockerfiles](https://github.com/NVIDIA/NeMo-Skills/tree/022904023ad7a83a87662a313cf72e7df5891d55/dockerfiles):
 
 ```bash
-# Build the required containers
+# Build with the helper script
 ./dockerfiles/build.sh dockerfiles/Dockerfile.nemo-skills
-./dockerfiles/build.sh dockerfiles/Dockerfile.vllm
-./dockerfiles/build.sh dockerfiles/Dockerfile.nemo-rl
 
 # Or build directly with docker
 docker build -t nemo-skills:latest -f dockerfiles/Dockerfile.nemo-skills .
-docker build -t nemo-skills-vllm:latest -f dockerfiles/Dockerfile.vllm .
-docker build -t nemo-skills-nemo-rl:latest -f dockerfiles/Dockerfile.nemo-rl .
 ```
 
-> **Note:** For `vllm`, you can alternatively pull a pre-built image directly from Docker Hub (`vllm/vllm-openai`) instead of building from the Dockerfile.
+For `vllm`, `vllm-grpo`, and `sglang`, pull pre-built images directly from Docker Hub (no build needed):
 
-For optional containers (`megatron`, `sandbox`, `verl`), build them the same way using their respective Dockerfiles. For arm64 builds, see the [multi-platform instructions](https://github.com/NVIDIA/NeMo-Skills/tree/7d6c49a51efb441b61db3e78f6ffa2f04c9a68ef/dockerfiles#building-for-arm64aarch64).
+```bash
+docker pull vllm/vllm-openai:v0.18.1       # standalone for SDG/eval
+docker pull vllm/vllm-openai:v0.17.1       # standalone for GRPO rollouts/judge
+docker pull lmsysorg/sglang:v0.5.10.post1
+```
+
+For optional containers (`megatron`, `sandbox`, `verl`), build them the same way using their respective Dockerfiles. For arm64 builds, see the [multi-platform instructions](https://github.com/NVIDIA/NeMo-Skills/tree/022904023ad7a83a87662a313cf72e7df5891d55/dockerfiles#building-for-arm64aarch64).
+
+### Step 1b: Pull NeMo-RL Container (for SFT and GRPO)
+
+The `nemo-rl` container is available as a pre-built image on NGC:
+
+```bash
+docker pull nvcr.io/nvidia/nemo-rl:v0.6.0
+```
+
+Alternatively, build from source using the [NeMo-RL repository](https://github.com/NVIDIA-NeMo/RL):
+
+```bash
+git clone https://github.com/NVIDIA-NeMo/RL.git
+cd RL
+git checkout v0.6.0
+git submodule update --init --recursive
+```
+
+Follow the [NeMo-RL Docker build instructions](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/docker.md#building-the-release-image) to build the release image, then tag and push it to your registry alongside the NeMo-Skills containers.
 
 ### Step 2: Push Images to a Registry
 
 After building, push the images to a container registry accessible from your cluster (Docker Hub, NGC, or a private registry):
 
 ```bash
-# Tag and push the images you built
+# Tag and push the NeMo-Skills container
 docker tag nemo-skills:latest your-registry/nemo-skills:latest
 docker push your-registry/nemo-skills:latest
 
-docker tag nemo-skills-vllm:latest your-registry/nemo-skills-vllm:latest
+# Tag and push vllm (pulled from Docker Hub)
+docker tag vllm/vllm-openai:v0.18.1 your-registry/nemo-skills-vllm:latest
 docker push your-registry/nemo-skills-vllm:latest
 
-docker tag nemo-skills-nemo-rl:latest your-registry/nemo-skills-nemo-rl:latest
+# Tag and push NeMo-RL (pulled from NGC)
+docker tag nvcr.io/nvidia/nemo-rl:v0.6.0 your-registry/nemo-skills-nemo-rl:latest
 docker push your-registry/nemo-skills-nemo-rl:latest
+
+# sglang can be pulled directly by enroot (no push needed unless your
+# cluster cannot reach Docker Hub)
 
 # Repeat for any optional images you built (e.g., megatron, sandbox, verl)
 ```
 
 > **Why push?** Slurm cluster nodes typically don't have Docker installed, so `enroot` needs to pull images from a registry. Pushing to a registry also lets the automated setup script work.
 
-### Step 3: Update `containers.yaml`
+### Step 3: Create Your Container Config
 
-Edit [`cluster_configs/containers.yaml`](cluster_configs/containers.yaml) to update image references with your registry paths:
+`containers.yaml` is a **template** with placeholder values -- do not edit it directly. Instead, copy it to a personal file and fill in your registry paths:
+
+```bash
+cp cluster_configs/containers.yaml cluster_configs/my_containers.yaml
+```
+
+Edit `my_containers.yaml` with your actual registry paths:
 
 ```yaml
 containers:
-  # Required - pull from official registry (no changes needed)
-  sglang: lmsysorg/sglang:v0.5.4
-
-  # Required - replace with your own built images
   nemo-skills: your-registry/nemo-skills:latest
-  vllm: your-registry/nemo-skills-vllm:latest
-  nemo-rl: your-registry/nemo-skills-nemo-rl:latest
-
-  # Optional
-  # megatron: your-registry/nemo-skills-megatron:latest
-  # sandbox: your-registry/nemo-skills-sandbox:latest
-  # verl: your-registry/nemo-skills-verl:latest
+  vllm: your-registry/nemo-skills-vllm:latest          # v0.18.1 for SDG/eval
+  vllm-grpo: vllm/vllm-openai:v0.17.1                  # v0.17.1 for GRPO rollouts/judge
+  nemo-rl: nvcr.io/nvidia/nemo-rl:v0.6.0               # or your-registry/nemo-skills-nemo-rl:latest
+  sglang: lmsysorg/sglang:v0.5.10.post1
 ```
+
+> **Note:** `my_containers.yaml` is gitignored (`cluster_configs/*.yaml` pattern), so your registry paths stay local and won't be committed.
 
 ### Step 4: Convert to .sqsh Format
 
@@ -159,13 +190,14 @@ Choose one of the following methods to convert your container images to `.sqsh` 
 
 #### Option A: Automated Setup (Recommended)
 
-Use the setup script to download from your registry and convert all containers in parallel:
+Use the setup script to download from your registry and convert all containers in parallel. Pass your personal config with `--config`:
 
 ```bash
-sbatch --account=YOUR_ACCOUNT scripts/setup_containers.sh ./containers
+# Run from a cluster login node (sbatch requires Slurm access)
+sbatch --account=YOUR_ACCOUNT scripts/setup_containers.sh --config cluster_configs/my_containers.yaml ./containers
 ```
 
-The script reads image references from `cluster_configs/containers.yaml`, pulls them via `enroot`, and converts to `.sqsh` format. See [the script](scripts/setup_containers.sh) for options (`--platform`, `--force`).
+The `--config` flag is required -- the script reads image references from the specified YAML file, pulls them via `enroot`, and converts to `.sqsh` format. See [the script](scripts/setup_containers.sh) for additional options (`--platform`, `--force`).
 
 **Check progress:**
 ```bash
@@ -180,10 +212,12 @@ Convert images one at a time using `enroot` on a cluster node:
 # Import from your registry
 enroot import docker://your-registry/nemo-skills:latest
 enroot import docker://your-registry/nemo-skills-vllm:latest
-enroot import docker://your-registry/nemo-skills-nemo-rl:latest
+enroot import docker://nvcr.io/nvidia/nemo-rl:v0.6.0
 
-# Import from official registries (for sglang, etc.)
-enroot import docker://lmsysorg/sglang:v0.5.4
+# Import from official registries
+enroot import docker://vllm/vllm-openai:v0.18.1
+enroot import docker://vllm/vllm-openai:v0.17.1
+enroot import docker://lmsysorg/sglang:v0.5.10.post1
 ```
 
 Move the resulting `.sqsh` files to your cluster's container storage path.
@@ -202,16 +236,38 @@ Move the resulting `.sqsh` files to your cluster's container storage path.
 
 ### Using hf download
 
-**Note:** `hf` CLI is included with nemo-skills (via `huggingface-hub`).
+**Note:** `hf` CLI is included with nemo-skills (via `huggingface-hub`). Some models are gated and require authentication -- export your HuggingFace token before downloading:
 
 ```bash
-# Download model to your cluster storage
-uv run hf download Qwen/Qwen3-4B-Instruct-2507 \
-  --local-dir /path/to/models/hf_models/Qwen/Qwen3-4B-Instruct-2507
+export HF_TOKEN=<YOUR_HF_TOKEN>
+```
 
-# Example:
-uv run hf download Qwen/Qwen3-4B-Instruct-2507 \
-  --local-dir /lustre/fs1/.../models/hf_models/Qwen/Qwen3-4B-Instruct-2507
+Download models to your cluster's HuggingFace models directory. The examples below show the models used by the finance recipe workflows -- download only the ones you need:
+
+```bash
+# GRPO policy model (Qwen3-30B-A3B, MoE — used in grpo/qwen3_30b_a3b.yaml)
+uv run hf download Qwen/Qwen3-30B-A3B \
+  --local-dir /path/to/models/hf_models/Qwen/Qwen3-30B-A3B
+
+# GRPO / eval judge model (GPT-OSS-120B — used for rollout judging and eval)
+uv run hf download openai/gpt-oss-120b \
+  --local-dir /path/to/models/hf_models/openai/gpt-oss-120b
+```
+
+For the **quick-start demo** (see [quick-start.md](docs/recipes/finance/quick-start.md)), download these additional models:
+
+```bash
+# Demo policy model (Qwen3-4B — used in sft/qwen3_4b.yaml and grpo/qwen3_4b.yaml)
+uv run hf download Qwen/Qwen3-4B \
+  --local-dir /path/to/models/hf_models/Qwen/Qwen3-4B
+
+# Demo SDG generation + eval baseline (GPT-OSS-20B)
+uv run hf download openai/gpt-oss-20b \
+  --local-dir /path/to/models/hf_models/openai/gpt-oss-20b
+
+# Eval baseline (Gemma 3 4B IT)
+uv run hf download google/gemma-3-4b-it \
+  --local-dir /path/to/models/hf_models/google/gemma-3-4b-it
 ```
 
 **Storage location:** Models should go in your mounted HuggingFace models directory (see cluster config `mounts` section).
@@ -231,11 +287,70 @@ Reference models using the **container mount path** (`/hf_models`):
 
 ```yaml
 stage_kwargs:
-  model: /hf_models/Qwen/Qwen3-4B-Instruct-2507  # Path inside container
+  model: /hf_models/Qwen/Qwen3-4B  # Path inside container
   server_type: sglang
 ```
 
+**Models needed per workflow:**
+
+| Model | Demo SDG | Demo SFT | Demo GRPO | Demo Eval | Production GRPO |
+|-------|:--------:|:--------:|:---------:|:---------:|:---------------:|
+| `Qwen/Qwen3-4B` | | ✓ | ✓ | ✓ | |
+| `openai/gpt-oss-20b` | ✓ | | | ✓ | |
+| `google/gemma-3-4b-it` | | | | ✓ | |
+| `openai/gpt-oss-120b` | | | ✓ | | ✓ |
+| `Qwen/Qwen3-30B-A3B` | | | | | ✓ |
+
 **Tip:** Download commonly used models once and reuse across all workflows.
+
+---
+
+## Setup NeMo-RL & NeMo-Gym Sources (for GRPO)
+
+> **Skip this section** if you're only running SDG/eval workflows. This setup is needed for GRPO RL training and recommended for multi-node SFT.
+
+Both NeMo-RL and NeMo-Gym source trees are overlay-mounted into the NeMo-RL container via cluster config mounts. This ensures the container uses the exact tested source code.
+
+### NeMo-RL Source Clone
+
+Mount the NeMo-RL source into the container at `/opt/NeMo-RL`. If you already cloned it in [Step 1b](#step-1b-build-nemo-rl-container-for-sft-and-grpo), reuse that clone:
+
+```bash
+# Reuse the clone from Step 1b, or:
+git clone https://github.com/NVIDIA-NeMo/RL.git
+cd RL
+git checkout v0.6.0
+git submodule update --init --recursive
+```
+
+### NeMo-Gym Clone
+
+Clone NeMo-Gym and mount it inside the NeMo-RL source tree. The Gym overlay is independent from the Gym submodule inside RL -- this lets RL and Gym evolve on separate branches. Check your workflow config (e.g., `grpo/base.yaml`) for the tested Gym branch or commit:
+
+```bash
+git clone https://github.com/NVIDIA-NeMo/Gym.git
+cd Gym
+git checkout ude/finance-sec-search  # finance_agent environment (until merged to main)
+```
+
+### Cluster Config Mounts
+
+Add both overlay mounts to your cluster config (see [Configure Your Cluster](#configure-your-cluster)):
+
+```yaml
+mounts:
+  - /path/to/RL:/opt/NeMo-RL
+  - /path/to/Gym:/opt/NeMo-RL/3rdparty/Gym-workspace/Gym
+```
+
+No local `uv sync` is needed for either -- the container's `installation_command` handles dependency installation at runtime.
+
+### Prefetch SEC Filings Cache (for `finance_sec_search`)
+
+If using the `finance_sec_search` NeMo-Gym environment, you must prefetch the SEC filings cache to a shared mounted path. The default `~/.cache` does **not** work inside Slurm containers.
+
+1. Follow the prefetch instructions in `Gym/resources_servers/finance_sec_search/README.md`
+2. Set `cache_dir` in the environment config overlay to point to the shared mounted path
 
 ---
 
@@ -256,7 +371,7 @@ Edit `cluster_configs/my_cluster.yaml` and replace all `<PLACEHOLDER>` values:
 2. **Slurm account/partition** - Run `sacctmgr show associations user=$USER` and `sinfo`
 3. **Container paths** - Copy from `outputs/logs/slurm-containers-<jobid>.out` after running setup_containers.sh
 4. **Mount points** - Map your cluster paths to container paths
-5. **Environment variables** - Set `HF_HOME` and any API keys
+5. **Environment variables** - Set `HF_HOME` to a path visible inside the container (see [env_vars docs](docs/cluster-configuration.md#environment-variables)) and any API keys
 
 > **Note:** The template includes detailed comments for each section. Your personal config (`my_cluster.yaml`) is gitignored to protect secrets.
 >
@@ -304,9 +419,10 @@ uv sync --reinstall
 # macOS
 brew install yq
 
-# Linux
+# Linux (auto-detects architecture)
 mkdir -p $HOME/bin
-wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O $HOME/bin/yq
+ARCH=$(uname -m); case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; armv7l) ARCH=arm ;; i686) ARCH=386 ;; esac
+wget "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}" -O $HOME/bin/yq
 chmod +x $HOME/bin/yq
 
 # Add to PATH if needed
@@ -334,6 +450,12 @@ ssh -i <PATH_TO_SSH_KEY> <YOUR_USERNAME>@<YOUR_CLUSTER_LOGIN_NODE>
 - Use **absolute paths** in cluster config
 - Check file exists: `ls -l <PATH_TO_CONTAINERS>/<container>.sqsh`
 - Re-run container setup if needed
+
+### HF_HOME / cache "No such file or directory"
+- `HF_HOME` (and other path-valued env vars) must resolve to a path **visible inside the container**
+- Use a mount destination (e.g., `/workspace/cache/huggingface`) or a host path that is transparently mounted (e.g., `/shared/.../cache` when `- /shared:/shared` is in `mounts`)
+- Paths that exist only on the host and have no corresponding mount will fail with `No such file or directory`
+- Common mistake: using `$HOME` or `~/.cache` -- these do not resolve inside containers unless explicitly mounted
 
 ### Slurm jobs won't submit
 - Verify account: `sacctmgr show associations user=$USER`
@@ -385,7 +507,9 @@ Then head back to the [README.md](README.md#-quick-start) Quick Start section to
 ## Reference
 
 - **NeMo-Skills**: https://github.com/NVIDIA/NeMo-Skills
-- **NeMo-Skills Dockerfiles**: https://github.com/NVIDIA/NeMo-Skills/tree/main/dockerfiles
+- **NeMo-Skills Dockerfiles**: https://github.com/NVIDIA/NeMo-Skills/tree/022904023ad7a83a87662a313cf72e7df5891d55/dockerfiles
+- **NeMo-RL**: https://github.com/NVIDIA-NeMo/RL
+- **NeMo-RL Docker Build**: https://github.com/NVIDIA-NeMo/RL/blob/main/docs/docker.md#building-the-release-image
 - **Official Container Config**: https://github.com/NVIDIA/NeMo-Skills/blob/main/cluster_configs/example-slurm.yaml
 - **Slurm Docs**: https://slurm.schedmd.com/
 - **Enroot**: https://github.com/NVIDIA/enroot

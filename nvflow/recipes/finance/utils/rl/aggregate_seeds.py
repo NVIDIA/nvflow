@@ -13,11 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Aggregate rollouts across seeds and compute pass@k metrics.
+"""Aggregate rollouts across seeds and compute difficulty metrics.
 
 Reads merged rollout files (``output-rs*.jsonl``) from a
 ``collect_rollouts`` output directory, groups rows by ``uuid`` across
-seeds, and computes the unbiased pass@k estimator for every k from 1 to num_seeds.
+seeds, and computes:
+
+- **avg_reward**: mean reward across seeds per question.
+- **reward_std**: sample standard deviation of rewards per question.
+  Used by ``filter_training_data`` to identify learnable questions
+  (those with non-zero reward variance provide GRPO gradient signal).
+- **global_max**: highest reward observed across all data, used as the
+  ``c`` threshold for pass@k (scale-independent).
+- **pass@k**: unbiased combinatorial estimator (binary — only
+  reward == global_max counts as correct).  Standard metric for
+  reporting.
 
 Standalone script that runs inside the Slurm container with python3.
 
@@ -27,7 +37,7 @@ Usage:
 Produces:
     <output_dir>/summary.txt       -- human-readable report
     <output_dir>/metrics.json      -- machine-readable metrics
-    <output_dir>/difficulty.jsonl   -- per-question pass rates and pass@k
+    <output_dir>/difficulty.jsonl   -- per-question reward stats and pass@k
 """
 
 import json
@@ -55,7 +65,11 @@ def pass_at_k(n: int, c: int, k: int) -> float:
     return 1.0 - math.prod(1.0 - k / i for i in range(n - c + 1, n + 1))
 
 
-def aggregate(rollout_dir: str, output_dir: str) -> None:
+def aggregate(
+    rollout_dir: str,
+    output_dir: str,
+    output_filename: str = "difficulty.jsonl",
+) -> None:
     rollout_path = Path(rollout_dir)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -99,16 +113,36 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
     k_values = list(range(1, num_seeds + 1))
     records: list[dict] = []
 
+    global_max = max(r.get("reward", 0.0) for rows in by_uuid.values() for r in rows)
+
+    if global_max <= 0:
+        print(
+            "[nvflow] WARNING: aggregate_seeds observed no positive rewards "
+            f"(global_max={global_max}). Reporting pass@k=0 by convention; "
+            "the underlying reward / verifier / judge is likely misconfigured.",
+            file=sys.stderr,
+        )
+
     for uid, rows in by_uuid.items():
         n = len(rows)
-        c = sum(1 for r in rows if r.get("reward", 0.0) == 1.0)
+        rewards = [r.get("reward", 0.0) for r in rows]
+        c = 0 if global_max <= 0 else sum(1 for rw in rewards if rw == global_max)
+        avg_reward = sum(rewards) / n if n > 0 else 0.0
+        reward_std = (
+            (sum((rw - avg_reward) ** 2 for rw in rewards) / (n - 1)) ** 0.5 if n > 1 else 0.0
+        )
+        reward_min = min(rewards)
+        reward_max = max(rewards)
         question_type = rows[0].get("question_type", "unknown")
 
         rec: dict = {
             "uuid": uid,
             "n": n,
             "c": c,
-            "pass_rate": c / n if n > 0 else 0.0,
+            "avg_reward": avg_reward,
+            "reward_std": reward_std,
+            "reward_min": reward_min,
+            "reward_max": reward_max,
             "question_type": question_type,
             "question": rows[0].get("question", ""),
             "expected_answer": rows[0].get("expected_answer", ""),
@@ -123,6 +157,7 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
         "num_seeds": num_seeds,
         "num_questions": num_questions,
         "total_rows": total_rows,
+        "global_max_reward": global_max,
     }
 
     for k in k_values:
@@ -149,16 +184,18 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
 
     metrics["by_question_type"] = type_metrics
 
-    # Difficulty distribution.
-    pass_rates = [r["pass_rate"] for r in records]
-    avg_pass_rate = sum(pass_rates) / num_questions
+    # Difficulty distribution (reward_std buckets).
+    reward_stds = [r["reward_std"] for r in records]
+    avg_reward_val = sum(r["avg_reward"] for r in records) / num_questions
+    avg_reward_std = sum(reward_stds) / num_questions
 
     buckets: Counter = Counter()
-    for p in pass_rates:
-        buckets[p] += 1
+    for s in reward_stds:
+        buckets[round(s, 4)] += 1
 
     metrics["difficulty"] = {
-        "avg_pass_rate": avg_pass_rate,
+        "avg_reward": avg_reward_val,
+        "avg_reward_std": avg_reward_std,
         "distribution": {f"{k:.4f}": v for k, v in sorted(buckets.items())},
     }
 
@@ -166,15 +203,16 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
         json.dump(metrics, f, indent=2)
     logger.info("Metrics -> %s", out / "metrics.json")
 
-    records_sorted = sorted(records, key=lambda r: r["pass_rate"])
-    with open(out / "difficulty.jsonl", "w") as f:
+    records_sorted = sorted(records, key=lambda r: r["reward_std"], reverse=True)
+    difficulty_path = out / output_filename
+    with open(difficulty_path, "w") as f:
         for r in records_sorted:
             f.write(json.dumps(r) + "\n")
-    logger.info("Difficulty -> %s", out / "difficulty.jsonl")
+    logger.info("Difficulty -> %s", difficulty_path)
 
     # Human-readable summary.
-    sorted_rates = sorted(buckets.keys())
-    mixed = sum(1 for p in pass_rates if 0.0 < p < 1.0)
+    sorted_std_keys = sorted(buckets.keys())
+    has_signal = sum(1 for s in reward_stds if s > 0)
 
     lines = [
         "CROSS-SEED AGGREGATION",
@@ -182,8 +220,10 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
         f"Seeds:             {num_seeds}",
         f"Questions (uuid):  {num_questions}",
         f"Total rows:        {total_rows}",
-        f"Avg pass rate:     {avg_pass_rate:.1%}",
-        f"Mixed (0<p<1):     {mixed} ({mixed / num_questions:.1%})",
+        f"Global max reward: {global_max}",
+        f"Avg reward:        {avg_reward_val:.4f}",
+        f"Avg reward std:    {avg_reward_std:.4f}",
+        f"Has signal (std>0):{has_signal} ({has_signal / num_questions:.1%})",
         "",
     ]
 
@@ -213,33 +253,31 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
     lines.append(overall)
     lines.append("")
 
-    # Pass rate histogram.
-    lines.append("Difficulty distribution:")
-    for rate in sorted_rates:
-        count = buckets[rate]
+    # Reward std histogram.
+    lines.append("Reward std distribution (per-question sample std across seeds):")
+    for std_val in sorted_std_keys:
+        count = buckets[std_val]
         pct = count / num_questions * 100
         bar = "#" * int(pct / 100 * 40)
-        correct = round(rate * num_seeds)
-        label = f"{correct}/{num_seeds}"
-        lines.append(f"  {label:>5s} ({rate:5.1%}): {count:5d} ({pct:5.1f}%) {bar}")
+        lines.append(f"  {std_val:6.4f}: {count:5d} ({pct:5.1f}%) {bar}")
     lines.append("")
 
     # Per-type difficulty breakdown.
-    rate_labels = [f"{round(r * num_seeds)}/{num_seeds}" for r in sorted_rates]
+    std_labels = [f"{s:.4f}" for s in sorted_std_keys]
     header = f"  {'Type':<15} {'Total':>5}"
-    for lbl in rate_labels:
-        header += f" {lbl:>5}"
+    for lbl in std_labels:
+        header += f" {lbl:>7}"
     lines.append("By question type:")
     lines.append(header)
-    lines.append("  " + "-" * (22 + 6 * len(rate_labels)))
+    lines.append("  " + "-" * (22 + 8 * len(std_labels)))
     for qt in sorted(by_type.keys()):
         qt_records = by_type[qt]
         qt_buckets: Counter = Counter()
         for r in qt_records:
-            qt_buckets[r["pass_rate"]] += 1
+            qt_buckets[round(r["reward_std"], 4)] += 1
         row = f"  {qt:<15} {len(qt_records):>5}"
-        for rate in sorted_rates:
-            row += f" {qt_buckets.get(rate, 0):>5}"
+        for std_val in sorted_std_keys:
+            row += f" {qt_buckets.get(std_val, 0):>7}"
         lines.append(row)
     lines.append("")
     lines.append("=" * 60)
@@ -250,7 +288,17 @@ def aggregate(rollout_dir: str, output_dir: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        logger.error("Usage: python aggregate_seeds.py <rollout_dir> <output_dir>")
-        sys.exit(1)
-    aggregate(sys.argv[1], sys.argv[2])
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Aggregate rollouts across seeds and compute difficulty metrics"
+    )
+    parser.add_argument("rollout_dir", help="Directory containing output-rs*.jsonl rollout files.")
+    parser.add_argument("output_dir", help="Directory to write aggregated outputs.")
+    parser.add_argument(
+        "--output_filename",
+        default="difficulty.jsonl",
+        help="Filename for the per-question reward stats JSONL (default: difficulty.jsonl).",
+    )
+    args = parser.parse_args()
+    aggregate(args.rollout_dir, args.output_dir, output_filename=args.output_filename)

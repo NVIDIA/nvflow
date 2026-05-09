@@ -20,7 +20,7 @@ from pathlib import Path
 # Import from subdirectories (shared, sdg, sft, rl, evaluation)
 _current_dir = Path(__file__).parent
 for subdir in _current_dir.iterdir():
-    if subdir.is_dir() and not subdir.name.startswith("_"):
+    if subdir.is_dir() and not subdir.name.startswith(("_", ".")):
         try:
             importlib.import_module(f".{subdir.name}", package=__package__)
         except ImportError:

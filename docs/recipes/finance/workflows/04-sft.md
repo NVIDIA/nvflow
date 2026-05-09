@@ -182,7 +182,7 @@ outputs/finance/sap-500/workflow-4-sft/qwen3_14b/
 ├── step-3-sequence-length-grouping/  # [Optional]
 │   └── grouped_data/
 ├── step-4-training/
-│   └── model-qwen3-14b-32n-tp4-pp1-cp8-seq48k/
+│   └── model-qwen3-14b-256g-tp4-pp1-cp8-seq48k/
 │       ├── checkpoints/
 │       │   ├── checkpoint-100/
 │       │   ├── checkpoint-200/
@@ -197,7 +197,7 @@ outputs/finance/sap-500/workflow-4-sft/qwen3_14b/
 
 | Model | Training Samples | Validation Samples | Training Duration | Final Checkpoint |
 |-------|------------------|-------------------|-------------------|------------------|
-| Qwen3-14B (32 nodes, 256 GPUs) | ~330K | ~37K | 12-16 hours (4 jobs) | `outputs/finance/sap-500/workflow-4-sft/qwen3_14b/step-4-training/.../checkpoints/final/` |
+| Qwen3-14B (256 GPUs) | ~330K | ~37K | 12-16 hours (4 jobs) | `outputs/finance/sap-500/workflow-4-sft/qwen3_14b/step-4-training/.../checkpoints/final/` |
 
 **Note:** Training runs as 4 sequential jobs (~4 hours each max). Total time depends on cluster availability and whether the final job finishes early.
 
@@ -215,10 +215,10 @@ wc -l $OUTPUT_DIR/step-2-train-validation-split/val.jsonl    # Should be ~37K
 wc -l $OUTPUT_DIR/step-1-prepare-for-sft/final_result.jsonl  # Should be ~366K
 
 # List checkpoints
-ls $OUTPUT_DIR/step-4-training/model-qwen3-14b-32n-tp4-pp1-cp8-seq48k/checkpoints/
+ls $OUTPUT_DIR/step-4-training/model-qwen3-14b-256g-tp4-pp1-cp8-seq48k/checkpoints/
 
 # Check final model
-ls $OUTPUT_DIR/step-4-training/model-qwen3-14b-32n-tp4-pp1-cp8-seq48k/checkpoints/final/
+ls $OUTPUT_DIR/step-4-training/model-qwen3-14b-256g-tp4-pp1-cp8-seq48k/checkpoints/final/
 # Should contain: config.json, model weights, tokenizer files
 ```
 
@@ -258,7 +258,7 @@ stages:
   training:
     model_name: MyOrg/MyModel
     hf_checkpoint_path: /hf_models/MyOrg/MyModel
-    num_nodes: 8                    # Adjust for your cluster
+    total_gpus: 64                  # Adjust for your model size
 
     # Use existing preset or create custom
     preset: "qwen-3-14b"            # Or your custom preset
@@ -282,7 +282,7 @@ stages:
 **Key configuration points:**
 1. Update `tokenizer` path in `prepare_for_sft` (Step 1) and `sequence_length_grouping` (Step 3)
 2. Set `model_name` and `hf_checkpoint_path` to your model in `training` (Step 4)
-3. Adjust `num_nodes` based on model size and available resources
+3. Adjust `total_gpus` based on model size and available resources
 4. Tune `parallelism` settings for your model architecture
 
 ### Adjusting Training Parameters
@@ -292,7 +292,7 @@ You can modify training behavior without changing the model. Common adjustments:
 ```yaml
 training:
   # === Resource Configuration ===
-  num_nodes: 16                     # Reduce for smaller runs (vs 32 in production)
+  total_gpus: 128                   # Reduce for smaller runs (vs 256 in production)
   dependent_jobs: 1                 # Fewer job splits (vs 3 in production)
 
   overrides:
@@ -315,7 +315,7 @@ training:
 ```
 
 **Parameter guide:**
-- **`num_nodes`**: Total GPU resources (e.g., 32 nodes × 8 GPUs = 256 GPUs)
+- **`total_gpus`**: Total GPUs for training (auto-split across nodes using `gpus_per_node` from cluster config)
 - **`dependent_jobs`**: Training split count (higher = more job restarts, lower max time per job)
 - **`max_num_epochs`**: Total training passes through the dataset
 - **`warmup_steps`**: Learning rate warmup (typically 5-10% of total steps)
@@ -443,10 +443,10 @@ wandb_mode: disabled  # online | offline | disabled
 
 ```bash
 # Count completed checkpoints
-ls ${OUTPUT_DIR}/step-4-training/model-qwen3-14b-32n-tp4-pp1-cp8-seq48k/checkpoints/ | grep checkpoint | wc -l
+ls ${OUTPUT_DIR}/step-4-training/model-qwen3-14b-256g-tp4-pp1-cp8-seq48k/checkpoints/ | grep checkpoint | wc -l
 
 # View latest checkpoint
-ls -lht ${OUTPUT_DIR}/step-4-training/model-qwen3-14b-32n-tp4-pp1-cp8-seq48k/checkpoints/ | head
+ls -lht ${OUTPUT_DIR}/step-4-training/model-qwen3-14b-256g-tp4-pp1-cp8-seq48k/checkpoints/ | head
 ```
 
 ### Troubleshooting

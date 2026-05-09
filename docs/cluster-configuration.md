@@ -305,15 +305,55 @@ sinfo -o "%P %l" | grep batch
 
 Environment variables injected into all job containers.
 
+> **Important:** Every path in `env_vars` must be **visible inside the container**.
+> It must be either a mount destination (e.g., `/workspace`, `/hf_models`) or a
+> host path that is transparently mounted (e.g., `/shared/data` when
+> `- /shared:/shared` is in your `mounts` section).
+>
+> | Status | Example | Why |
+> |--------|---------|-----|
+> | Works | `HF_HOME=/workspace/cache/huggingface` | `/workspace` is a mount destination |
+> | Works | `HF_HOME=/shared/cache/huggingface` | `/shared` is transparently mounted via `- /shared:/shared` |
+> | Fails | `HF_HOME=/home/user/.cache/huggingface` | `/home/user` has no corresponding mount |
+>
+> If you see `No such file or directory` for HF cache paths, check that the path
+> falls under a mount from your `mounts:` section.
+
 **Example:**
 ```yaml
 env_vars:
-  - HF_HOME=/hf_models/cache
+  # Infrastructure (match template-slurm.yaml order)
+  - HF_HOME=<CONTAINER_PATH>/cache/huggingface
   - NCCL_DEBUG=INFO
   - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
-  - OPENAI_API_KEY=sk-...
+  - CUDA_DEVICE_MAX_CONNECTIONS=1
+  - TOKENIZERS_PARALLELISM=false
+  - VIRTUAL_ENV=
+  - VIRTUAL_ENV_PROMPT=
+  # NeMo-RL / GRPO (uncomment as needed)
+  # - NRL_FORCE_REBUILD_VENVS=true
+  # API keys (keep secret, don't commit to git!)
   - HF_TOKEN=hf_...
+  - OPENAI_API_KEY=sk-...
 ```
+
+#### Recommended Variables
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `HF_HOME` | `<CONTAINER_PATH>/cache/huggingface` | **Required.** HuggingFace cache directory. Path must be visible inside the container (a mount destination or a transparently-mounted host path) |
+| `NCCL_DEBUG` | `INFO` | NCCL debugging output (useful for diagnosing multi-node issues) |
+| `PYTORCH_CUDA_ALLOC_CONF` | `max_split_size_mb:512` | Reduces CUDA memory fragmentation |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Required for sequence parallelism in Megatron |
+| `TOKENIZERS_PARALLELISM` | `false` | Disables Rayon multi-threading in the HuggingFace tokenizer Rust backend. Prevents `RuntimeError: Already borrowed` in vLLM 0.17.0 when concurrent requests trigger simultaneous mutable borrows on the tokenizer's `RefCell`. Zero performance impact (tokenization is microseconds vs. seconds for GPU inference). Standard practice across Megatron-LM, Megatron-Bridge, and NeMo-Gym |
+| `VIRTUAL_ENV` | *(empty)* | Unset to prevent host virtualenv from leaking into containers |
+| `VIRTUAL_ENV_PROMPT` | *(empty)* | Unset to prevent host venv prompt from leaking into containers |
+
+#### NeMo-RL / GRPO Variables
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `NRL_FORCE_REBUILD_VENVS` | `true` | Forces Ray workers to rebuild their virtual environments from the mounted NeMo-RL source tree instead of reusing cached venvs. **Enable this** when you update the NeMo-RL or Gym overlay mount (new branch, new commit). Without it, workers may use stale cached venvs with outdated code, causing import errors or silent behavior differences. Safe to leave enabled — only triggers a rebuild when the source tree actually changes |
 
 #### API Keys (Secrets)
 

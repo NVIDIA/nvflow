@@ -5,7 +5,7 @@
 # Inherits shared pipeline logic from base.yaml and provides all Gemma3-27B-IT
 # specific settings (tokenizer, model paths, parallelism, etc.)
 #
-# Requires 2 nodes × 8 GPUs = 16 GPUs (H100 80GB recommended)
+# Requires 16 GPUs (H100 80GB recommended)
 # Uses FSDP2 backend with TP=8 (matches NVIDIA nightly config for Gemma3-27B)
 #
 # Usage:
@@ -81,7 +81,7 @@ stages:
     backend: fsdp
 
     # Cluster configuration for 27B model
-    num_nodes: 2             # 2 nodes × 8 GPUs = 16 GPUs
+    total_gpus: 16
     dependent_jobs: 0        # No dependent jobs
 
     # Use base preset with model-specific overrides
@@ -154,7 +154,7 @@ stages:
     backend: megatron
 
     # Cluster configuration for 27B model
-    num_nodes: 2             # 2 nodes × 8 GPUs = 16 GPUs
+    total_gpus: 16
     dependent_jobs: 0        # No dependent jobs
 
     # Use base preset with model-specific overrides

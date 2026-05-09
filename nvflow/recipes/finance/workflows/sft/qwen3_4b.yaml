@@ -11,6 +11,9 @@
 # Inherit base SFT workflow
 _base_: base.yaml
 
+# Model identity (define once, reference everywhere via ${hf_model_path})
+hf_model_path: /hf_models/Qwen/Qwen3-4B
+
 # Model-specific output directory
 base_output_dir: /workspace/outputs/finance/demo/workflow-4-sft/qwen3_4b
 
@@ -40,7 +43,7 @@ stages:
   prepare_for_sft:
     prepare_data_kwargs:
       ctx_args: >-
-        ++tokenizer=/hf_models/Qwen/Qwen3-4B
+        ++tokenizer=${hf_model_path}
         ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
         ++chat_template_kwargs.enable_thinking=true
 
@@ -48,21 +51,20 @@ stages:
   # Stage 3: Sequence Length Grouping - Qwen3-4B tokenizer
   # --------------------------------------------------------------------------
   sequence_length_grouping:
-    tokenizer_path: /hf_models/Qwen/Qwen3-4B
+    tokenizer_path: ${hf_model_path}
 
   # --------------------------------------------------------------------------
   # Stage 4: Training - Qwen3-4B configuration (NeMo-RL format)
   # --------------------------------------------------------------------------
   training:
     model_name: Qwen/Qwen3-4B
-    hf_checkpoint_path: /hf_models/Qwen/Qwen3-4B
+    hf_checkpoint_path: ${hf_model_path}
 
     # Use Megatron backend (standard for Qwen3-4B)
     backend: megatron
 
     # Cluster configuration for 4B model
-    # Training estimates: TBD (depends on dataset size)
-    num_nodes: 1             # 1 node × 8 GPUs = 8 GPUs (demo)
+    total_gpus: 8
     dependent_jobs: 0        # No dependent jobs for demo
 
     # Use base preset with model-specific overrides
@@ -86,7 +88,7 @@ stages:
           enabled: true
           train_mb_tokens: 32768   # Match max_total_sequence_length
 
-        # Megatron parallelism: TP × PP × CP = 2×1×2 = 4 → DP = 16/4 = 4
+        # Megatron parallelism: TP × PP × CP = 2×1×2 = 4 → DP = 8/4 = 2
         megatron_cfg:
           tensor_model_parallel_size: 2
           context_parallel_size: 2    # 32K/2 = 16K tokens/rank
@@ -103,20 +105,19 @@ stages:
 
       data:
         max_input_seq_length: ${stages.training.overrides.policy.max_total_sequence_length}
-        force_reprocess: false
 
   # --------------------------------------------------------------------------
   # Stage 5: Evaluate Checkpoints - Qwen3-4B
   # --------------------------------------------------------------------------
   eval:
     eval_steps: [10]
-    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-1n-tp2-pp1-cp2-seq32k
+    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-8g-tp2-pp1-cp2-seq32k
     base_output_dir: ${base_output_dir}
     format: megatron
-    base_model: /hf_models/Qwen/Qwen3-4B
+    base_model: ${hf_model_path}
     server_type: vllm
-    gpus: 1
-    # Demo: only SecQUE and FinanceBench (skip finance_agent to save time)
+    gpus: 4  # Slurm allocation (>= QOS min); override TP via --tensor-parallel-size in server_args
+    # Demo: SecQUE and FinanceBench (skip finance_agent to save time)
     benchmarks:
       secque:
         seeds: 5
@@ -129,4 +130,4 @@ stages:
       ++inference.top_k=20
       ++inference.tokens_to_generate=16384
       ++chat_template_kwargs.enable_thinking=true
-    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3 --tensor-parallel-size 2"

@@ -63,7 +63,6 @@ class TestPrepareForSFTStage:
             "input_dir": "/path/to/input",
             "output_dir": "/path/to/output",
             "prepare_data_kwargs": {"ctx_args": "++prompt_config=test"},
-            "stage_kwargs": {"partition": "cpu"},
         }
         # Should not raise any exception
         stage.validate_config(config)

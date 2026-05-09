@@ -99,6 +99,8 @@ def merge_jsonl_files(input_files, output_file):
     logger.info(f"\nPhase 2: Writing merged output to {output_file}...")
     logger.info(f"Total unique problems: {len(data)}")
 
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
     # Write merged data with buffering
     buffer = []
 

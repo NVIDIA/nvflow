@@ -19,6 +19,6 @@ from pathlib import Path
 
 _current_dir = Path(__file__).parent
 for file in _current_dir.glob("*.py"):
-    if file.stem.startswith("_"):
+    if file.name.startswith(".") or file.stem.startswith("_"):
         continue
     importlib.import_module(f".{file.stem}", package=__package__)

@@ -14,6 +14,7 @@
 #
 """Workflow runner for executing stage sequences with dependency management."""
 
+import sys
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -218,17 +219,24 @@ class WorkflowRunner:
                 expanded.append(stage)
         self.config["pipeline_stages"] = expanded
 
-    def run(self, stages: list[str] | None = None) -> None:
+    def run(
+        self,
+        stages: list[str] | None = None,
+        environment: list[str] | None = None,
+    ) -> None:
         """Run workflow stages.
 
         Args:
             stages: List of stage names to run. If None, runs all stages
                    defined in config's pipeline_stages.
+            environment: Optional list of environment names to run for.
+                   If None, runs all environments defined in config.
 
         Example:
-            >>> runner.run()  # Run all stages
+            >>> runner.run()  # Run all stages, all environments
             >>> runner.run(stages=["download"])  # Run one stage
-            >>> runner.run(stages=["download", "validate"])  # Run multiple
+            >>> runner.run(environment=["equivalence_llm_judge"])  # Single env
+            >>> runner.run(environment=["mcqa", "equivalence_llm_judge"])
         """
         all_stages = self.config["pipeline_stages"]
         stages_to_run = stages if stages else all_stages
@@ -236,31 +244,81 @@ class WorkflowRunner:
         # Validate that requested stages exist in config
         self._validate_stages(stages_to_run, all_stages)
 
+        # Warn about sibling stages that are declared in pipeline_stages
+        # but not currently registered (e.g., their import failed).
+        self._preflight_pipeline_health(all_stages, stages_to_run)
+
+        if environment:
+            environments = self.config.get("environments", {})
+            for env_name in environment:
+                if env_name not in environments:
+                    available = ", ".join(environments.keys())
+                    raise ValueError(f"Unknown environment '{env_name}'. Available: {available}")
+
         header(f"NVFlow - Running Workflow: {self.workflow_name}")
         detail("Workflow Type", self.workflow_type)
         detail("Cluster", self.cluster)
         detail("Stages to run", f"{len(stages_to_run)}/{len(all_stages)}")
+        if environment:
+            detail("Environment", ", ".join(environment))
 
         # Execute stages
         completed_stages = []
         for stage_name in stages_to_run:
-            self._run_stage(stage_name)
+            self._run_stage(stage_name, environment=environment, stages_to_run=stages_to_run)
             completed_stages.append(stage_name)
 
         header("✅ Workflow Complete!")
         success(f"Completed {len(completed_stages)} stage(s): {', '.join(completed_stages)}")
 
-    def _run_stage(self, stage_name: str) -> None:
+    def _preflight_pipeline_health(
+        self,
+        all_stages: list[str],
+        stages_to_run: list[str],
+    ) -> None:
+        """Warn when pipeline_stages contains unregistered stages.
+
+        Subset runs only validate the requested stages, so siblings that
+        failed to import sit unnoticed until the user runs the full
+        pipeline.  This method surfaces them upfront on stderr (warn-only,
+        does not block the run).
+        """
+        deferred = [s for s in all_stages if s not in stages_to_run]
+        missing = [s for s in deferred if not StageRegistry.has(self.recipe, self.workflow_name, s)]
+        if missing:
+            print(
+                "[nvflow] WARNING: pipeline declares stages that are not "
+                "currently registered (other stages may have failed to "
+                "import; check earlier discovery warnings).  The workflow "
+                "WILL NOT complete end-to-end without fixing these:",
+                file=sys.stderr,
+            )
+            for s in missing:
+                print(f"  - {self.recipe}.{self.workflow_name}.{s}", file=sys.stderr)
+
+    def _run_stage(
+        self,
+        stage_name: str,
+        environment: list[str] | None = None,
+        stages_to_run: list[str] | None = None,
+    ) -> None:
         """Run a single stage.
 
         Args:
             stage_name: Short stage name (e.g., "sft", "generate_qa", "download")
                        Stage is resolved using recipe and workflow context
+            environment: Optional list of environment names to filter to.
+            stages_to_run: Stages being submitted in this session.  Slurm
+                deps are only wired for stages in this list; cross-session
+                deps are dropped because nemo-run's job directory may not
+                contain their records.
         """
         section(f"Running Stage: {stage_name}")
 
-        # Get stage configuration
-        stage_config = self.config["stages"][stage_name]
+        # Get stage configuration and inject environment filter
+        stage_config = {**self.config["stages"][stage_name]}
+        if environment is not None:
+            stage_config["_environment"] = environment
 
         # Get stage class from hierarchical registry with explicit context
         if not StageRegistry.has(self.recipe, self.workflow_name, stage_name):
@@ -278,13 +336,11 @@ class WorkflowRunner:
         # Generate experiment name for this stage
         expname = self._get_expname(stage_name, stage_config)
 
-        # Get dependencies (other stages this stage depends on)
+        # Only wire Slurm deps for stages submitted in this session.
         dependencies = stage_config.get("dependencies", [])
-        run_after = (
-            [self._get_expname(dep, self.config["stages"][dep]) for dep in dependencies]
-            if dependencies
-            else None
-        )
+        if stages_to_run is not None:
+            dependencies = [d for d in dependencies if d in stages_to_run]
+        run_after = self._get_run_after_names(dependencies, environment)
 
         if dependencies:
             info(f"Dependencies: {', '.join(dependencies)}")
@@ -324,6 +380,52 @@ class WorkflowRunner:
 
         return base_name
 
+    def _get_run_after_names(
+        self,
+        dependencies: list[str],
+        environment: list[str] | None,
+    ) -> list[str] | None:
+        """Build ``run_after`` experiment names for Slurm dependency tracking.
+
+        Per-environment stages submit jobs with ``{expname}-{env_name}``
+        suffixes.  This method expands dependency names to match those
+        suffixed experiment names so that ``nemo-run`` can resolve the
+        correct Slurm job handles.
+
+        For stages without ``environments``, the base experiment name is
+        used (unchanged from previous behaviour).
+        """
+        if not dependencies:
+            return None
+        names: list[str] = []
+        for dep in dependencies:
+            dep_config = self.config["stages"][dep]
+            base = self._get_expname(dep, dep_config)
+            if dep_config.get("environments"):
+                env_names = self._resolve_env_names(dep_config, environment)
+                names.extend(f"{base}-{env}" for env in env_names)
+            else:
+                names.append(base)
+        return names or None
+
+    @staticmethod
+    def _resolve_env_names(
+        stage_config: dict,
+        environment: list[str] | None,
+    ) -> list[str]:
+        """Return the environment names a stage will iterate over.
+
+        Mirrors the filtering logic of ``resolve_environments()`` in
+        ``nvflow.lib.rl.helpers`` but operates on the raw config dict
+        so the core module stays independent of recipe-specific code.
+        """
+        envs = stage_config.get("environments", {})
+        if not envs:
+            return []
+        if environment:
+            return [e for e in environment if e in envs]
+        return list(envs.keys())
+
     def _validate_stages(self, stages_to_run: list[str], all_stages: list[str]) -> None:
         """Validate that requested stages exist and are registered.
 
@@ -356,6 +458,31 @@ class WorkflowRunner:
                     f"Stage '{stage}' listed in pipeline_stages but no configuration "
                     f"found in stages section"
                 )
+
+        # Walk the transitive dependency graph of stages_to_run and verify
+        # each dependency is both configured and registered.  Without this,
+        # the runner builds Slurm --dependency names for stages that were
+        # never submitted (their import failed silently).
+        closure: set[str] = set(stages_to_run)
+        queue: list[str] = list(stages_to_run)
+        while queue:
+            s = queue.pop()
+            for d in self.config["stages"].get(s, {}).get("dependencies", []):
+                if d in closure:
+                    continue
+                closure.add(d)
+                queue.append(d)
+                if d not in self.config["stages"]:
+                    raise ValueError(
+                        f"Stage '{s}' depends on '{d}' which has no config block in 'stages:'."
+                    )
+                if not StageRegistry.has(self.recipe, self.workflow_name, d):
+                    raise ValueError(
+                        f"Stage '{s}' depends on '{d}' which is not registered "
+                        f"at {self.recipe}.{self.workflow_name}.{d}. Check "
+                        "earlier discovery warnings on stderr for the "
+                        "underlying import failure."
+                    )
 
     def validate_config(self) -> None:
         """Validate the workflow configuration.

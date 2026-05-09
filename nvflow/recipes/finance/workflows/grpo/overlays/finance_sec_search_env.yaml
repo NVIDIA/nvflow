@@ -1,0 +1,50 @@
+# Resolve OmegaConf interpolations in finance_sec_search.yaml's search_judge_model block.
+#
+# The upstream config references ${search_judge_model_*} variables (normally
+# provided by a local env.yaml).  Our GRPO pipeline overrides
+# judge_model_server.name to point to the dedicated judge_model server,
+# so search_judge_model is never used at runtime — these are just
+# placeholders to satisfy OmegaConf config resolution.
+#
+# Judge configuration lives in judge_vllm (qwen3_4b.yaml / base.yaml).
+search_judge_model_base_url: "http://unused:0/v1"
+search_judge_model_api_key: "EMPTY"
+search_judge_model_name: "unused"
+
+# Per-rollout wall-clock timeout. Tool calls after this budget return an error
+# asking the model to submit immediately. Prevents stragglers from blocking the batch.
+#
+# Judge and retrieval prompts are loaded from files in the prompts/ folder
+# so NVFlow users can tune them without editing the Gym repo.
+# Inline values take priority over file paths in the Gym config.
+finance_sec_search_resources_server:
+  resources_servers:
+    finance_sec_search:
+      max_rollout_time_seconds: 1800  # 30-min wall-clock budget per rollout
+      reward_mode: scaled  # [[0]]→0.0, [[1]]→0.5, [[2]]→1.0 (partial credit for GRPO)
+      judge_prompt_template_fpath: /workspace/nvflow/recipes/finance/prompts/finance_sec_search_judge.yaml
+      retrieval_system_prompt_fpath: /workspace/nvflow/recipes/finance/prompts/finance_sec_search_retrieval.yaml
+      # Retrieval sub-calls go to the policy vLLM worker, which asserts
+      # on-policy sampling params. Must match generation.temperature / top_p
+      # from the GRPO preset (grpo_presets.yaml).
+      retrieval_responses_create_params:
+        input: []
+        temperature: 1.0
+        top_p: 1.0
+
+# Cap agent loop iterations to bound context length and compute per rollout.
+# Typical workflow: search -> download -> retrieve (x few) -> submit fits in ~6-8 steps;
+# harder queries may need 10-15 retrieval refinements.
+# Raised from 15 to 50 after pilot analysis: at max_steps=15, 78% of rollouts
+# truncated mid-tool (median needed 22 steps, max=45).  50 covers p99 while
+# still bounding pathological loops.  Context limit (131K) and time budget
+# (1800s) provide independent safety bounds.
+finance_agent:
+  responses_api_agents:
+    finance_agent:
+      max_steps: 50
+
+# Resource server path overrides live in scope-specific overlays:
+#   finance_sec_search_demo.yaml   — for demo runs
+#   finance_sec_search_sap500.yaml — for S&P 500 production runs
+# Select the right one via config_paths in the model config (qwen3_4b.yaml).

@@ -411,7 +411,7 @@ Convert Qwen3 chat-templated training data to OpenAI messages format. Parses Qwe
 
 ### Batch Size
 
-Effective batch size = `per_device_train_batch_size` × `gradient_accumulation_steps` × `num_gpus`
+Effective batch size = `per_device_train_batch_size` × `gradient_accumulation_steps` × `total_gpus`
 
 Recommended: 32-128 for most models
 

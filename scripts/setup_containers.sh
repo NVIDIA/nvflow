@@ -3,25 +3,20 @@
 # setup_containers.sh
 #
 # Downloads and converts NeMo-Skills containers to .sqsh format in parallel using Slurm.
-# Uses container definitions from cluster_configs/containers.yaml
 #
 # Usage:
-#   sbatch --account=<account> scripts/setup_containers.sh [output_dir] [--platform PLATFORM] [--force]
+#   sbatch --account=<account> scripts/setup_containers.sh --config FILE [output_dir] [--platform PLATFORM] [--force]
 #
 # Options:
+#   --config FILE           Container definitions YAML file (required)
 #   output_dir              Directory to save .sqsh files (default: ./containers)
 #   --platform PLATFORM     Target platform: amd64 | arm64 (default: auto-detect from host)
 #   --force                 Force re-download existing containers
 #
 # Examples:
-#   # Basic usage (auto-detects platform from host architecture)
-#   sbatch --account=llmservice_modelalignment_sft scripts/setup_containers.sh ./containers
-#
-#   # Explicitly download ARM containers
-#   sbatch --account=llmservice_modelalignment_sft scripts/setup_containers.sh ./containers --platform arm64
-#
-#   # Force re-download all containers
-#   sbatch --account=llmservice_modelalignment_sft scripts/setup_containers.sh ./containers --force
+#   sbatch --account=llmservice_modelalignment_sft scripts/setup_containers.sh --config cluster_configs/my_containers.yaml ./containers
+#   sbatch --account=llmservice_modelalignment_sft scripts/setup_containers.sh --config cluster_configs/my_containers.yaml ./containers --platform arm64
+#   sbatch --account=llmservice_modelalignment_sft scripts/setup_containers.sh --config cluster_configs/my_containers.yaml ./containers --force
 #
 # Platform support:
 #   - Some containers are multi-arch (same tag for amd64/arm64)
@@ -50,9 +45,6 @@ else
 fi
 
 cd "$PROJECT_ROOT" || { echo "ERROR: Could not cd to $PROJECT_ROOT"; exit 1; }
-
-YAML_FILE="cluster_configs/containers.yaml"
-[[ -f "$YAML_FILE" ]] || { echo "ERROR: $YAML_FILE not found"; exit 1; }
 
 # =============================================================================
 # Output Helpers
@@ -101,6 +93,7 @@ get_image_tag() {
     local tag="${1##*:}"
     [[ "$tag" == "$1" ]] && echo "latest" || echo "$tag"
 }
+
 
 # =============================================================================
 # Dependency Check
@@ -246,9 +239,13 @@ parse_arguments() {
     OUTPUT_DIR="./containers"
     PLATFORM=""
     FORCE=false
+    CONFIG_FILE=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --config)
+                [[ -z "$2" || "$2" =~ ^-- ]] && { print_error "--config requires a file path"; exit 1; }
+                CONFIG_FILE="$2"; shift 2 ;;
             --platform)
                 [[ -z "$2" || "$2" =~ ^-- ]] && { print_error "--platform requires a value (amd64 or arm64)"; exit 1; }
                 PLATFORM="$2"; shift 2 ;;
@@ -261,7 +258,19 @@ parse_arguments() {
         esac
     done
 
-    # Auto-detect if not specified
+    # Require --config
+    if [[ -z "$CONFIG_FILE" ]]; then
+        print_error "--config is required."
+        echo ""
+        echo "  Usage: sbatch --account=<acct> scripts/setup_containers.sh --config <FILE> [output_dir]"
+        echo ""
+        echo "  Create a config from the template if you haven't already:"
+        echo "    cp cluster_configs/containers.yaml cluster_configs/my_containers.yaml"
+        echo "    # Edit my_containers.yaml with your registry paths"
+        exit 1
+    fi
+
+    # Auto-detect platform if not specified
     if [[ -z "$PLATFORM" ]]; then
         PLATFORM=$(get_host_arch)
         if [[ -z "$PLATFORM" ]]; then
@@ -269,7 +278,6 @@ parse_arguments() {
             exit 1
         fi
     else
-        # Validate user-provided platform
         PLATFORM=$(validate_platform "$PLATFORM")
         if [[ -z "$PLATFORM" ]]; then
             print_error "Invalid platform. Supported: amd64, arm64"
@@ -285,6 +293,10 @@ parse_arguments() {
 mkdir -p outputs/logs
 
 parse_arguments "$@"
+
+YAML_FILE="$CONFIG_FILE"
+[[ -f "$YAML_FILE" ]] || { print_error "$YAML_FILE not found"; exit 1; }
+
 check_dependencies
 
 # Warn if cross-platform download
@@ -300,6 +312,7 @@ mkdir -p "$OUTPUT_DIR"
 
 print_header "Configuration"
 cat <<EOF
+Config:    $YAML_FILE
 Output:    $OUTPUT_DIR
 Platform:  $PLATFORM (host: $HOST_ARCH)
 Force:     $FORCE

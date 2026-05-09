@@ -98,11 +98,15 @@ def convert_record(
     output_text = record.get("output", "")
     uuid = record.get("uuid", "")
 
-    # Start with empty system message (required by OpenAI format)
-    messages: list[dict[str, str]] = [{"role": "system", "content": ""}]
-
-    # Parse chat template to get user messages
-    messages.extend(parse_chat_template(input_text))
+    # parse_chat_template returns the parsed sequence including any system
+    # block embedded in the input.  Use it as-is when present; otherwise
+    # emit an empty system placeholder for OpenAI fine-tune compatibility.
+    parsed = parse_chat_template(input_text)
+    if parsed and parsed[0].get("role") == "system":
+        messages: list[dict[str, str]] = list(parsed)
+    else:
+        messages = [{"role": "system", "content": ""}]
+        messages.extend(parsed)
 
     # Build assistant message
     assistant_msg: dict[str, str] = {"role": "assistant"}
@@ -184,6 +188,16 @@ def validate_record(record: dict[str, Any], line_num: int) -> list[str]:
             issues.append(f"Line {line_num}: {path}.content must be string")
         if "reasoning_content" in msg and role != "assistant":
             issues.append(f"Line {line_num}: {path}.reasoning_content only valid for assistant")
+
+    # Reject records with more than one system message (a past bug
+    # unconditionally prepended an empty system block before extending
+    # with parse_chat_template, which itself returns a system block for
+    # Qwen3 inputs).
+    system_count = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "system")
+    if system_count > 1:
+        issues.append(
+            f"Line {line_num}: record has {system_count} system messages; expected at most 1"
+        )
 
     # Check metadata
     metadata = record.get("metadata")

@@ -1,0 +1,50 @@
+# ============================================================================
+# Baseline Evaluation - Smoke Test Configuration
+# ============================================================================
+# Minimal baseline eval: Qwen3-4B only, SecQUE only, 1 seed.
+#
+# Usage:
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/eval/smoke.yaml
+# ============================================================================
+
+_base_: base.yaml
+
+recipe: finance
+workflow:
+  name: eval
+  type: "evaluation"
+  description: "Smoke test baseline evaluation (Qwen3-4B, SecQUE only)"
+
+cluster: my_cluster
+base_output_dir: /workspace/outputs/finance/smoke/workflow-1-baseline-eval
+
+pipeline_stages:
+  - prepare_data
+  - qwen3-4b
+
+benchmarks:
+  secque:
+    seeds: 1
+  financebench: null
+  finance_agent: null
+
+stages:
+  prepare_data:
+    dataset_names: [secque]
+    output_dir: /workspace/nvflow/recipes/finance/datasets
+
+models:
+  qwen3-4b:
+    path: /hf_models/Qwen/Qwen3-4B
+    server_type: vllm
+    dependencies: [prepare_data]
+    inference_args: >-
+      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++inference.temperature=0.6
+      ++inference.top_p=0.95
+      ++inference.top_k=20
+      ++inference.tokens_to_generate=16384
+      ++chat_template_kwargs.enable_thinking=true
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"
+    gpus: 1
+    nodes: 1

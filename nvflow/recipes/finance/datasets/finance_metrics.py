@@ -46,15 +46,16 @@ def parse_rating(judgement: str) -> int | None:
     if not judgement:
         return None
 
-    # Look for [[0]], [[1]], or [[2]]
-    match = re.search(r"\[\[([012])\]\]", judgement)
-    if match:
-        return int(match.group(1))
+    # Look for [[0]], [[1]], or [[2]] -- take the last match so reasoning
+    # judges that mention earlier ratings are recorded correctly.
+    matches = list(re.finditer(r"\[\[([012])\]\]", judgement))
+    if matches:
+        return int(matches[-1].group(1))
 
-    # Fallback: try to find rating number in various formats
-    match = re.search(r"rating[:\s]+([012])", judgement.lower())
-    if match:
-        return int(match.group(1))
+    # Fallback: try to find rating number in various formats (last match wins)
+    fallback = list(re.finditer(r"rating[:\s]+([012])", judgement.lower()))
+    if fallback:
+        return int(fallback[-1].group(1))
 
     return None
 

@@ -107,12 +107,14 @@ End-to-end pipeline for generating synthetic financial Q&A data from SEC filings
                         │
                         ↓
            ┌────────────────────────────────────────┐
-           │ 4. GRPO RL Training (8 stages)         │
+           │ 4. GRPO RL Training (10 stages)        │
            ├────────────────────────────────────────┤
            │ • Prepare data (agent routing)         │
            │ • Collect rollouts + reward analysis   │
            │ • [Optional] Re-compute rewards        │
            │ • GRPO training with NeMo-Gym          │
+           │   (equivalence_llm_judge,              │
+           │    finance_sec_search)                 │
            │ • Eval (checkpoint + baseline)         │
            ├────────────────────────────────────────┤
            │ Output: RL-trained model + eval results│
@@ -128,7 +130,7 @@ End-to-end pipeline for generating synthetic financial Q&A data from SEC filings
 | 3 | [document-grounded-sdg](workflows/03-document-grounded-sdg.md) | Generate verified Q&A from documents | 7 | 8 |
 | 4 | [sft](workflows/04-sft.md) | Supervised fine-tuning + checkpoint eval | 6 | 256 |
 | 5 | [eval](workflows/05-eval.md) | Baseline model evaluation | 7 | 8 |
-| 6 | [grpo](workflows/06-grpo.md) | GRPO RL training + checkpoint eval | 8 | 8 |
+| 6 | [grpo](workflows/06-grpo.md) | GRPO RL training + checkpoint eval | 10 | 16 |
 
 > **Note:** GPU counts show the maximum requirement for any single stage in the workflow (i.e., minimum GPUs needed to run the pipeline).
 
@@ -171,7 +173,7 @@ Detailed technical specifications for each stage:
 - **[Document-Grounded SDG Stages](stages/document-grounded-sdg.md)** - 7 stages
 - **[SFT Stages](stages/sft.md)** - 6 stages
 - **[Eval Stages](stages/eval.md)** - 9 stages
-- **[GRPO Stages](stages/grpo.md)** - 9 stages
+- **[GRPO Stages](stages/grpo.md)** - 10 stages
 
 ## Quick Command Reference
 

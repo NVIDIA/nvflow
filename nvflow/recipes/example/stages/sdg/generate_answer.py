@@ -64,10 +64,8 @@ class GenerateAnswerStage(BaseStage):
         console.detail("Experiment name", expname)
         console.blank()
 
-        # Prepare context with prompt config and inline arguments
         ctx = wrap_arguments(f"++prompt_config={prompt_config} {inline_args}")
 
-        # Submit generation job to cluster via nemo-skills
         console.detail("Stage kwargs", str(config.get("stage_kwargs", {})))
 
         generate(

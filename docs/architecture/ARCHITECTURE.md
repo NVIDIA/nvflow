@@ -285,11 +285,11 @@ nvflow/
 # Stage registration uses decorator pattern
 @StageRegistry.register(
     recipe="finance",
-    workflow="training_sft",
+    workflow="sft",
     stage="sft"
 )
 class SFTStage(BaseStage):
-    workflow = "training_sft"
+    workflow = "sft"
 
     def execute(self, config, cluster, expname, run_after=None):
         # Implementation
@@ -301,7 +301,7 @@ class SFTStage(BaseStage):
 ```yaml
 recipe: finance
 workflow:
-  name: training_sft
+  name: sft
   type: training
 
 cluster: my_cluster
@@ -318,8 +318,7 @@ stages:
     output_dir: /data/processed
 
   training:
-    num_nodes: 32
-    num_gpus_per_node: 8
+    total_gpus: 256
     dependencies:
       - data_transformation
       - prepare_for_sft
@@ -358,7 +357,7 @@ sequenceDiagram
         WorkflowRunner->>Stage: validate_config(config)
         WorkflowRunner->>Stage: execute(config, cluster, expname, run_after)
 
-        Stage->>NemoSkills: Call nemo-skills pipeline
+        Stage->>NemoSkills: Submit job (NeMo-RL direct for training, nemo-skills for data/eval)
         NemoSkills->>Slurm: Submit job with dependencies
         Slurm-->>NemoSkills: Job ID
         NemoSkills-->>Stage: Job submitted
@@ -522,19 +521,20 @@ Benchmarks: Financial reasoning tasks
 #### **Workflow 6: GRPO RL Training**
 ```
 Stages:
-  1. data_transformation       - SDG cleanup to model-agnostic schema
-  2. apply_prompt_template     - Apply prompt template + extract answer
-  3. convert_to_responses_api  - Convert to NeMo-Gym Responses API format
-  4. train_validation_split    - Split into train/val sets
+  1. validate_questions        - Validate format + deduplicate
+  2. data_transformation       - SDG cleanup to model-agnostic schema
+  3. apply_prompt_template     - Apply prompt template + extract answer
+  4. convert_to_responses_api  - Convert to NeMo-Gym Responses API format
   5. prepare_data              - Add agent routing fields
-  6. collect_rollouts          - Rollout collection + reward profiling
-  7. compute_rewards           - [Optional] Re-judge with different model
-  8. training                  - GRPO training with NeMo-Gym
-  9. eval                      - Evaluate checkpoints on benchmarks
+  6. prefetch_cache            - Prefetch SEC filings cache
+  7. collect_rollouts          - Rollout collection + reward profiling
+  8. train_validation_split    - Split into train/val sets
+  9. training                  - GRPO training with NeMo-Gym
+  10. eval                     - Evaluate checkpoints on benchmarks
 
 Output: RL-trained model + eval results
-GPU: 8 GPUs (1 node for demo)
-Model: Qwen3-4B (demo), extensible to larger models
+GPU: 16 GPUs (2 nodes for demo), 64 GPUs (8 nodes for production)
+Model: Qwen3-4B dense (demo, FSDP v2), Qwen3-30B-A3B MoE (production, Megatron)
 ```
 
 ### Finance Recipe Component Diagram
@@ -544,12 +544,12 @@ graph TB
     subgraph "Finance Recipe Structure"
         direction TB
 
-        subgraph "Stages (27 total)"
+        subgraph "Stages (42 total)"
             direction LR
             SDG[SDG Stages<br/>12 stages]
             SFT[SFT Stages<br/>4 stages]
             Eval[Eval Stages<br/>2 stages]
-            RL[RL Stages<br/>9 stages]
+            RL[RL Stages<br/>10 stages]
         end
 
         subgraph "Workflows (6 total)"
@@ -558,7 +558,7 @@ graph TB
             W3[document-sdg<br/>7 stages]
             W4[sft<br/>6 stages]
             W5[eval<br/>9 stages]
-            W6[grpo<br/>9 stages]
+            W6[grpo<br/>10 stages]
         end
 
         subgraph "Prompts"
@@ -671,25 +671,25 @@ graph TB
 ┌─────────────────────────────────────────────────────┐
 │          Container Images (.sqsh format)            │
 ├─────────────────────────────────────────────────────┤
-│                                                      │
-│  ┌──────────────┐  ┌──────────────┐               │
-│  │ nemo-skills  │  │    vLLM      │               │
-│  │   (0.7.1)    │  │  (v0.10.2)   │               │
-│  └──────────────┘  └──────────────┘               │
-│                                                      │
-│  ┌──────────────┐  ┌──────────────┐               │
-│  │   SGLang     │  │   NeMo-RL    │               │
-│  │  (v0.5.4)    │  │   (0.7.0)    │               │
-│  └──────────────┘  └──────────────┘               │
-│                                                      │
-│  ┌──────────────┐  ┌──────────────┐               │
-│  │   NeMo FW    │  │   PyTorch    │               │
-│  │              │  │              │               │
-│  └──────────────┘  └──────────────┘               │
+│                                                     │
+│  ┌──────────────┐  ┌──────────────┐                 │
+│  │ nemo-skills  │  │    vLLM      │                 │
+│  │  (0229040)   │  │  (v0.18.1)   │                 │
+│  └──────────────┘  └──────────────┘                 │
+│                                                     │
+│  ┌──────────────┐  ┌──────────────┐                 │
+│  │   SGLang     │  │   NeMo-RL    │                 │
+│  │ (v0.5.10)    │  │   (v0.6.0)   │                 │
+│  └──────────────┘  └──────────────┘                 │
+│                                                     │
+│  ┌──────────────┐  ┌──────────────┐                 │
+│  │   NeMo FW    │  │   PyTorch    │                 │
+│  │              │  │              │                 │
+│  └──────────────┘  └──────────────┘                 │
 └─────────────────────────────────────────────────────┘
                        ↓
 ┌─────────────────────────────────────────────────────┐
-│              Shared Filesystem Mounts                │
+│              Shared Filesystem Mounts               │
 ├─────────────────────────────────────────────────────┤
 │  /workspace → /lustre/.../workspace                 │
 │  /hf_models → /lustre/.../models/hf_models          │

@@ -1,0 +1,348 @@
+# ============================================================================
+# Qwen3-30B-A3B GRPO Training Configuration (MoE, DG SDG)
+# ============================================================================
+# GRPO RL training for Qwen3-30B-A3B (Mixture of Experts) using
+# Document-Grounded SDG hard_rl_data from SAP-500.
+#
+# Inherits shared pipeline logic from base.yaml and provides all
+# Qwen3-30B-A3B specific settings (MoE parallelism, context extension, etc.)
+#
+# Key differences from Qwen3-4B:
+#   - MoE architecture: 128 experts, top-k=8 → requires expert_model_parallel_size
+#   - DG SDG data: raw_train_data points to workflow-3-document-grounded-sdg
+#     (symlink final_result.jsonl → hard_rl_data.jsonl)
+#   - answer_prefix: null for all envs (DG SDG has no "Answer:" prefix;
+#     full answer text used as GOLD for richer partial-reward signal
+#     with thinking models)
+#   - Larger Megatron parallelism: TP=4, CP=4, EP=8 on 64 GPUs (DP=4)
+#
+# Usage:
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_30b_a3b.yaml
+#
+# Data:
+#   DG SDG hard_rl_data.jsonl (414K records, difficulty_score=0).
+#   Symlinked as final_result.jsonl so data_transformation reads it unchanged.
+#   The `answer` field (not `generation`) is consumed via fallback in
+#   dataset_transformer.py.
+# ============================================================================
+
+# Inherit base GRPO workflow
+_base_: base.yaml
+
+# Data scope: SAP-500 DG SDG data
+data_root: /workspace/outputs/finance/sap-500
+
+# Model identity (define once, reference everywhere via ${hf_model_path})
+hf_model_path: /hf_models/Qwen/Qwen3-30B-A3B
+
+# Model-specific output directory (stages 5-9: rollouts, compute_rewards,
+# train_validation_split, training, eval write here)
+model_output_dir: ${base_output_dir}/qwen3_30b_a3b
+
+# Same pipeline as base.yaml -- listed here because YAML lists fully replace
+# (not merge) when inherited via _base_, so we must re-declare.
+pipeline_stages:
+  - validate_questions
+  - data_transformation
+  - apply_prompt_template
+  - convert_to_responses_api
+  - prepare_data
+  - prefetch_cache
+  - collect_rollouts
+  - train_validation_split
+  - training
+  - eval
+
+# ============================================================================
+# Shared Anchors (define once, reuse across stages)
+# ============================================================================
+# GPT-OSS-120B as dedicated judge (MoE, TP=2 to avoid GPU idle reaper).
+_judge_vllm: &judge_vllm
+  model_path: /hf_models/openai/gpt-oss-120b
+  num_gpus: 2
+  server_nodes: 1
+  max_model_len: 32768
+  async_scheduling: true
+  uses_reasoning_parser: true
+
+# Per-environment sequence length for equiv/mcqa (finance_sec_search uses 131K model default)
+_env_seq_len_32k: 32768
+
+_training_policy_32k: &training_policy_32k
+  max_total_sequence_length: ${_env_seq_len_32k}
+  hf_config_overrides: null   # No YaRN needed at 32K (native context is 40960)
+  megatron_cfg:
+    context_parallel_size: 2  # CP=4 is for 131K; CP=2 sufficient for 32K
+  generation:
+    vllm_cfg:
+      max_model_len: ${_env_seq_len_32k}
+  sequence_packing:
+    train_mb_tokens: ${_env_seq_len_32k}
+    logprob_mb_tokens: ${_env_seq_len_32k}
+
+# DG SDG data path (shared across equivalence_llm_judge and finance_sec_search)
+_dg_sdg_data: &dg_sdg_data /workspace/outputs/finance/sap-500/workflow-3-document-grounded-sdg
+
+# ============================================================================
+# Environment Overrides
+# ============================================================================
+# answer_prefix: null for all environments.
+# DG SDG `answer` field has no "Answer:" prefix. The full answer text
+# (1-2K chars) serves as the GOLD reference, enabling partial rewards
+# from the 3-point finance judges. Revisit if training a non-thinking model.
+environments:
+  equivalence_llm_judge:
+    raw_train_data: *dg_sdg_data
+    answer_prefix: null
+    judge_vllm: *judge_vllm
+    training_policy: *training_policy_32k
+  mcqa:
+    training_repeat: 2
+    training_policy: *training_policy_32k
+  finance_sec_search:
+    # IMPORTANT: raw_train_data points at the validate_questions output,
+    # NOT the raw SDG.  The validate_questions stage reads from *dg_sdg_data
+    # (via stages.validate_questions.source_data below) and writes the
+    # filtered dataset to ${directories.step-0-validate-questions}/finance_sec_search/.
+    # data_transformation then reads via this path as it always has.
+    # If validate_questions is removed from pipeline_stages, revert this to
+    # *dg_sdg_data.
+    raw_train_data: ${directories.step-0-validate-questions}/finance_sec_search
+    config_paths:
+      - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
+      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
+      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_sap500.yaml
+    policy_vllm:
+      num_gpus: 4
+      max_model_len: 131072
+      hf_config_overrides:
+        rope_scaling:
+          rope_type: yarn
+          factor: 3.2
+          original_max_position_embeddings: 40960
+    judge_vllm: *judge_vllm
+
+# ============================================================================
+# Model-Specific Stage Overrides
+# ============================================================================
+
+stages:
+
+  # --------------------------------------------------------------------------
+  # Validate Questions: GPT-OSS-120B pre-filter
+  # --------------------------------------------------------------------------
+  # Always invoke with `-e finance_sec_search` — the SEC-filings rubric doesn't
+  # apply to equivalence_llm_judge / mcqa question distributions.
+  #
+  # stage_kwargs goes straight to nemo_skills.pipeline.cli.generate(), so keys
+  # must match its signature (model / server_gpus / server_args / ...).  Do NOT
+  # spread the _judge_vllm anchor here — its keys (model_path / num_gpus /
+  # max_model_len / ...) are rejected by generate().
+  validate_questions:
+    source_data: *dg_sdg_data
+    stage_kwargs:
+      model: /hf_models/openai/gpt-oss-120b
+      server_type: vllm
+      server_gpus: 4
+      server_nodes: 1
+      # Single chunk: 10K dryrun extrapolates to ~42-90 min for the full
+      # ~379K prefiltered records on one 4-GPU server, well under the
+      # 4h Slurm timeout.  Runs 1 job instead of 8 = 1/8 the cluster
+      # GPU-hour footprint with a moderate wall-clock tradeoff.
+      # If resilience against a single-job timeout becomes a concern,
+      # bump num_chunks to 2-4 as a middle ground.
+      num_chunks: 1
+      # Concurrency lever is --max-num-seqs (vLLM's 1024 default was the
+      # binding cap in dryrun measurements); --max-num-batched-tokens
+      # is slack for prefill bursts.  Both are scheduler-only, no
+      # quality impact.
+      server_args: >-
+        --max-model-len 65536
+        --async-scheduling
+        --reasoning-parser openai_gptoss
+        --max-num-batched-tokens 32768
+        --max-num-seqs 4096
+    # No stage-level inline_args override here -- we inherit base.yaml's
+    # default (reasoning_effort=high, tokens_to_generate=8192,
+    # max_concurrent_requests=2048) which has no max_samples cap, so the
+    # LLM processes every prefiltered record.
+
+  # --------------------------------------------------------------------------
+  # Rollout Collection: Qwen3-30B-A3B configuration
+  # --------------------------------------------------------------------------
+  collect_rollouts:
+    rollout:
+      num_random_seeds: 1
+      num_chunks: 8
+      dependent_jobs: 2
+      num_samples_in_parallel: 512
+      starting_seed: 0
+      policy_vllm:
+        model_path: ${hf_model_path}
+        num_gpus: 4                # TP = 4 (one node, 4 GPUs)
+        server_nodes: 1
+        # Max concurrent sequences in vLLM.  Reduced from 512 → 448 to
+        # prevent KV cache saturation on heavy data (seed 0 hit 100% KV
+        # sustained at 512, dropping prefix cache to 11% and throughput
+        # by ~30%).  At 448 the steady-state KV stays ≤87% with no
+        # throughput penalty (GPU is not the bottleneck).
+        max_num_seqs: 448
+        # To scale with data parallelism (multi-node vLLM):
+        #   data_parallel_size: 2      # DP replicas; increase with server_nodes + num_samples_in_parallel
+        #   data_parallel_backend: ray  # multi-node DP via Ray
+        # Note: for agentic workloads (multi-turn tool use), DP>1 may not
+        # improve throughput — the bottleneck is client-side orchestration,
+        # not GPU inference.
+        reasoning_parser: qwen3
+
+  # --------------------------------------------------------------------------
+  # Train/Validation Split: curriculum ordering for GRPO
+  # --------------------------------------------------------------------------
+  # Sort train.jsonl by offline difficulty (easy-to-hard) instead of shuffling.
+  # Early training steps see high-reward prompts → strong GRPO gradients.
+  train_validation_split:
+    sort_by: "difficulty_profile.avg_reward"
+    sort_order: "desc"
+
+  # --------------------------------------------------------------------------
+  # Training: Qwen3-30B-A3B GRPO configuration (Megatron, MoE)
+  # --------------------------------------------------------------------------
+  # data_source_dir and dependencies are inherited from base.yaml
+  # (step-7-train-validation-split / [train_validation_split]) since we use
+  # the default post-rollout split.  Only model-specific fields below.
+  training:
+    model_name: Qwen/Qwen3-30B-A3B
+    hf_checkpoint_path: ${hf_model_path}
+
+    # Megatron backend required for MoE expert parallelism
+    backend: megatron
+
+    # Production: 64 GPUs = 8 nodes x 8 GPUs (DP=4)
+    # Model parallel = TP(4) x CP(4) x PP(1) = 16 → DP = 64/16 = 4
+    total_gpus: 64
+    dependent_jobs: 2
+
+    wandb_mode: online
+
+    preset: "grpo-base"
+
+    overrides:
+      data:
+        shuffle: false
+
+      grpo:
+        num_prompts_per_step: 128
+        num_generations_per_prompt: 8
+        max_num_epochs: 1
+        val_period: 4
+        use_dynamic_sampling: true
+        batch_multiplier: 2
+        dynamic_sampling_max_gen_batches: 10
+
+      # GSPO loss formulation for MoE stability
+      # (ref: RL/examples/nemo_gym/grpo_qwen3_30ba3b_instruct.yaml)
+      # sequence_level_importance_ratios: one ratio per sequence (not per token),
+      # smoothing MoE routing-induced logprob variance across tokens.
+      loss_fn:
+        sequence_level_importance_ratios: true
+        token_level_loss: false
+        ratio_clip_min: 3.0e-4
+        ratio_clip_max: 3.0e-4
+
+      checkpointing:
+        save_period: 2
+        checkpoint_must_save_by: "00:03:30:00"
+
+      policy:
+        tokenizer:
+          name: ${stages.training.hf_checkpoint_path}
+        # Qwen3-30B-A3B (MoE) needs YaRN to extend context beyond native 40960
+        hf_config_overrides:
+          rope_scaling:
+            rope_type: yarn
+            rope_theta: 1000000
+            factor: 3.2
+            original_max_position_embeddings: 40960
+            truncate: true
+            beta_fast: 32
+            beta_slow: 1
+            mscale: 1
+            mscale_all_dim: 0
+        # 131K default context (required by finance_sec_search and combined training).
+        # Single-env equiv/mcqa override down to 32K via training_policy.
+        max_total_sequence_length: 131072
+        generation:
+          vllm_cfg:
+            tensor_parallel_size: 4
+            max_model_len: 131072
+            http_server_serving_chat_kwargs:
+              reasoning_parser: qwen3
+        # Batch size = num_prompts_per_step * num_generations_per_prompt = 128 * 8 = 1024
+        train_global_batch_size: 1024
+
+        # Megatron parallelism for MoE:
+        # TP=4, CP=4, PP=1, EP=8
+        # - TP=4: model sharding across 4 GPUs (matches NeMo-RL 40K reference)
+        # - CP=4: 131K / 4 = ~32K tokens/rank (activation ckpt handles memory)
+        # - EP=8: 128 experts / 8 = 16 experts per EP rank
+        # - DP = 64 / (TP*CP*PP) = 64/16 = 4 (doubled from CP=8 for throughput)
+        megatron_cfg:
+          tensor_model_parallel_size: 4
+          pipeline_model_parallel_size: 1
+          context_parallel_size: 4
+          expert_model_parallel_size: 8
+          expert_tensor_parallel_size: 1
+          sequence_parallel: true
+          activation_checkpointing: true
+          empty_unused_memory_level: 1
+          # moe_token_dispatcher_type: uses preset default (allgather).
+          # Consider alltoall for better comm efficiency at EP=8 if throughput-bound.
+          env_vars:
+            PYTORCH_ALLOC_CONF: "expandable_segments:False"
+          # LR for GSPO on 30B MoE (ref: grpo_qwen3_30ba3b_instruct.yaml)
+          # GSPO's tight clipping (3e-4) acts as implicit regularization,
+          # allowing higher LR than GRPO. Constant schedule (min_lr = lr).
+          optimizer:
+            lr: 2.0e-6
+            min_lr: 2.0e-6
+          scheduler:
+            lr_warmup_iters: 0
+            lr_warmup_init: 2.0e-6
+
+        # Sequence packing (required for CP > 1)
+        sequence_packing:
+          enabled: true
+          train_mb_tokens: 131072
+          logprob_mb_tokens: 131072
+
+        logprob_chunk_size: 2048
+
+      # Logger
+      logger:
+        wandb:
+          name: "gspo-qwen3-30b-a3b"
+
+  # --------------------------------------------------------------------------
+  # Stage 9: Evaluate Checkpoints - Qwen3-30B-A3B GRPO
+  # --------------------------------------------------------------------------
+  eval:
+    eval_steps: [20]
+    checkpoint_path: ${directories.step-8-training}
+    base_output_dir: ${model_output_dir}
+    format: megatron
+    base_model: ${hf_model_path}
+    server_type: vllm
+    gpus: 4
+    benchmarks:
+      secque:
+        seeds: 5
+      financebench:
+        seeds: 5
+    inference_args: >-
+      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++inference.temperature=0.6
+      ++inference.top_p=0.95
+      ++inference.top_k=20
+      ++inference.tokens_to_generate=16384
+      ++chat_template_kwargs.enable_thinking=true
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3 --tensor-parallel-size 4"

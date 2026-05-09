@@ -55,8 +55,11 @@ def main() -> int:
     # Try to resolve the base ref; on detached HEAD (post-merge pipelines on
     # main) the local branch ref may not exist, so fetch origin/<base> as
     # fallback reference.
+    # --first-parent: only check direct commits on the branch, not commits
+    # that came in via merged feature branches.  This avoids re-checking
+    # historical unsigned commits from old MRs during cross-branch merges.
     result = subprocess.run(
-        ["git", "rev-list", "--no-merges", f"{base}..HEAD"],
+        ["git", "rev-list", "--no-merges", "--first-parent", f"{base}..HEAD"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -64,7 +67,7 @@ def main() -> int:
     if result.returncode != 0:
         # base ref not found locally – try origin/<base>
         result = subprocess.run(
-            ["git", "rev-list", "--no-merges", f"origin/{base}..HEAD"],
+            ["git", "rev-list", "--no-merges", "--first-parent", f"origin/{base}..HEAD"],
             capture_output=True,
             text=True,
             timeout=10,

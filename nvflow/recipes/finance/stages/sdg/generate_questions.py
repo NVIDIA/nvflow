@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.vllm_compat import inject_server_entrypoint
 
 # Run with uv run nflow run generate_questions --config=nvflow/recipes/finance/workflows/sdg/template-based-sdg.yaml
 
@@ -67,7 +68,7 @@ class GenerateQuestionsStage(BaseStage):
         run_cmd(
             ctx=wrap_arguments(
                 f"pip install -q --root-user-action=ignore jsonlines && "
-                f"python /workspace/nvflow/recipes/finance/utils/sdg/prepare_question_gen_data.py "
+                f"python3 -m nvflow.recipes.finance.utils.sdg.prepare_question_gen_data "
                 f"--input_file {input_file} --company_info_file {company_info_file} "
                 f"--start_year {start_year} --end_year {end_year} --output_file {prepped_file}"
             ),
@@ -81,8 +82,12 @@ class GenerateQuestionsStage(BaseStage):
 
         generated_file = str(generation_folder / "output.jsonl")
 
-        postprocess_cmd = f"python /workspace/nvflow/recipes/finance/utils/sdg/parse_generated_questions.py --input_file {generated_file} --output_file {output_file}"
+        postprocess_cmd = f"python3 -m nvflow.recipes.finance.utils.sdg.parse_generated_questions --input_file {generated_file} --output_file {output_file}"
 
+        stage_kwargs = inject_server_entrypoint(  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
+            config.get("stage_kwargs", {}),
+            config.get("stage_kwargs", {}).get("model", ""),
+        )
         ctx = wrap_arguments(f"++prompt_config={prompt_config} {inline_args}")
         generate(
             ctx=ctx,
@@ -91,7 +96,7 @@ class GenerateQuestionsStage(BaseStage):
             output_dir=str(generation_folder),
             expname=expname,
             run_after=[f"{expname}-prep"],
-            **config.get("stage_kwargs", {}),
+            **stage_kwargs,
             rerun_done=True,
             postprocess_cmd=postprocess_cmd,
         )

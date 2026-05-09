@@ -21,6 +21,7 @@ Complete data flow pipeline for the Finance recipe:
 - Stage 3: Data preparation for SFT
 - Stage 4: Supervised fine-tuning
 - Stage 5: Model evaluation
+- Stage 6: GRPO RL training
 
 **Best for:** Understanding the end-to-end ML pipeline flow in the finance domain.
 

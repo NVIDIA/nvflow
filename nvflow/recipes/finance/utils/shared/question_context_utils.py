@@ -456,6 +456,8 @@ def map_questions_to_context(
     failed_count = 0
     checkpoint_buffer = []
 
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
     with jsonlines.open(output_file, mode="a") as writer:
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             # Submit each chunk to a worker

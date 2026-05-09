@@ -13,9 +13,9 @@ dependencies = [
     # NeMo-Skills for cluster job submission (brings ~200+ dependencies)
     # This is the core framework we orchestrate - list it first for clarity
     # Pinned to specific commit for reproducibility (nemo-skills doesn't use version tags)
-    # Pinned on: 2026-02-08 | Commit: 7d6c49a5 (latest main, includes extra_body dict fix #1195)
+    # Pinned on: 2026-05-05 | Commit: 0229040 (consistent with nemo-skills:0229040 container)
     # To update: Find commit with containers in cluster_configs/example-slurm.yaml
-    "nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@7d6c49a51efb441b61db3e78f6ffa2f04c9a68ef",
+    "nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@022904023ad7a83a87662a313cf72e7df5891d55",
 
     # Configuration & Workflow
     "omegaconf>=2.3.0",      # YAML config loading with variable interpolation
@@ -27,9 +27,6 @@ dependencies = [
     # Data handling
     "jsonlines>=4.0.0",      # JSONL file reading/writing
 
-    # BDSA vulnerability fixes (transitive dependency pins)
-    "gradio>=6.9.0",
-    "Pillow>=12.1.1",
     # urllib3>=2.6.3 blocked by torchx<1.27 constraint (via nemo-skills → nemo-run → torchx)
 
     # Note: Heavy dependencies (torch, transformers, etc.) come from nemo-skills
@@ -40,7 +37,7 @@ dependencies = [
 # Development tools (testing, linting, formatting, docs)
 dev = [
     # Testing
-    "pytest>=7.4.0",
+    "pytest>=9.0.3",
     "pytest-cov>=4.1.0",
     "pytest-xdist>=3.3.0",
     "pytest-timeout>=2.2.0",
@@ -102,7 +99,17 @@ timeout = 300
 [tool.uv]
 managed = true
 override-dependencies = [
+    # Break leptonai's httpx[http2]==0.27.2 hard pin (pulled in via nemo-run)
+    # so litellm 1.83.14 (which requires httpx==0.28.1) can be installed.
+    # Mirrors the override added in nemo-skills/pyproject.toml (PR #1433),
+    # but [tool.uv] from a dep is ignored — overrides must be at the top-level project.
+    "httpx[http2]>=0.28.1",
     "urllib3>=2.6.3",
+    # Force minimum versions of transitive deps for security/maintenance updates
+    "cryptography>=47.0.0",
+    "Pillow>=12.2.0",
+    "Pygments>=2.20.0",
+    "GitPython>=3.1.49",
 ]
 
 [dependency-groups]

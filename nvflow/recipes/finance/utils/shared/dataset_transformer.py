@@ -91,9 +91,9 @@ def transform_record(
     if not context:
         return None, "Missing required field: context"
 
-    raw_generation = record.get("generation")
+    raw_generation = record.get("generation") or record.get("answer")
     if not raw_generation:
-        return None, "Missing required field: generation"
+        return None, "Missing required field: generation (or answer)"
 
     # Reasoning field (for separated format)
     if source_format == "separated":
@@ -317,6 +317,12 @@ def main():
         default="none",
         help="Output format: 'thinking' (Qwen3 <think> tags), 'natural' (reasoning + answer), 'none' (answer only)",
     )
+    parser.add_argument(
+        "--deduplicate_by_uuid",
+        action="store_true",
+        help="Drop exact (problem, generation) dups after outlier filter. "
+        "Opt-in; defaults to OFF to match legacy behavior (SFT + pre-dedup GRPO runs).",
+    )
 
     args = parser.parse_args()
 
@@ -449,6 +455,44 @@ def main():
         # No filtering - use all transformed records
         final_records = transformed_records
 
+    # Opt-in dedup by uuid (itself = SHA-1(problem, final_generation)).
+    num_dedup_dropped = 0
+    dedup_dropped_records: list[dict[str, Any]] = []
+    if args.deduplicate_by_uuid and final_records:
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("DEDUPLICATION BY UUID")
+        logger.info("=" * 80)
+        seen_uuids: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for record in final_records:
+            uid = record.get("uuid")
+            if uid and uid in seen_uuids:
+                dedup_dropped_records.append(record)
+                continue
+            if uid:
+                seen_uuids.add(uid)
+            deduped.append(record)
+
+        num_dedup_dropped = len(final_records) - len(deduped)
+        pct_dropped = num_dedup_dropped / len(final_records) * 100
+        logger.info(f"Input records:           {len(final_records):,}")
+        logger.info(f"Unique uuids:            {len(deduped):,}")
+        logger.info(f"Duplicates dropped:      {num_dedup_dropped:,} ({pct_dropped:.2f}%)")
+        if pct_dropped > 10:
+            logger.warning(
+                "Duplicate rate %.2f%% exceeds 10%%; investigate upstream SDG.",
+                pct_dropped,
+            )
+        final_records = deduped
+
+        if dedup_dropped_records:
+            dedup_path = output_path.parent / "duplicates.jsonl"
+            with open(dedup_path, "w", encoding="utf-8") as dedup_file:
+                for record in dedup_dropped_records:
+                    dedup_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            logger.info(f"Dropped duplicates saved to: {dedup_path}")
+
     # Write final records to chunks directory (always use chunking structure)
     num_chunks = args.num_chunks
     chunks_dir = output_path.parent / "chunks"
@@ -493,7 +537,9 @@ def main():
     logger.info(f"Errors encountered:       {len(error_records)}")
     if args.filter_outliers:
         logger.info(f"Outliers filtered:        {len(filtered_records)}")
-        logger.info(f"Final records:            {len(final_records)}")
+    if args.deduplicate_by_uuid:
+        logger.info(f"Duplicates (uuid) dropped: {num_dedup_dropped}")
+    logger.info(f"Final records:            {len(final_records)}")
 
     # Statistics on final records (after filtering if enabled)
     if final_records:
@@ -535,7 +581,19 @@ def main():
     logger.info(f"Output: {output_path.parent}/chunks/ ({num_chunks} chunks)")
     logger.info("=" * 80)
 
-    return 1 if error_records else 0
+    if error_records:
+        error_rate = len(error_records) / total_records if total_records > 0 else 1.0
+        if error_rate > 0.05:
+            logger.error(
+                f"Error rate {error_rate:.1%} ({len(error_records)}/{total_records}) "
+                f"exceeds 5% threshold"
+            )
+            return 1
+        logger.warning(
+            f"{len(error_records)} error(s) ({error_rate:.2%} of {total_records}) "
+            f"— below 5% threshold, treating as success"
+        )
+    return 0
 
 
 if __name__ == "__main__":

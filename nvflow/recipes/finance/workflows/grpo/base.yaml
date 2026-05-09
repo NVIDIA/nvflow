@@ -17,9 +17,14 @@
 #   4. See qwen3_4b.yaml for reference
 #
 # Environment Configuration:
-#   The NeMo-Gym environment is configurable via overrides.env.nemo_gym.config_paths.
-#   Default: equivalence_llm_judge (LLM-as-judge for semantic equivalence).
-#   To change environment, swap the config_paths entries in your model config.
+#   NeMo-Gym environments are defined in the top-level `environments` dict.
+#   Each environment has its own data pipeline and NeMo-Gym config.
+#   Use --environment <name> to run a single environment.
+#
+# NeMo-RL / NeMo-Gym versions (pinned for reproducibility):
+#   NeMo-RL main: e5a729cc438ea71bafa7138204f861196598a9b2
+#   NeMo-Gym feat/finance-sec-search-improvements: f24573bb157a1b4799591df1087d6db0b25e4e4c
+#   Mounted as overlay via my_cluster.yaml at /opt/NeMo-RL.
 # ============================================================================
 
 # Recipe identifier (defines which recipe this workflow belongs to)
@@ -32,55 +37,183 @@ workflow:
   description: "GRPO RL training for financial reasoning with NeMo-Gym"
 
 # Cluster to run jobs on (references cluster_configs/<cluster>.yaml)
-# Uses the same cluster config as SFT -- no NeMo-RL source mount needed.
-# The container already has /opt/NeMo-RL at the correct commit.
+# Uses my_cluster which mounts NeMo-RL + Gym overlays at /opt/NeMo-RL.
 cluster: my_cluster
 
-# Base directory for all pipeline outputs
-# Override in model configs: base_output_dir: /workspace/outputs/finance/<dataset>/workflow-5-grpo/<model_name>
-base_output_dir: /workspace/outputs/finance/demo/workflow-5-grpo
+# Root directory for all finance pipeline outputs (shared across workflows).
+# REQUIRED -- override in model/run configs. No default; forces explicit choice.
+#   demo:     /workspace/outputs/finance/demo
+#   sap-500:  /workspace/outputs/finance/sap-500
+data_root: ???
+
+# Base directory for shared data pipeline outputs (stages 0-4).
+# Model-agnostic: identical regardless of which policy model is trained.
+base_output_dir: ${data_root}/workflow-5-grpo
+
+# Model-specific output directory (stages 5-9: rollouts, compute_rewards,
+# train_validation_split, training, eval).
+# Override in model configs: model_output_dir: ${base_output_dir}/<model_name>
+model_output_dir: ${base_output_dir}
 
 # ============================================================================
 # Pipeline Stages - Execution Order
 # ============================================================================
-# Stage 0: data_transformation      - SDG cleanup → model-agnostic schema (shared, CPU)
-# Stage 1: apply_prompt_template    - Apply prompt template + extract expected answer (CPU)
-# Stage 2: convert_to_responses_api - Convert to NeMo-Gym Responses API format (CPU)
-# Stage 3: train_validation_split   - Split into train/val sets (shared, CPU)
+# Stage 0: validate_questions       - Drop structurally-broken SDG questions (GPU: GPT-OSS-120B)
+# Stage 1: data_transformation      - SDG cleanup → model-agnostic schema (shared, CPU)
+# Stage 2: apply_prompt_template    - Apply prompt template + extract expected answer (CPU)
+# Stage 3: convert_to_responses_api - Convert to NeMo-Gym Responses API format (CPU)
 # Stage 4: prepare_data             - Add agent_ref routing fields via ng_prepare_data (CPU)
+#          prefetch_cache           - OPTIONAL: pre-warm SEC metadata cache (no step-N; SEC cache)
 # Stage 5: collect_rollouts         - Rollout collection + reward profiling + filter (GPU)
 # Stage 6: compute_rewards          - OPTIONAL: re-judge rollouts with different judge
-# Stage 7: training                 - GRPO training with NeMo-Gym environment (GPU)
+# Stage 7: train_validation_split   - Final train/val split on reward-filtered data (CPU)
+# Stage 8: training                 - GRPO training with NeMo-Gym environment (GPU)
+# Stage 9: eval                     - Evaluate checkpoints on finance benchmarks
+#
+# validate_questions is a GRPO-only upstream data-quality filter.  It reads
+# the original SDG final_result.jsonl (via stages.validate_questions.source_data)
+# and writes a filtered version to directories.step-0-validate-questions.  Model
+# configs should re-point env.raw_train_data to that stage's output so
+# data_transformation automatically consumes the filtered data via the normal
+# env.raw_train_data path (no Python change to data_transformation itself).
 #
 # collect_rollouts includes sub-jobs: aggregate (difficulty.jsonl) + filter.
-# The filter sub-job produces train.jsonl / validation.jsonl at the stage
-# output directory root.  Training consumes these directly.
+# The filter sub-job produces train.jsonl at the stage output directory root.
 # compute_rewards is optional -- uncomment to enable (also has filter sub-job).
+#
+# train_validation_split runs LAST before training so it always operates on
+# the most recent filtered output -- collect_rollouts by default, or
+# compute_rewards when the latter is enabled (model configs override
+# train_validation_split.input_dir + dependencies in that case).
 pipeline_stages:
-  - data_transformation           # Step 0: SDG cleanup (shared)
-  - apply_prompt_template         # Step 1: Apply prompt template + extract answer (CPU)
-  - convert_to_responses_api      # Step 2: Convert to Responses API format (CPU)
-  - train_validation_split        # Step 3: Split into train/val sets (shared)
+  - validate_questions            # Step 0: Drop structurally-broken questions before data_transformation
+  - data_transformation           # Step 1: SDG cleanup (shared)
+  - apply_prompt_template         # Step 2: Apply prompt template + extract answer (CPU)
+  - convert_to_responses_api      # Step 3: Convert to Responses API format (CPU)
   - prepare_data                  # Step 4: Run ng_prepare_data (CPU)
+  - prefetch_cache                # Pre-warm SEC metadata cache (CPU, optional, no step-N)
   - collect_rollouts              # Step 5: Rollout collection + reward profiling + filter
   # - compute_rewards               # Step 6: Re-judge rollouts with different judge (optional)
-  - training                      # Step 7: GRPO training with NeMo-Gym environment
-  - eval                          # Step 8: Evaluate checkpoints on finance benchmarks
+  - train_validation_split        # Step 7: Final train/val split on reward-filtered data
+  - training                      # Step 8: GRPO training with NeMo-Gym environment
+  - eval                          # Step 9: Evaluate checkpoints on finance benchmarks
 
 # ============================================================================
 # Directory Structure
 # ============================================================================
+# Every stage writes under ${base_output_dir} (workflow-5-grpo/), using the
+# step-N-<name> pattern.  cache-finance-sec-search (SEC.gov metadata +
+# parsed filing text) is workflow-5-grpo scoped -- it is populated by the
+# prefetch_cache stage, consumed by collect_rollouts/compute_rewards, and
+# has no readers outside this workflow.  If you rename workflow-5-grpo and
+# want to carry the cache forward, cp -r it into the new dir (or reuse the
+# rename tree).
 directories:
-  raw_train_data: /workspace/outputs/finance/sap-500/workflow-3-template-based-sdg/step-5-filter-answers  # Raw SDG data
-  step-0-data-transformation: ${base_output_dir}/step-0-data-transformation
-  step-1-apply-prompt-template: ${base_output_dir}/step-1-apply-prompt-template
-  step-2-convert-to-responses-api: ${base_output_dir}/step-2-convert-to-responses-api
-  step-3-train-validation-split: ${base_output_dir}/step-3-train-validation-split
+  # Model-agnostic data pipeline stages (0-4): written once, reused across models.
+  step-0-validate-questions: ${base_output_dir}/step-0-validate-questions
+  step-1-data-transformation: ${base_output_dir}/step-1-data-transformation
+  step-2-apply-prompt-template: ${base_output_dir}/step-2-apply-prompt-template
+  step-3-convert-to-responses-api: ${base_output_dir}/step-3-convert-to-responses-api
   step-4-prepare-data: ${base_output_dir}/step-4-prepare-data
-  step-5-collect-rollouts: ${base_output_dir}/step-5-collect-rollouts
-  step-6-compute-rewards: ${base_output_dir}/step-6-compute-rewards
-  step-7-training: ${base_output_dir}/step-7-training
-  step-8-eval: ${base_output_dir}/step-8-eval
+  # SEC.gov cache (metadata + parsed filing text).  Lives inside workflow-5-grpo
+  # since it is GRPO-scoped; matches the path hardcoded in
+  # overlays/finance_sec_search_{sap500,demo}.yaml.
+  cache-finance-sec-search: ${base_output_dir}/cache/finance_sec_search
+  # Model-specific stages (rollouts, training, eval).
+  step-5-collect-rollouts: ${model_output_dir}/step-5-collect-rollouts
+  step-6-compute-rewards: ${model_output_dir}/step-6-compute-rewards
+  step-7-train-validation-split: ${model_output_dir}/step-7-train-validation-split
+  step-8-training: ${model_output_dir}/step-8-training
+  step-9-eval: ${model_output_dir}/step-9-eval
+
+# ============================================================================
+# Environment Configuration
+# ============================================================================
+# Each entry defines a fully independent data pipeline + NeMo-Gym environment.
+# Every stage runs per-environment, producing output in {step_dir}/{env_name}/.
+#
+# Data pipeline settings (stages 0-4):
+#   raw_train_data: Path to raw SDG data for this environment.
+#   source_format, reasoning_mode: Data transformation settings.
+#   prompt_template: YAML prompt template for apply_prompt_template (stage 2).
+#   answer_prefix: Optional answer extraction prefix for apply_prompt_template (stage 2).
+#
+# NeMo-Gym settings (stages 5-8):
+#   config_paths: NeMo-Gym YAML configs (WITHOUT vLLM model configs).
+#   agent_name: NeMo-Gym agent name for this environment.
+#   policy_vllm: (optional) Per-environment policy vLLM overrides (e.g. max_model_len).
+#     Merged onto the shared rollout.policy_vllm for rollout jobs.
+#   training_policy: (optional) Per-environment training policy overrides.
+#     Applied only for single-environment training (--environment <name>).
+#     Ignored for combined (multi-environment) training, which uses the
+#     model-level default.  Maps to fields under `policy` in the NeMo-RL
+#     config (e.g. max_total_sequence_length, generation.vllm_cfg).
+#   judge_vllm: (optional) Per-environment judge vLLM config. Omit if not needed.
+#
+# Use --environment <name> to run a single environment, or omit to run all.
+# For training (step 9), omitting --environment merges all environments.
+# Per-environment training_repeat > 1 oversamples that dataset in combined training.
+environments:
+  equivalence_llm_judge:
+    # Data pipeline (stages 0-4)
+    raw_train_data: /workspace/outputs/finance/sap-500/workflow-3-template-based-sdg/step-5-filter-answers
+    source_format: separated
+    reasoning_mode: none
+    prompt_template: /workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+    answer_prefix: "Answer:"
+
+    # NeMo-Gym (stages 5-8)
+    config_paths:
+      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+      - /workspace/nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
+    agent_name: equivalence_llm_judge_simple_agent
+    judge_vllm:
+      num_gpus: 0                 # requires judge -- override in model config
+
+  mcqa:
+    # Data pipeline (stages 0-4) -- placeholder: update raw_train_data when ready
+    raw_train_data: null
+    source_format: separated
+    reasoning_mode: none
+    prompt_template: null
+    answer_prefix: null
+
+    # NeMo-Gym (stages 5-8)
+    config_paths:
+      - resources_servers/mcqa/configs/mcqa.yaml
+    agent_name: mcqa_simple_agent
+
+  finance_sec_search:
+    # Data pipeline (stages 0-4) -- SDG data converted through all stages.
+    # The agent template includes tool definitions and sampling params that
+    # are carried through to responses_create_params by stages 2-3.
+    raw_train_data: /workspace/outputs/finance/sap-500/workflow-3-template-based-sdg/step-5-filter-answers
+    source_format: separated
+    reasoning_mode: none
+    prompt_template: /workspace/nvflow/recipes/finance/prompts/finance_sec_search_template_without_web.yaml
+    answer_prefix: null
+
+    # NeMo-Gym (stages 5-8)
+    # Top-level config key differs from env dict key (upstream convention).
+    resources_server_name: finance_sec_search_resources_server
+    config_paths:
+      - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
+      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
+    agent_name: finance_agent
+    agent_type: finance_agent
+    judge_vllm:
+      num_gpus: 0                 # requires judge -- override in model config
+    responses_create_params:
+      max_output_tokens: 32768   # Cap multi-turn tool-calling generation
+
+    # Pre-fetch SEC filing metadata cache before rollout (CPU-only).
+    # Idempotent: skips companies already cached.
+    # Set force: true to re-fetch all (e.g. after adding pagination support).
+    prefetch:
+      script: "resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py"
+      ticker_config: /workspace/nvflow/recipes/finance/configs/sp500.yaml
+      cache_dir: ${directories.cache-finance-sec-search}
+      force: false
 
 # ============================================================================
 # Stage Configurations
@@ -89,30 +222,76 @@ directories:
 stages:
 
   # --------------------------------------------------------------------------
-  # Stage 0: Data Transformation (shared: SFT + GRPO)  [CPU-only]
+  # Stage 0: Validate Questions (GRPO-only data quality pre-filter)  [GPU]
+  # --------------------------------------------------------------------------
+  # Drops SDG-generated questions that are structurally unusable as
+  # standalone questions (e.g. "the company" references with no company
+  # named anywhere).  Recall over precision: only clearly broken questions
+  # are dropped; everything else is kept and flows through to
+  # data_transformation.
+  #
+  # Two-phase: (1) cheap regex prefilter for "the company"+no-identifier
+  # cases, (2) GPT-OSS-120B LLM classifier for subtler cases.
+  #
+  # Model configs must supply source_data (raw SDG dir) and override the nulls
+  # below.  stage_kwargs is passed to nemo_skills.pipeline.cli.generate(), so
+  # keys must match its signature -- do NOT spread the _judge_vllm anchor here.
+  # Model configs must also re-point env.raw_train_data at
+  # ${directories.step-0-validate-questions}/<env_name>.
+  validate_questions:
+    source_data: null                # REQUIRED override in model config (e.g. *dg_sdg_data)
+    output_dir: ${directories.step-0-validate-questions}
+    environments: ${environments}
+    prompt_config: /workspace/nvflow/recipes/finance/prompts/validate_questions.yaml
+    stage_kwargs:
+      model: null                    # REQUIRED override in model config
+      server_type: vllm
+      server_gpus: null              # REQUIRED override in model config
+      server_nodes: 1
+      num_chunks: 8
+      server_args: ""                # override for --max-model-len / --reasoning-parser / --async-scheduling etc.
+    # gpt-oss-120b sampling mirrors the GRPO reward judge config.  Client
+    # concurrency kept at 2048 -- above this the openai SDK's httpx pool
+    # exhausts under sustained load (observed client-side close at 75%
+    # completion on the 4096 production run).  skip_filled enables
+    # rerun-safe resume from output_file-async.
+    inline_args: >-
+      ++chat_template_kwargs.reasoning_effort=high
+      ++inference.tokens_to_generate=8192
+      ++max_concurrent_requests=2048
+      ++skip_filled=True
+
+  # --------------------------------------------------------------------------
+  # Stage 1: Data Transformation (shared: SFT + GRPO)  [CPU-only]
   # --------------------------------------------------------------------------
   # Normalises raw SDG dataset to model-agnostic schema:
   #   problem, context, reasoning_content, generation, uuid, question_type
   #
   # Override in model configs: input_files, source_format, reasoning_mode.
   # Default: raw SDG data from template-based-sdg pipeline.
+  #
+  # GRPO workflows list validate_questions before data_transformation so
+  # that env.raw_train_data (re-pointed at step-0-validate-questions in
+  # model configs) contains the filtered dataset by the time this stage runs.
   data_transformation:
-    input_files:
-      - ${directories.raw_train_data}/final_result.jsonl
-    output_file: ${directories.step-0-data-transformation}/final_result.jsonl
-    output_dir: ${directories.step-0-data-transformation}
+    output_dir: ${directories.step-1-data-transformation}
+    environments: ${environments}
     num_chunks: 10
-    source_format: separated
-    reasoning_mode: none
-    filter_outliers: true
-    filter_config:
-      context_min_percentile: 0.5
-      context_max_percentile: 100
-      reasoning_min_percentile: 0.25
-      reasoning_max_percentile: 99.5
+    # filter_outliers disabled for GRPO: dataset_transformer filters on
+    # context + reasoning_content only, but the GRPO prompt template omits
+    # {context} and training runs with reasoning_mode=none -- neither field
+    # reaches the policy or the trainer.  Observed drops on a 187K run also
+    # biased 3-6x toward Ratio_Analysis and Comparison_and_Trend_Analysis
+    # (the hardest reasoning types).  Degenerate records are caught
+    # downstream by collect_rollouts' min_reward_std filter.
+    # SFT keeps filter_outliers=true via its own config.
+    filter_outliers: false
+    deduplicate_by_uuid: true
+    dependencies:
+      - validate_questions
 
   # --------------------------------------------------------------------------
-  # Stage 1: Apply Prompt Template  [CPU-only]
+  # Stage 2: Apply Prompt Template  [CPU-only]
   # --------------------------------------------------------------------------
   # Formats the problem field using a prompt template (merging instruction +
   # context + question) so the model receives the same structured prompt it
@@ -122,164 +301,197 @@ stages:
   # To use a different prompt: override prompt_template in model configs.
   # To disable answer extraction: set answer_prefix to null.
   apply_prompt_template:
-    input_dir: ${directories.step-0-data-transformation}/chunks
-    output_dir: ${directories.step-1-apply-prompt-template}
-    prompt_template: /workspace/nvflow/recipes/finance/prompts/secque_template.yaml
-    answer_prefix: "Answer:"
+    input_dir: ${directories.step-1-data-transformation}
+    output_dir: ${directories.step-2-apply-prompt-template}
+    environments: ${environments}
+
+    # Dynamic current_date per record.  The rendered prompt's "as of X"
+    # anchor becomes the record's SDG source filing_date + a deterministic
+    # jitter of jitter_min_days..jitter_max_days (seeded by record.uuid).
+    # Matches how the eval benchmark uses an "as of" date as the filing
+    # anchor for questions that don't carry an explicit year.  Set
+    # sec_metadata_parquet to null / omit to disable (template reverts to
+    # the fallback_current_date uniformly).
+    sec_metadata_parquet: ${data_root}/workflow-2-download-sec/step-0-download/sec_metadata.parquet
+    raw_sdg_filename: final_result.jsonl
+    jitter_min_days: 1
+    jitter_max_days: 60
+    fallback_current_date: "2025-04-07"
+    parquet_accession_column: accession_number
+    parquet_filing_date_column: filing_date
 
     dependencies:
       - data_transformation
 
   # --------------------------------------------------------------------------
-  # Stage 2: Convert to Responses API Format  [CPU-only]
+  # Stage 3: Convert to Responses API Format  [CPU-only]
   # --------------------------------------------------------------------------
   # Converts prompted data to NeMo-Gym Responses API format
   # (responses_create_params).  Lossless: all original fields are preserved.
   #
   # Input can be a single JSONL file or a directory.
   convert_to_responses_api:
-    input_path: ${directories.step-1-apply-prompt-template}
-    output_dir: ${directories.step-2-convert-to-responses-api}
-    container: "nemo-rl"
+    input_dir: ${directories.step-2-apply-prompt-template}
+    output_dir: ${directories.step-3-convert-to-responses-api}
+    environments: ${environments}
+    container: "nemo-skills"   # Pure Python JSONL transform; runs on CPU nodes without nvidia-container-cli
 
     dependencies:
       - apply_prompt_template
 
   # --------------------------------------------------------------------------
-  # Stage 3: Train/Validation Split (shared: SFT + GRPO)  [CPU-only]
-  # --------------------------------------------------------------------------
-  # Split data into training and validation sets.
-  # Uses stratified sampling to maintain question_type distribution.
-  # keep_all_fields: true preserves all fields (needed for Responses API data).
-  train_validation_split:
-    input_file: ${directories.step-2-convert-to-responses-api}/final_result.jsonl
-    output_dir: ${directories.step-3-train-validation-split}
-    val_ratio: 0.1
-    stratify_by: question_type
-    random_seed: 42
-    keep_all_fields: true
-
-    dependencies:
-      - convert_to_responses_api
-
-  # --------------------------------------------------------------------------
   # Stage 4: Data Preparation (ng_prepare_data)  [CPU-only]
   # --------------------------------------------------------------------------
   # Stamps each JSONL record with agent_ref so NeMo-Gym can route it to the
-  # correct environment server during training.
+  # correct environment server during training.  Agent definitions are derived
+  # from the top-level ``environments`` dict.
   #
-  # The stage auto-generates an agent config overlay from the ``agents``
-  # list below, writes it to output_dir/, and passes it to ng_prepare_data.
-  #
-  # To use your own data: override agents[].datasets in your model config.
-  # jsonl_fpath can be relative to gym_path or absolute (for Lustre paths
-  # or data_transformation output).
-  #
-  # Output: train.jsonl + validation.jsonl (with agent_ref routing fields)
+  # Reads final_result.jsonl from step-3-convert-to-responses-api and emits
+  # train.jsonl (agent_ref stamped).  No pre-rollout val split -- the final
+  # train/val split happens after collect_rollouts/compute_rewards in the
+  # train_validation_split stage below, so every question in this file gets
+  # rollouts and a reward profile.
   prepare_data:
     output_dir: ${directories.step-4-prepare-data}
+    input_dir: ${directories.step-3-convert-to-responses-api}
+    input_filename: final_result.jsonl
     mode: "train_preparation"
+    environments: ${environments}
+
+    # Deterministic post-shuffle of train.jsonl (after ng_prepare_data).
+    # SDG data is per-filing clustered, and collect_rollouts splits
+    # contiguously (num_chunks=8 chunks via head|tail, max_num_samples via
+    # head -n N), so the unshuffled order produces unbalanced chunk workloads
+    # and unrepresentative pilot samples.  The old pre-rollout
+    # train_validation_split used to shuffle implicitly; this restores that
+    # property now that train_validation_split runs post-rollout (step-7).
+    # Seed matches train_validation_split's default for consistency.  Set
+    # shuffle: false to disable.
+    shuffle: true
+    random_seed: 42
 
     dependencies:
-      - train_validation_split
+      - convert_to_responses_api
     should_download: false              # download missing datasets from HuggingFace?
 
     # Container / runtime
     container: "nemo-rl"
+    num_gpus: 1                         # nemo-rl container needs GPU node for nvidia-container-cli
     gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
 
-    # Sets up a Gym-local venv so ng_prepare_data / ng_collect_rollouts are on PATH.
-    # Must use explicit ".venv" because the container's UV_PROJECT_ENVIRONMENT
-    # env var would redirect to /opt/nemo_rl_venv otherwise.
-    # Anchored as &gym_install -- reused by collect_rollouts and compute_rewards.
+    # Sets up a NeMo-Gym venv in /tmp so writes stay container-local (not on
+    # the bind-mounted /opt/NeMo-RL).  SLURM_JOB_ID suffix guarantees
+    # uniqueness even if two jobs share a node.
+    # Anchored as &gym_install -- reused by prefetch_cache, collect_rollouts, and compute_rewards.
     installation_command: &gym_install >-
       cd /opt/NeMo-RL/3rdparty/Gym-workspace/Gym
-      && uv venv .venv --python 3.12
-      && source .venv/bin/activate
+      && uv venv /tmp/gym-venv-\${SLURM_JOB_ID} --python 3.12
+      && source /tmp/gym-venv-\${SLURM_JOB_ID}/bin/activate
       && uv sync --active --extra dev
 
-    # Base NeMo-Gym configs (environment + model adapter).
-    # Must match env.nemo_gym.config_paths in grpo_presets.yaml.
-    # The stage appends a runtime-generated overlay as the last entry.
-    # The finance judge overlay (last) overrides the default STEM judge prompt.
-    nemo_gym_config_paths:
-      - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
-      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
-      - /workspace/nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
-
-    # Agent definitions → auto-generates {output_dir}/agent_config_overlay.yaml.
-    # Each agent maps to one NeMo-Gym environment.  For multi-environment
-    # training, add more entries to this list and include the corresponding
-    # environment config in nemo_gym_config_paths above.
-    #
-    # Override agents[].datasets[].jsonl_fpath in model configs.
-    # Default points to train_validation_split output (Responses API format).
-    agents:
-      - name: "equivalence_llm_judge_simple_agent"
-        agent_type: "simple_agent"       # NeMo-Gym agent type
-        entrypoint: "app.py"
-        resources_server:
-          type: resources_servers
-          name: equivalence_llm_judge
-        model_server:
-          type: responses_api_models
-          name: policy_model
-        datasets:
-          - name: train
-            type: train
-            license: "TBD"
-            jsonl_fpath: ${directories.step-3-train-validation-split}/train.jsonl
-          - name: validation
-            type: validation
-            license: "TBD"
-            jsonl_fpath: ${directories.step-3-train-validation-split}/val.jsonl
+  # --------------------------------------------------------------------------
+  # Prefetch Cache (optional, CPU-only; no step-N -- writes to cache-finance-sec-search)
+  # --------------------------------------------------------------------------
+  # Pre-warms environment-specific caches before rollout collection.
+  # Only environments with a ``prefetch`` block in their config are processed;
+  # others are silently skipped.  Currently used by finance_sec_search to
+  # populate the SEC filing metadata cache from SEC.gov.
+  #
+  # To disable: comment out "prefetch_cache" in pipeline_stages above.
+  # To force re-fetch: set force: true in the environment's prefetch block.
+  prefetch_cache:
+    container: "nemo-rl"
+    num_gpus: 1                         # nemo-rl container needs GPU node for nvidia-container-cli
+    gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
+    environments: ${environments}
+    installation_command: *gym_install
+    dependencies:
+      - prepare_data
 
   # --------------------------------------------------------------------------
   # Stage 5: Rollout Collection (ng_collect_rollouts)
   # --------------------------------------------------------------------------
-  # Runs the model against the NeMo-Gym environment to collect rollouts
-  # with rewards and judge verdicts.
+  # Two-phase GRPO design: this stage is Phase 1 (offline difficulty profiling).
+  # Phase 2 (GRPO training) generates fresh on-policy rollouts internally.
+  #
+  # Why two phases instead of standard single-phase GRPO?
+  # Agentic environments (e.g. finance_sec_search) are expensive per rollout
+  # (multi-step tool use: search → download → retrieve → reason → submit).
+  # Single-phase GRPO would spend 8 full agentic rollouts on every prompt,
+  # including easy (reward=1 always) and impossible (reward=0 always) samples
+  # that produce zero reward variance → zero GRPO gradient → wasted GPU hours.
+  #
+  # Phase 1 runs fewer seeds at the model's default sampling params (not the
+  # high-exploration temp=1.0 used during training) to get a clean difficulty
+  # signal. The filter sub-job then curates a "sweet spot" training set:
+  #   - Removes trivially easy samples (no learning signal)
+  #   - Removes impossible/unanswerable samples (often SDG data quality issues)
+  #   - Keeps prompts with reward variance (model sometimes succeeds, sometimes
+  #     fails) where GRPO can improve the policy
+  #
+  # This acts as a learned curriculum filter powered by the model itself,
+  # reducing GPU waste from O(all_prompts × 8) to O(all × few_seeds) +
+  # O(sweet_spot × 8), and doubles as a data cleaning step that catches
+  # wrong gold answers, unanswerable questions, and ambiguous samples.
+  #
+  # Related work supporting this design:
+  #   [1] PODS: "Not All Rollouts are Useful" (Xu et al., 2025, arXiv:2504.13818)
+  #       Decouples rollout generation from policy updates; trains on a
+  #       max-variance subset → 1.7× faster GRPO convergence.
+  #   [2] DAPO: "Dynamic Sampling" (Yu et al., 2025, arXiv:2503.14476, NeurIPS 2025)
+  #       Filters zero-variance batches inside the training loop to avoid
+  #       wasted compute on uninformative samples.
+  #   [3] XRPO: "Targeted Exploration" (Bamba et al., 2025, arXiv:2510.06672)
+  #       Adaptive rollout allocation prioritizing high-uncertainty prompts;
+  #       up to 2.7× training convergence speedup.
   #
   # Slurm sub-jobs (in dependency order):
   #   1. Rollout  (GPU)  -- N chunks x M seeds = N*M jobs
   #   2. Merge    (CPU)  -- 1 per seed (merge chunks + enrich + analyze)
   #   3. Aggregate(CPU)  -- 1 job (cross-seed pass@k -> difficulty.jsonl)
-  #   4. Filter   (CPU)  -- 1 job (curate train.jsonl + validation.jsonl)
+  #   4. Filter   (CPU)  -- 1 job (curate train.jsonl; drops zero-reward-std
+  #                                 samples that carry no GRPO gradient)
   #
   # Resume: re-running skips (seed, chunk) pairs whose .done file exists.
   #         Set rerun_done: true to force re-execution.
   collect_rollouts:
     output_dir: ${directories.step-5-collect-rollouts}
-    container: "nemo-rl"
+    prepare_data_dir: ${directories.step-4-prepare-data}
+    container: "nemo-rl"               # rollout client + Gym (GPU jobs)
+    post_container: "nemo-skills"      # merge/analyze/aggregate/filter (CPU jobs, no GPU deps)
     gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
+    environments: ${environments}
     dependencies:
       - prepare_data
+      - prefetch_cache
     installation_command: *gym_install
 
     # ---- Rollout jobs (GPU): num_chunks x num_random_seeds ---------------
     # Each job starts policy vLLM + (optional) judge vLLM + NeMo-Gym client.
-    # Total Slurm GPUs/job = policy_vllm.num_gpus + judge_vllm.num_gpus.
+    # Total Slurm GPUs/job = policy_vllm.num_gpus + env judge_vllm.num_gpus.
+    # Judge vLLM is configured per-environment (see environments section).
     # Merge + analyze + aggregate sub-jobs run automatically after rollouts
     # (CPU-only, no config needed).
     rollout:
-      input_data: ${directories.step-4-prepare-data}/train.jsonl
-      prepare_data_dir: ${directories.step-4-prepare-data}
-      environment_name: equivalence_llm_judge
-      nemo_gym_config_paths:
-        - responses_api_models/vllm_model/configs/vllm_model.yaml
-        - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
-        - /workspace/nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
-      agent_name: "equivalence_llm_judge_simple_agent"
-
       num_samples_in_parallel: 64   # Concurrent requests to ng_collect_rollouts
       max_num_samples: null         # null = all samples; N = truncate to first N rows
       num_chunks: 1
       num_random_seeds: 8
       starting_seed: 0
       rerun_done: false
+      dependent_jobs: 0            # Chain N+1 identical jobs per (seed, chunk) for timeout resume
+      # Per-request overrides merged into every ng_collect_rollouts call.
+      # These override (but don't replace) per-record responses_create_params in the data.
+      # Common keys: max_output_tokens, temperature, top_p.
+      # Per-environment overrides: set responses_create_params in the environment
+      # config (e.g. finance_sec_search.responses_create_params) to override
+      # these shared defaults for specific environments.
+      responses_create_params: {}
 
-      # Policy vLLM server.
+      # Policy vLLM server (shared across all environments).
       # Keys: num_gpus, server_nodes, base_url, model_path are orchestration-only.
+      # tensor_parallel_size is derived from num_gpus automatically (NON_VLLM_KEYS);
+      # do NOT set it here -- it will be silently ignored.
       # All other keys become --key-value CLI args to vllm serve.
       policy_vllm:
         model_path: null                          # REQUIRED -- set in model config
@@ -287,23 +499,16 @@ stages:
         server_nodes: 1                           # Nodes for this vLLM (>1 uses Ray)
         max_model_len: 32768
         dtype: bfloat16
+        enable_auto_tool_choice: true             # Required for tool-calling envs (e.g. finance_sec_search)
+        tool_call_parser: hermes                  # Harmless for non-tool-calling envs
         # base_url: "http://<host>:<port>/v1"     # external server (set num_gpus: 0)
 
-      # Judge vLLM server.
-      # Modes: local_vllm (model_path), external_vllm (base_url),
-      #        openai (openai_base_url), policy_as_judge (default if num_gpus: 0).
-      judge_vllm:
-        num_gpus: 0                               # 0 = no local judge
-        # See qwen3_4b.yaml for local vLLM judge example.
-
     # ---- Filter job (CPU): curate training data --------------------------
-    # Runs after aggregate; produces train.jsonl + validation.jsonl at
-    # the stage output_dir root.  Remove this block to skip filtering.
+    # Runs after aggregate; produces train.jsonl at the stage output_dir
+    # root (one per env).  Consumed by train_validation_split below.
+    # Remove this block to skip filtering.
     filter:
-      input_data: ${directories.step-4-prepare-data}/train.jsonl
-      validation_data: ${directories.step-4-prepare-data}/validation.jsonl
-      min_pass_rate: 0
-      max_pass_rate: 1
+      min_reward_std: 1e-6  # remove questions with zero reward variance (no GRPO gradient)
 
   # --------------------------------------------------------------------------
   # Stage 6: Compute Rewards (re-judge rollouts)  [OPTIONAL]
@@ -323,115 +528,105 @@ stages:
   #   1. Re-judge (GPU)  -- 1 per seed (judge vLLM + verify client)
   #   2. Analysis (CPU)  -- 1 job (per-seed reward distribution)
   #   3. Aggregate(CPU)  -- 1 job (cross-seed pass@k -> difficulty.jsonl)
-  #   4. Filter   (CPU)  -- 1 job (curate train.jsonl + validation.jsonl)
+  #   4. Filter   (CPU)  -- 1 job (curate train.jsonl; drops zero-reward-std samples)
   compute_rewards:
     output_dir: ${directories.step-6-compute-rewards}
-    container: "nemo-rl"
+    rollouts_dir: ${directories.step-5-collect-rollouts}
+    prepare_data_dir: ${directories.step-4-prepare-data}
+    container: "nemo-rl"               # verify client + Gym (GPU jobs)
+    post_container: "nemo-skills"      # analysis/aggregate/filter (CPU jobs, no GPU deps)
     gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
+    environments: ${environments}
     dependencies:
       - collect_rollouts
     installation_command: *gym_install
 
     # ---- Re-judge jobs (GPU): 1 per seed ---------------------------------
     # Each job starts a judge vLLM server + verify client.
-    # Slurm GPUs/job = judge_vllm.num_gpus.
+    # Slurm GPUs/job = env judge_vllm.num_gpus.
+    # Judge vLLM is configured per-environment (see environments section).
     # Analysis + aggregate sub-jobs run automatically after re-judging
     # (CPU-only, no config needed).
     rejudge:
-      input_dir: ${directories.step-5-collect-rollouts}/rollout
-      prepare_data_dir: ${directories.step-4-prepare-data}
-      environment_name: equivalence_llm_judge
-      # vllm_model.yaml is required even though the rejudge has no policy model:
-      # equivalence_llm_judge.yaml references policy_model in the simple_agent
-      # block, and NeMo-Gym validates all server refs at startup.  verify.py
-      # passes dummy policy_model overrides to satisfy ${policy_base_url}.
-      nemo_gym_config_paths:
-        - responses_api_models/vllm_model/configs/vllm_model.yaml
-        - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
-        - /workspace/nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
       num_samples_in_parallel: 64
       rerun_done: false
 
-      # Judge vLLM server (REQUIRED -- no policy-as-judge in this stage).
-      # See qwen3_4b.yaml for concrete examples.
-      judge_vllm:
-        num_gpus: 0                               # 0 = OpenAI API judge (no local GPU needed)
-        # --- Local vLLM judge ---
-        # num_gpus: 4
-        # server_nodes: 1                         # Nodes for this vLLM (>1 uses Ray)
-        # model_path: /hf_models/Qwen/Qwen3-32B
-        # max_model_len: 32768
-        # dtype: bfloat16
-        #
-        # --- External vLLM judge (pre-launched server) ---
-        # base_url: "http://<host>:<port>/v1"
-        # model_path: /hf_models/Qwen/Qwen3-32B
-        #
-        # --- OpenAI API judge ---
-        # num_gpus: 0
-        # openai_base_url: "https://api.openai.com/v1"
-        # openai_model: "gpt-4o"
-
     # ---- Filter job (CPU): curate training data --------------------------
-    # Runs after aggregate; produces train.jsonl + validation.jsonl at
-    # the stage output_dir root.  Remove this block to skip filtering.
+    # Runs after aggregate; produces train.jsonl at the stage output_dir
+    # root (one per env).  To feed this into training, point
+    # train_validation_split.input_dir at ${directories.step-6-compute-rewards}.
+    # Remove this block to skip filtering.
     filter:
-      input_data: ${directories.step-4-prepare-data}/train.jsonl
-      validation_data: ${directories.step-4-prepare-data}/validation.jsonl
-      min_pass_rate: 0
-      max_pass_rate: 1
+      min_reward_std: 1e-6  # remove questions with zero reward variance (no GRPO gradient)
 
   # --------------------------------------------------------------------------
-  # Stage 7: GRPO Training (Reinforcement Learning)
+  # Stage 7: Train/Validation Split (post-rollout, on reward-filtered data)
+  # --------------------------------------------------------------------------
+  # Runs LAST before training so it always operates on the most recent
+  # filtered output:
+  #   - compute_rewards disabled (common case): reads collect_rollouts filter
+  #     sub-job output (${directories.step-5-collect-rollouts}/<env>/train.jsonl).
+  #   - compute_rewards enabled: model config overrides input_dir + dependencies
+  #     to point at ${directories.step-6-compute-rewards}.
+  #
+  # val_ratio is tight (0.01 = 99/1) because the filtered set is already small
+  # and every row has a reward profile -- we keep almost all of it for training.
+  train_validation_split:
+    input_dir: ${directories.step-5-collect-rollouts}
+    output_dir: ${directories.step-7-train-validation-split}
+    environments: ${environments}
+    val_ratio: 0.01
+    stratify_by: question_type
+    random_seed: 42
+    keep_all_fields: true
+    input_filename: train.jsonl
+    dependencies:
+      - collect_rollouts
+
+  # --------------------------------------------------------------------------
+  # Stage 8: GRPO Training (Reinforcement Learning)
   # --------------------------------------------------------------------------
   # Runs GRPO training with NeMo-RL + NeMo-Gym.
   # The NeMo-Gym environment provides reward signals for RL training.
   #
-  # Data: Consumes filtered JSONL from the collect_rollouts filter sub-job.
-  # The filtered data contains only "sweet spot" questions with good RL signal.
-  # If compute_rewards is enabled, override paths to point to its output.
+  # Data: Consumes the post-rollout train/val split.  Always reads from
+  # step-7-train-validation-split regardless of whether compute_rewards ran
+  # -- the dispatch is entirely in train_validation_split.input_dir.
   #
-  # Environment: Configurable via overrides.env.nemo_gym.config_paths
+  # Environment: Derived from the top-level `environments` dict.
   training:
-    # Data paths -- wired to collect_rollouts output (filtered train + copied val).
-    # If compute_rewards is enabled, override in model config:
-    #   training_data: ${directories.step-6-compute-rewards}/train.jsonl
-    #   validation_data: ${directories.step-6-compute-rewards}/validation.jsonl
-    #   dependencies: [compute_rewards]
-    training_data: ${directories.step-5-collect-rollouts}/train.jsonl
-    validation_data: ${directories.step-5-collect-rollouts}/validation.jsonl
-    output_dir: ${directories.step-7-training}
+    # Data source directory -- per-env train.jsonl + val.jsonl (from the
+    # dataset_splitter) are read from {data_source_dir}/{env_name}/.
+    data_source_dir: ${directories.step-7-train-validation-split}
+    output_dir: ${directories.step-8-training}
+    environments: ${environments}
+    # dataset_splitter writes val.jsonl (not training.py's default
+    # "validation.jsonl"), so align val_filename here once and model
+    # configs inherit it automatically.
+    val_filename: val.jsonl
 
-    # Slurm dependency: wait for collect_rollouts (including filter sub-job).
+    # Slurm dependency: wait for the final train/val split.
     dependencies:
-      - collect_rollouts
+      - train_validation_split
 
     # MODEL-SPECIFIC - Override in model configs:
-    # model_name, hf_checkpoint_path, num_nodes, preset, overrides
-
-    # Judge vLLM server for GRPO training.
-    # Modes: local_vllm (model_path), external_vllm (base_url),
-    #        openai (openai_base_url), policy_as_judge (default if absent).
-    # See qwen3_4b.yaml for local vLLM judge example.
-    # judge_vllm:
-    #   num_gpus: 0
+    # model_name, hf_checkpoint_path, total_gpus, preset, overrides
+    # Judge vLLM for training is configured per-environment (see environments section).
 
     # Cluster configuration (shared defaults)
-    num_gpus: 8
-    dependent_jobs: 0
+    # total_gpus: total GPUs for the training job (auto-split across nodes
+    # using gpus_per_node from the cluster config)
+    total_gpus: 8
+    dependent_jobs: 0                # Chain N+1 Slurm jobs for checkpoint resumption
     backend: fsdp                    # fsdp | megatron (override in model configs)
 
     # Experiment tracking
     wandb_project: finance-grpo
     wandb_mode: disabled             # online | offline | disabled
 
-    # Entry point swap: nemo-skills hardcodes start_grpo.py (MathEnvironment only).
-    # We copy the NeMo-Gym entry point over it so the correct script runs.
-    # Also installs NeMo-Gym dependencies via uv sync.
+    # Installs NeMo-Gym dependencies in the NeMo-RL container.
     installation_command: >-
-      cp /opt/NeMo-RL/examples/nemo_gym/run_grpo_nemo_gym.py
-      /nemo_run/code/nemo_skills/training/nemo_rl/start_grpo.py
-      && cd /opt/NeMo-RL && uv sync --extra nemo_gym
+      cd /opt/NeMo-RL && uv sync --extra nemo_gym
 
     # Runtime environment customization
     # stage_kwargs:
@@ -442,7 +637,7 @@ stages:
     #   partition: batch
 
   # --------------------------------------------------------------------------
-  # Stage 8: Evaluate Checkpoints on Finance Benchmarks
+  # Stage 9: Evaluate Checkpoints on Finance Benchmarks
   # --------------------------------------------------------------------------
   # Evaluates GRPO training checkpoints at specified steps using nemo-skills.
   # Shared settings (benchmarks, judges, datasets) are loaded from
@@ -452,6 +647,6 @@ stages:
   # eval_steps, checkpoint_path, baseline_model, server_type, gpus,
   # eval_output_dir, inference_args, server_args
   eval:
-    eval_output_dir: ${directories.step-8-eval}
+    eval_output_dir: ${directories.step-9-eval}
     dependencies:
       - training

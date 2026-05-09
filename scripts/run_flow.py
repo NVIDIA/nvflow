@@ -21,14 +21,20 @@ Usage:
     uv run python scripts/run_flow.py --help
 
 Examples:
-    # Run a single stage (short stage name from config)
+    # Run a single SFT stage
     uv run python scripts/run_flow.py sft --config nvflow/recipes/finance/workflows/training_sft.yaml
 
-    # Run a single stage from different workflow
-    uv run python scripts/run_flow.py generate_answers --config nvflow/recipes/finance/workflows/sdg_secque.yaml
+    # Run a single GRPO stage
+    uv run python scripts/run_flow.py collect_rollouts --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+
+    # Run a GRPO stage for one environment
+    uv run python scripts/run_flow.py collect_rollouts -c nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
+
+    # Run a GRPO stage for multiple environments
+    uv run python scripts/run_flow.py training -c nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e mcqa equivalence_llm_judge
 
     # Run all stages in workflow
-    uv run python scripts/run_flow.py --all --config nvflow/recipes/finance/workflows/training_sft.yaml
+    uv run python scripts/run_flow.py --all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
 """
 
 import argparse
@@ -40,7 +46,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # Auto-discover all recipes and stages
-import nvflow.recipes.finance  # noqa: F401, E402
+import nvflow.recipes  # noqa: F401, E402
 from nvflow.core import WorkflowRunner  # noqa: E402
 
 
@@ -50,14 +56,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run a single stage (short stage name from config)
+  # Run a single SFT stage
   uv run python scripts/run_flow.py sft --config nvflow/recipes/finance/workflows/training_sft.yaml
 
-  # Run a single stage from different workflow
-  uv run python scripts/run_flow.py generate_answers --config nvflow/recipes/finance/workflows/sdg_secque.yaml
+  # Run a single GRPO stage
+  uv run python scripts/run_flow.py collect_rollouts --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+
+  # Run a GRPO stage for one environment
+  uv run python scripts/run_flow.py collect_rollouts -c nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
+
+  # Run a GRPO stage for multiple environments
+  uv run python scripts/run_flow.py training -c nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e mcqa equivalence_llm_judge
 
   # Run all stages
-  uv run python scripts/run_flow.py --all --config nvflow/recipes/finance/workflows/training_sft.yaml
+  uv run python scripts/run_flow.py --all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
         """,
     )
 
@@ -80,6 +92,14 @@ Examples:
         help="Run all stages defined in the workflow config",
     )
 
+    parser.add_argument(
+        "--environment",
+        "-e",
+        nargs="+",
+        default=None,
+        help="Run for specific environment(s) only (default: all environments)",
+    )
+
     args = parser.parse_args()
 
     # Validate arguments
@@ -96,10 +116,10 @@ Examples:
         # Run stages
         if args.all:
             print(f"Running all stages from {args.config}...")
-            runner.run()
+            runner.run(environment=args.environment)
         else:
             print(f"Running {len(args.stages)} stage(s) from {args.config}...")
-            runner.run(stages=args.stages)
+            runner.run(stages=args.stages, environment=args.environment)
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)

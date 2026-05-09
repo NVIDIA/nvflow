@@ -13,24 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Filter training data using reward-profile difficulty analysis.
+"""Filter training data using reward-variance difficulty analysis.
 
 Joins ``train.jsonl`` (from prepare_data) with ``difficulty.jsonl``
 (from collect_rollouts or compute_rewards aggregate) on ``uuid`` and
-keeps only questions whose pass rate falls within a configurable
-"sweet spot" range.  Questions that are too hard (pass_rate == 0) or
-too easy (pass_rate == 1) provide little GRPO learning signal and are
-removed by default.
+keeps only questions whose reward variance exceeds a minimum threshold.
+Questions with zero reward variance (all seeds got the same reward)
+produce no GRPO gradient and are removed.
 
 Questions not found in ``difficulty.jsonl`` (unprofiled) are kept by
-default -- only explicitly identified too-hard / too-easy questions are
-removed.
+default -- only explicitly identified zero-signal questions are removed.
 
 Standalone script that runs inside the Slurm container with python3.
 
 Usage:
     python filter_training_data.py <train.jsonl> <difficulty.jsonl> <output_dir> \\
-        [--min-pass-rate 0.0] [--max-pass-rate 1.0] [--validation-data <val.jsonl>]
+        [--min-reward-std 1e-6] [--validation-data <val.jsonl>]
 
 Produces:
     <output_dir>/train.jsonl                -- filtered training data (same schema)
@@ -55,19 +53,28 @@ def filter_training_data(
     difficulty_path: str,
     output_dir: str,
     *,
-    min_pass_rate: float = 0.0,
-    max_pass_rate: float = 1.0,
+    min_reward_std: float = 1e-6,
     validation_path: str | None = None,
+    policy_model: str | None = None,
+    judge_model: str | None = None,
+    train_filename: str = "train.jsonl",
+    val_filename: str = "validation.jsonl",
+    report_filename: str = "filter_report.json",
 ) -> dict[str, Any]:
-    """Filter training data by pass-rate thresholds.
+    """Filter training data by reward variance threshold.
 
     Args:
         train_path: Path to prepare_data train.jsonl.
         difficulty_path: Path to aggregate/difficulty.jsonl.
         output_dir: Directory for filtered output files.
-        min_pass_rate: Exclusive lower bound (questions with pass_rate <= min are removed).
-        max_pass_rate: Exclusive upper bound (questions with pass_rate >= max are removed).
+        min_reward_std: Minimum reward_std to keep (questions below are removed).
         validation_path: Optional path to validation.jsonl (copied unchanged).
+        policy_model: Optional policy model name for provenance in difficulty_profile.
+        judge_model: Optional judge model name for provenance in difficulty_profile.
+        train_filename: Filename for the filtered training output (default "train.jsonl").
+        val_filename: Filename for the validation output (default "validation.jsonl").
+        report_filename: Filename for the JSON filter report written to
+            ``{output_dir}/filter/`` (default "filter_report.json").
 
     Returns:
         Report dict with filtering statistics.
@@ -81,15 +88,18 @@ def filter_training_data(
     diff_file = Path(difficulty_path)
     if not diff_file.exists():
         logger.warning("difficulty file not found: %s", difficulty_path)
-        logger.info("Passthrough mode: copying train.jsonl unchanged.")
-        shutil.copy2(train_path, out / "train.jsonl")
+        logger.info("Passthrough mode: copying train unchanged.")
+        shutil.copy2(train_path, out / train_filename)
         if validation_path and Path(validation_path).exists():
-            shutil.copy2(validation_path, out / "validation.jsonl")
+            shutil.copy2(validation_path, out / val_filename)
         report: dict[str, Any] = {"mode": "passthrough", "reason": "difficulty.jsonl not found"}
-        _write_report(filter_dir, report)
+        _write_report(filter_dir, report, report_filename=report_filename)
         return report
 
-    pass_rates: dict[str, float] = {}
+    # Load difficulty records to merge into output and use for filtering.
+    profile_fields = ("avg_reward", "reward_std", "reward_min", "reward_max", "n", "c", "pass@1")
+
+    difficulty: dict[str, dict[str, Any]] = {}
     with open(diff_file) as f:
         for line in f:
             line = line.strip()
@@ -98,20 +108,19 @@ def filter_training_data(
             rec = json.loads(line)
             uid = rec.get("uuid", "")
             if uid:
-                pass_rates[uid] = rec.get("pass_rate", 0.0)
+                difficulty[uid] = {k: rec.get(k) for k in profile_fields if k in rec}
 
-    logger.info("Loaded %d questions from difficulty.jsonl", len(pass_rates))
-    logger.info("Filter: keep %s < pass_rate < %s", min_pass_rate, max_pass_rate)
+    logger.info("Loaded %d questions from difficulty.jsonl", len(difficulty))
+    logger.info("Filter: keep reward_std >= %s", min_reward_std)
 
     total = 0
     kept = 0
     kept_no_profile = 0
-    removed_too_hard = 0
-    removed_too_easy = 0
+    removed_no_signal = 0
     by_type_total: Counter = Counter()
     by_type_kept: Counter = Counter()
 
-    with open(train_path) as fin, open(out / "train.jsonl", "w") as fout:
+    with open(train_path) as fin, open(out / train_filename, "w") as fout:
         for line in fin:
             line = line.strip()
             if not line:
@@ -122,38 +131,41 @@ def filter_training_data(
             qtype = row.get("question_type", "unknown")
             by_type_total[qtype] += 1
 
-            if uid not in pass_rates:
+            diff_rec = difficulty.get(uid)
+
+            if diff_rec is None:
                 kept += 1
                 kept_no_profile += 1
                 by_type_kept[qtype] += 1
                 fout.write(json.dumps(row) + "\n")
                 continue
 
-            pr = pass_rates[uid]
-            if pr <= min_pass_rate:
-                removed_too_hard += 1
-                continue
-            if pr >= max_pass_rate:
-                removed_too_easy += 1
+            rs = diff_rec.get("reward_std", 0.0)
+            if rs < min_reward_std:
+                removed_no_signal += 1
                 continue
 
+            profile = dict(diff_rec)
+            if policy_model:
+                profile["policy_model"] = policy_model
+            if judge_model:
+                profile["judge_model"] = judge_model
+            row["difficulty_profile"] = profile
             kept += 1
             by_type_kept[qtype] += 1
             fout.write(json.dumps(row) + "\n")
 
     if validation_path and Path(validation_path).exists():
-        shutil.copy2(validation_path, out / "validation.jsonl")
-        logger.info("Validation data copied unchanged -> %s", out / "validation.jsonl")
+        shutil.copy2(validation_path, out / val_filename)
+        logger.info("Validation data copied unchanged -> %s", out / val_filename)
 
     report = {
         "mode": "filtered",
-        "min_pass_rate": min_pass_rate,
-        "max_pass_rate": max_pass_rate,
+        "min_reward_std": min_reward_std,
         "total_questions": total,
         "kept": kept,
         "kept_no_profile": kept_no_profile,
-        "removed_too_hard": removed_too_hard,
-        "removed_too_easy": removed_too_easy,
+        "removed_no_signal": removed_no_signal,
         "kept_pct": kept / total if total > 0 else 0.0,
         "by_question_type": {
             qt: {"total": by_type_total[qt], "kept": by_type_kept[qt]}
@@ -161,15 +173,18 @@ def filter_training_data(
         },
     }
 
-    _write_report(filter_dir, report)
+    _write_report(filter_dir, report, report_filename=report_filename)
     _print_summary(report)
     return report
 
 
-def _write_report(report_dir: Path, report: dict) -> None:
-    with open(report_dir / "filter_report.json", "w") as f:
+def _write_report(
+    report_dir: Path, report: dict, *, report_filename: str = "filter_report.json"
+) -> None:
+    report_path = report_dir / report_filename
+    with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
-    logger.info("Report -> %s", report_dir / "filter_report.json")
+    logger.info("Report -> %s", report_path)
 
 
 def _print_summary(report: dict) -> None:
@@ -182,8 +197,7 @@ def _print_summary(report: dict) -> None:
         f"Total questions:        {total}",
         f"Kept (total):           {report['kept']} ({report['kept_pct']:.1%})",
         f"  Kept (no profile):    {report['kept_no_profile']}",
-        f"Removed (too hard):     {report['removed_too_hard']}",
-        f"Removed (too easy):     {report['removed_too_easy']}",
+        f"Removed (no signal):    {report['removed_no_signal']}",
         "",
     ]
 
@@ -209,21 +223,43 @@ if __name__ == "__main__":
     parser.add_argument("difficulty_path", help="Path to difficulty.jsonl")
     parser.add_argument("output_dir", help="Output directory")
     parser.add_argument(
-        "--min-pass-rate",
+        "--min-reward-std",
         type=float,
-        default=0.0,
-        help="Exclusive lower bound (default: 0.0, removes 0%% pass rate)",
-    )
-    parser.add_argument(
-        "--max-pass-rate",
-        type=float,
-        default=1.0,
-        help="Exclusive upper bound (default: 1.0, removes 100%% pass rate)",
+        default=1e-6,
+        help="Minimum reward_std to keep (default: 1e-6, removes zero-variance questions)",
     )
     parser.add_argument(
         "--validation-data",
         default=None,
         help="Path to validation.jsonl (copied unchanged)",
+    )
+    parser.add_argument(
+        "--policy-model",
+        default=None,
+        help="Policy model name for provenance in difficulty_profile (optional)",
+    )
+    parser.add_argument(
+        "--judge-model",
+        default=None,
+        help="Judge model name for provenance in difficulty_profile (optional)",
+    )
+    parser.add_argument(
+        "--train-filename",
+        default="train.jsonl",
+        help="Filename for the filtered training output (default: train.jsonl). "
+        "Match the consumer's expected filename (training.py train_filename).",
+    )
+    parser.add_argument(
+        "--val-filename",
+        default="validation.jsonl",
+        help="Filename for the validation output (default: validation.jsonl). "
+        "Match the consumer's expected filename (training.py val_filename).",
+    )
+    parser.add_argument(
+        "--report-filename",
+        default="filter_report.json",
+        help="Filename for the filter-report JSON inside {output_dir}/filter/ "
+        "(default: filter_report.json).",
     )
 
     args = parser.parse_args()
@@ -231,7 +267,11 @@ if __name__ == "__main__":
         args.train_path,
         args.difficulty_path,
         args.output_dir,
-        min_pass_rate=args.min_pass_rate,
-        max_pass_rate=args.max_pass_rate,
+        min_reward_std=args.min_reward_std,
         validation_path=args.validation_data,
+        policy_model=args.policy_model,
+        judge_model=args.judge_model,
+        train_filename=args.train_filename,
+        val_filename=args.val_filename,
+        report_filename=args.report_filename,
     )

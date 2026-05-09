@@ -35,7 +35,6 @@ Usage::
 import argparse
 import json
 import sys
-import uuid as uuid_mod
 from pathlib import Path
 
 from nvflow.utils import setup_logger
@@ -48,6 +47,10 @@ def _convert_row(row: dict) -> dict:
 
     Requires ``prompt`` (model input), ``problem`` (raw question),
     and ``expected_answer`` (extracted clean answer).
+
+    When ``_response_params`` is present (set by apply_prompt_template for
+    agent-style templates), its contents (tools, parallel_tool_calls, etc.) are
+    merged into ``responses_create_params``.
     """
     prompt = row.get("prompt", "")
     if not prompt:
@@ -58,11 +61,19 @@ def _convert_row(row: dict) -> dict:
         raise KeyError("'expected_answer' field is required (run apply_prompt_template first)")
 
     result = dict(row)
-    result["responses_create_params"] = {"input": [{"role": "user", "content": prompt}]}
+    rcp: dict = {"input": [{"role": "user", "content": prompt}]}
+    response_params = result.pop("_response_params", None)
+    if response_params:
+        rcp.update(response_params)
+    result["responses_create_params"] = rcp
     result["question"] = row.get("problem", "")
     result["expected_answer"] = expected_answer
+    # A random uuid4 fallback here would break aggregate_seeds (keyed on uuid).
     if "uuid" not in result:
-        result["uuid"] = str(uuid_mod.uuid4())
+        raise KeyError(
+            "Record missing 'uuid' field -- upstream data_transformation "
+            "should have assigned one via uuid5(problem, generation)."
+        )
     return result
 
 

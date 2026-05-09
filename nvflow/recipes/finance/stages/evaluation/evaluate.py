@@ -36,11 +36,22 @@ from pathlib import Path
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.vllm_compat import inject_server_entrypoint
 
 
 def _normalize_args(args: str | None) -> str:
     """Normalize multi-line args to single line."""
     return " ".join(args.split()) if args else ""
+
+
+def _build_stage_kwargs(config: dict, model_path: str = "") -> dict:
+    """Build stage_kwargs with server_args and gpt-oss aarch64 workaround."""
+    kwargs: dict[str, str] = {"server_args": config.get("server_args", "")}
+    if ep := config.get("server_entrypoint"):
+        kwargs["server_entrypoint"] = ep
+    return inject_server_entrypoint(
+        kwargs, model_path
+    )  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
 
 
 def _load_eval_base_config() -> dict:
@@ -249,9 +260,7 @@ class _BaseFinanceEvaluator(BaseStage):
                 "server_nodes": raw_config.get("nodes", 1),
                 "extra_args": raw_config.get("inference_args", ""),
             },
-            "stage_kwargs": {
-                "server_args": raw_config.get("server_args", ""),
-            },
+            "stage_kwargs": _build_stage_kwargs(raw_config, raw_config.get("path", "")),
         }
 
     def _prepare_model_for_eval(
@@ -304,6 +313,14 @@ class _BaseFinanceEvaluator(BaseStage):
         hf_model_path, convert_log_dir = get_hf_output_paths(run_path, step)
         model_name = _resolve_model_name(config, rollouts.get("base_model", ""))
 
+        if "num_gpus" not in conversion_config:
+            from nemo_skills.pipeline.utils import get_cluster_config
+
+            cluster_cfg = get_cluster_config(cluster)
+            default_gpus = cluster_cfg.get("gpus_per_node", 8)
+        else:
+            default_gpus = conversion_config["num_gpus"]
+
         conversion_job = _submit_conversion_job(
             megatron_path=megatron_path,
             hf_output_path=hf_model_path,
@@ -311,7 +328,7 @@ class _BaseFinanceEvaluator(BaseStage):
             model_name=model_name,
             cluster=cluster,
             expname=expname,
-            num_gpus=conversion_config.get("num_gpus", 8),
+            num_gpus=default_gpus,
             installation_command=conversion_config.get("installation_command"),
             run_after=run_after,
         )
@@ -389,34 +406,10 @@ class _BaseFinanceEvaluator(BaseStage):
                 "Example: datasets_dir: /workspace/nvflow/recipes/finance/datasets"
             )
 
-        # Step 3: Skip-if-done check
-        # If all benchmark metrics already exist, skip this stage entirely.
-        benchmark_names = [b.split(":")[0] for b in benchmarks.split(",")]
-        remaining = []
-        for bname in benchmark_names:
-            metrics_path = Path(output_dir) / "eval-results" / bname / "metrics.json"
-            if metrics_path.exists():
-                console.info(f"Skipping {bname} — metrics.json already exists at {metrics_path}")
-            else:
-                remaining.append(bname)
-
-        if not remaining:
-            console.success("All benchmarks already completed — nothing to submit")
-            return
-
-        if len(remaining) < len(benchmark_names):
-            skipped = set(benchmark_names) - set(remaining)
-            console.info(f"Skipped {len(skipped)} completed benchmark(s): {', '.join(skipped)}")
-            benchmarks_to_run = ",".join(
-                b for b in benchmarks.split(",") if b.split(":")[0] in remaining
-            )
-        else:
-            benchmarks_to_run = benchmarks
-
-        # Step 4: Submit eval job
+        # Step 3: Submit eval job
         console.status("Evaluating on finance benchmarks")
         console.detail("Model", effective_model_path or server_address)
-        console.detail("Benchmarks", benchmarks_to_run)
+        console.detail("Benchmarks", benchmarks)
         console.detail("Output", output_dir)
         console.detail("Judge", judge_model or judge_server_address)
         if eval_run_after:
@@ -429,11 +422,9 @@ class _BaseFinanceEvaluator(BaseStage):
                 "cluster": cluster,
                 "output_dir": output_dir,
                 "log_dir": f"{output_dir}/logs",
-                "benchmarks": benchmarks_to_run,
+                "benchmarks": benchmarks,
                 "expname": expname,
                 "data_dir": datasets_dir,
-                "extra_datasets": "nvflow/recipes/finance/datasets",
-                "extra_datasets_type": "local",
                 "model": effective_model_path,
                 "server_address": server_address,
                 "server_type": server_type,
@@ -559,7 +550,27 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         for step in eval_steps:
             console.info(f"Evaluating checkpoint step {step} (format: {checkpoint_format})")
 
-            if checkpoint_format == "hf":
+            # Support "final" to evaluate the auto-converted final_hf_model
+            if str(step).lower() == "final":
+                model_path = str(Path(checkpoint_path) / "final_hf_model")
+                stage_config = {
+                    "benchmarks": benchmarks_list,
+                    "datasets_dir": base_config.get("datasets_dir"),
+                    "judge": base_config.get("judge"),
+                    "output_dir": f"{eval_output_dir}/final",
+                    "rollouts": {
+                        "model": model_path,
+                        "skip_conversion": True,
+                        "server_type": config.get("server_type", "vllm"),
+                        "server_gpus": config.get("gpus", 1),
+                        "server_nodes": config.get("nodes", 1),
+                        "extra_args": config.get("inference_args", ""),
+                    },
+                    "stage_kwargs": {
+                        "server_args": config.get("server_args", ""),
+                    },
+                }
+            elif checkpoint_format == "hf":
                 model_path = str(Path(checkpoint_path) / f"step_{step}" / "policy")
                 stage_config = {
                     "benchmarks": benchmarks_list,
@@ -574,9 +585,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                         "server_nodes": config.get("nodes", 1),
                         "extra_args": config.get("inference_args", ""),
                     },
-                    "stage_kwargs": {
-                        "server_args": config.get("server_args", ""),
-                    },
+                    "stage_kwargs": _build_stage_kwargs(config, model_path),
                 }
             elif checkpoint_format == "fsdp":
                 stage_config = {
@@ -595,17 +604,10 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                         "server_nodes": config.get("nodes", 1),
                         "extra_args": config.get("inference_args", ""),
                     },
-                    "stage_kwargs": {
-                        "server_args": config.get("server_args", ""),
-                    },
+                    "stage_kwargs": _build_stage_kwargs(config),
                 }
             else:
                 run_path = Path(checkpoint_path)
-                from nvflow.recipes.finance.utils.evaluation.checkpoint_converter import (
-                    get_hf_output_paths,
-                )
-
-                hf_model_path, _ = get_hf_output_paths(run_path, step)
                 conversion_config = base_config.get("conversion", {})
                 stage_config = {
                     "_run_path": str(run_path),
@@ -623,9 +625,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                         "server_nodes": config.get("nodes", 1),
                         "extra_args": config.get("inference_args", ""),
                     },
-                    "stage_kwargs": {
-                        "server_args": config.get("server_args", ""),
-                    },
+                    "stage_kwargs": _build_stage_kwargs(config, base_model or ""),
                 }
 
             super().execute(
@@ -651,9 +651,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                     "server_nodes": config.get("nodes", 1),
                     "extra_args": config.get("inference_args", ""),
                 },
-                "stage_kwargs": {
-                    "server_args": config.get("server_args", ""),
-                },
+                "stage_kwargs": _build_stage_kwargs(config, baseline_model or ""),
             }
             super().execute(
                 config=baseline_config,
@@ -715,9 +713,7 @@ class _CheckpointEvaluator(_BaseFinanceEvaluator):
                     "server_nodes": config.get("nodes", 1),
                     "extra_args": config.get("inference_args", ""),
                 },
-                "stage_kwargs": {
-                    "server_args": config.get("server_args", ""),
-                },
+                "stage_kwargs": _build_stage_kwargs(config, hf_model_path),
             }
         else:
             stage_config = {
@@ -734,9 +730,7 @@ class _CheckpointEvaluator(_BaseFinanceEvaluator):
                     "server_nodes": config.get("nodes", 1),
                     "extra_args": config.get("inference_args", ""),
                 },
-                "stage_kwargs": {
-                    "server_args": config.get("server_args", ""),
-                },
+                "stage_kwargs": _build_stage_kwargs(config, config.get("base_model", "")),
             }
 
         return super().execute(

@@ -1,0 +1,50 @@
+# ============================================================================
+# Qwen3-4B SFT - Smoke Test Configuration
+# ============================================================================
+# Minimal SFT config for full pipeline smoke testing.
+# 1 epoch, SecQUE eval with 1 seed. Points to smoke SDG output.
+#
+# Usage:
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/sft/qwen3_4b_smoke.yaml
+# ============================================================================
+
+_base_: qwen3_4b.yaml
+
+base_output_dir: /workspace/outputs/finance/smoke/workflow-4-sft/qwen3_4b
+
+directories:
+  raw_train_data: /workspace/outputs/finance/smoke/workflow-3-template-based-sdg/step-4-genselect-answers
+
+# ============================================================================
+# Smoke Test Overrides
+# ============================================================================
+stages:
+
+  training:
+    overrides:
+      sft:
+        max_num_epochs: 1
+      checkpointing:
+        save_period: 1
+      policy:
+        train_global_batch_size: 4
+
+  eval:
+    eval_steps: ["final"]
+    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-1n-tp2-pp1-cp2-seq32k
+    base_output_dir: ${base_output_dir}
+    format: megatron
+    base_model: /hf_models/Qwen/Qwen3-4B
+    server_type: vllm
+    gpus: 1
+    benchmarks:
+      secque:
+        seeds: 1
+    inference_args: >-
+      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++inference.temperature=0.6
+      ++inference.top_p=0.95
+      ++inference.top_k=20
+      ++inference.tokens_to_generate=16384
+      ++chat_template_kwargs.enable_thinking=true
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"

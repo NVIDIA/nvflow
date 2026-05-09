@@ -12,17 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""NVFlow Recipes.
+"""NVFlow Recipes -- auto-discovered from subdirectories.
 
-Each recipe is a self-contained implementation for a specific domain:
-- example: Example recipe for learning and testing
-- finance: Financial reasoning models
-- retail: Retail domain models (future)
-- healthcare: Healthcare domain models (future)
+Each recipe is a self-contained implementation for a specific domain.
+Add a new recipe by creating ``nvflow/recipes/<name>/`` with an
+``__init__.py`` that imports its stages tree.  No manual edits to this
+file are required.
+
+A recipe whose import fails will be reported on stderr via the
+``nvflow.core.discovery`` helper but will not block discovery of the
+others.
 """
 
-# Import all recipes to trigger stage registration
-from . import (
-    example,  # noqa: F401
-    finance,  # noqa: F401
-)
+from pathlib import Path
+
+from nvflow.core.discovery import import_stage_subpackages
+
+import_stage_subpackages(__package__, Path(__file__).parent)

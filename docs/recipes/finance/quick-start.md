@@ -12,7 +12,7 @@ Get hands-on experience with the finance recipe by running a complete end-to-end
 - [Step 2: Download SEC Filings](#step-2-download-sec-filings) — ~3 min
 - [Step 3: Generate Synthetic Q&A Data](#step-3-generate-synthetic-qa-data) — ~20 min
 - [Step 4: Fine-Tune Model + Evaluate (SFT)](#step-4-fine-tune-model--evaluate-sft) — ~25 min
-- [Step 5: GRPO RL Training + Evaluate (Experimental)](#step-5-grpo-rl-training--evaluate) — ~1 hr
+- [Step 5: GRPO RL Training + Evaluate](#step-5-grpo-rl-training--evaluate) — ~2 hr
 - [Next Steps](#next-steps)
 - [Troubleshooting](#troubleshooting)
 
@@ -299,11 +299,11 @@ tail -f outputs/finance/demo/workflow-4-sft/qwen3_4b/step-4-training/model-qwen3
 
 **Verify training:**
 ```bash
-ls outputs/finance/demo/workflow-4-sft/qwen3_4b/step-4-training/model-qwen3-4b-1n-tp2-pp1-cp2-seq32k/checkpoints/
+ls outputs/finance/demo/workflow-4-sft/qwen3_4b/step-4-training/model-qwen3-4b-8g-tp2-pp1-cp2-seq32k/checkpoints/
 # Expected: step_10/ step_16/ (checkpoint at save_period=10 and final epoch)
 
-ls outputs/finance/demo/workflow-4-sft/qwen3_4b/step-4-training/model-qwen3-4b-1n-tp2-pp1-cp2-seq32k/final_hf_model/
-# Expected: HF-format model (safetensors, config.json, tokenizer files)
+ls outputs/finance/demo/workflow-4-sft/qwen3_4b/step-4-training/model-qwen3-4b-8g-tp2-pp1-cp2-seq32k/hf_models/
+# Expected: step_10/ (HF-format model, converted during eval)
 ```
 
 **Verify evaluation:**
@@ -330,12 +330,12 @@ outputs/finance/demo/workflow-4-sft/qwen3_4b/
 │   ├── train_bucket_*.jsonl              # Grouped by sequence length
 │   └── logs/
 ├── step-4-training/
-│   └── model-qwen3-4b-1n-tp2-pp1-cp2-seq32k/
+│   └── model-qwen3-4b-8g-tp2-pp1-cp2-seq32k/
 │       ├── checkpoints/
 │       │   ├── step_10/                  # Megatron checkpoint (save_period=10)
 │       │   └── step_16/                  # Final epoch checkpoint
-│       ├── convert-final-ckpt/           # Megatron → HF conversion logs
-│       ├── final_hf_model/              # HF-format safetensors (auto-converted)
+│       ├── hf_models/                   # HF-format models (converted during eval)
+│       │   └── step_10/                 # Per-step HF checkpoint
 │       └── training-logs/
 └── step-5-eval/
     └── step-10/
@@ -357,30 +357,41 @@ outputs/finance/demo/workflow-4-sft/qwen3_4b/
 
 <a id="step-5-grpo-rl-training--evaluate" name="step-5-grpo-rl-training--evaluate"></a>
 <details open>
-<summary><h2>Step 5: GRPO RL Training + Evaluate — ~1 hr (Experimental)</h2></summary>
-
-> **Status: Experimental** — GRPO quality experiments are still in progress. Results may change as we refine reward signals and training hyperparameters.
+<summary><h2>Step 5: GRPO RL Training + Evaluate — ~2 hr</h2></summary>
 
 > Config: `grpo/qwen3_4b.yaml` | Output: `outputs/finance/demo/workflow-5-grpo/qwen3_4b/`
 
-Run GRPO reinforcement learning using LLM-as-judge rewards from the NeMo-Gym `equivalence_llm_judge` environment, then evaluate checkpoints on finance benchmarks. Uses the same Q&A pairs from Step 3 (`workflow-3-template-based-sdg/step-5-filter-answers/final_result.jsonl`) as training input — GRPO does **not** depend on the SFT checkpoint. Both rollout collection and training use a dedicated GPT-OSS-120B judge model (not the policy model) for accurate reward signals.
+Run GRPO reinforcement learning using LLM-as-judge rewards from NeMo-Gym environments, then evaluate checkpoints on finance benchmarks. Uses the same Q&A pairs from Step 3 as training input — GRPO does **not** depend on the SFT checkpoint.
+
+**Two environments:** This demo trains on two independent NeMo-Gym environments, each producing a separate model:
+
+| Environment | Reward Signal | Context |
+|-------------|--------------|---------|
+| `equivalence_llm_judge` | LLM judges answer equivalence to gold | Question + SEC context provided |
+| `finance_sec_search` | Multi-turn tool-calling agent retrieves SEC data | Agent must find context via tools |
+
+Each environment has its own data pipeline, rollout collection, and training. Use `-e <env>` to run a specific environment.
 
 **Preview stages:**
 ```bash
 uv run nflow list-stages --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
 ```
 
-1. `data_transformation` — Clean raw SDG data to model-agnostic format (CPU)
-2. `apply_prompt_template` — Apply prompt template + extract expected answer (CPU)
-3. `convert_to_responses_api` — Convert to NeMo-Gym Responses API format (CPU)
-4. `train_validation_split` — Split into train/val sets (CPU)
+1. `validate_questions` — Filter ambiguous questions for finance_sec_search (GPU, GPT-OSS-120B)
+2. `data_transformation` — Clean raw SDG data to model-agnostic format (CPU)
+3. `apply_prompt_template` — Apply prompt template + extract expected answer (CPU)
+4. `convert_to_responses_api` — Convert to NeMo-Gym Responses API format (CPU)
 5. `prepare_data` — Add agent routing fields for NeMo-Gym (CPU)
-6. `collect_rollouts` — Collect rollouts, profile rewards, and filter training data (GPU + CPU)
-7. `training` — GRPO training with dedicated GPT-OSS-120B judge (8 + 4 GPUs, ~20 min)
-8. `eval` — Evaluate checkpoint on finance benchmarks (GPU, ~6 min)
+6. `prefetch_cache` — Pre-warm SEC metadata cache for finance_sec_search (CPU)
+7. `collect_rollouts` — Collect rollouts, profile rewards, and filter training data (GPU)
+8. `train_validation_split` — Split reward-filtered data into train/val (CPU)
+9. `training` — GRPO training with NeMo-Gym environment (GPU, ~20 min per env)
+10. `eval` — Evaluate checkpoint on finance benchmarks (GPU, ~6 min)
 
-Stage 6 (`collect_rollouts`) includes automatic sub-jobs:
-- **Rollout** (GPU) — policy + judge vLLM servers + NeMo-Gym client, per seed
+Stages 1-8 run **per-environment**: outputs are written to `{step_dir}/{env_name}/`.
+
+Stage 7 (`collect_rollouts`) includes automatic sub-jobs:
+- **Rollout** (GPU) — policy + judge vLLM servers + NeMo-Gym client, per seed (8 seeds)
 - **Merge + Analyze** (CPU) — merge chunks and compute per-seed reward distributions
 - **Aggregate** (CPU) — cross-seed pass@k metrics and `difficulty.jsonl`
 - **Filter** (CPU) — curate training data by removing too-hard and too-easy questions
@@ -398,53 +409,89 @@ uv run nflow run prepare_data --config nvflow/recipes/finance/workflows/eval/dem
 
 **Run:**
 
-We recommend running one stage at a time so you can inspect outputs and catch issues early, rather than using `run-all` which submits all stages and their Slurm dependencies at once:
+We recommend running one environment at a time so you can inspect the full lifecycle before moving to the next:
+
+**Environment 1: `equivalence_llm_judge` (~45 min)**
+
+The simpler environment — LLM judges whether the model's answer is equivalent to the gold answer. Context is provided directly.
 
 ```bash
-# Data preparation (CPU stages, fast)
-uv run nflow run data_transformation apply_prompt_template convert_to_responses_api train_validation_split prepare_data \
-  --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Data preparation (CPU, fast)
+uv run nflow run data_transformation apply_prompt_template convert_to_responses_api prepare_data \
+  --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 
-# Rollout collection (GPU, ~30 min) — inspect reward distributions before proceeding
-uv run nflow run collect_rollouts --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Rollout collection (GPU, ~20 min) — inspect reward distributions before proceeding
+uv run nflow run collect_rollouts --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 
-# Training (GPU, ~20 min)
-uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Post-rollout train/val split (CPU)
+uv run nflow run train_validation_split --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 
-# Evaluation (GPU, ~6 min)
-uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Training (FSDP v2, 16 GPUs, ~60 min)
+uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 ```
 
-Alternatively, to submit all stages at once with Slurm dependencies:
+**Environment 2: `finance_sec_search` (~1 hr)**
+
+The multi-turn tool-calling environment — the agent must retrieve SEC filings via tools before answering. Includes question validation and SEC cache prefetch.
+
 ```bash
-uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Question validation (GPU, uses GPT-OSS-120B judge — multi-job, wait for completion)
+uv run nflow run validate_questions --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e finance_sec_search
+# Wait for all validate_questions Slurm jobs to finish (check: squeue --me)
+
+# Data preparation + cache prefetch (CPU + GPU)
+uv run nflow run data_transformation apply_prompt_template convert_to_responses_api prepare_data prefetch_cache \
+  --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e finance_sec_search
+
+# Rollout collection (GPU, ~30 min)
+uv run nflow run collect_rollouts --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e finance_sec_search
+
+# Post-rollout train/val split (CPU)
+uv run nflow run train_validation_split --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e finance_sec_search
+
+# Training (Megatron, 64 GPUs — uses separate config for YaRN + CP=4)
+uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
+```
+
+**Evaluation (~6 min each):**
+```bash
+# Equivalence eval (FSDP checkpoint)
+uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
+
+# Finance SEC search eval (Megatron checkpoint)
+uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
 ```
 
 **Monitor:**
 ```bash
 squeue --me
-# Rollout logs (one per seed)
-tail -f outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/logs/*.log
+# Rollout logs (one per seed per environment)
+tail -f outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/*/logs/*.log
 # Training logs
-tail -f outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-7-training/grpo-qwen3-4b-*/training-logs/ray-*-job.log
+tail -f outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-7-training/*/grpo-qwen3-4b-*/training-logs/ray-*-job.log
 ```
 
-**Verify rollouts:**
+**Verify rollouts (both environments):**
 ```bash
-cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/rollout/analysis_rs0/summary.txt
-cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/rollout/aggregate/summary.txt
+# equivalence_llm_judge
+cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/equivalence_llm_judge/rollout/aggregate/summary.txt
+cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/equivalence_llm_judge/filter/filter_report.json
+wc -l outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/equivalence_llm_judge/train.jsonl
 
-wc -l outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/train.jsonl
-cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/filter/filter_report.json
+# finance_sec_search
+cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/finance_sec_search/rollout/aggregate/summary.txt
+cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/finance_sec_search/filter/filter_report.json
+wc -l outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/finance_sec_search/train.jsonl
 ```
 
-**Verify training:**
+**Verify training (per-environment):**
 ```bash
-ls outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-7-training/grpo-qwen3-4b-*/checkpoints/
+# equivalence_llm_judge model
+ls outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-8-training/equivalence_llm_judge/grpo-qwen3-4b-*/checkpoints/
 # Expected: step_10/ step_20/ (save_period=10, max_num_steps=20)
 
-ls outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-7-training/grpo-qwen3-4b-*/final_hf_model/
-# Expected: HF-format model (safetensors, config.json, tokenizer files)
+# finance_sec_search model
+ls outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-8-training/finance_sec_search/grpo-qwen3-4b-*/checkpoints/
 ```
 
 **Verify evaluation:**
@@ -455,59 +502,59 @@ cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-8-eval/step-20/eval-resul
 
 **Output:**
 ```
-outputs/finance/demo/workflow-5-grpo/qwen3_4b/
-├── step-0-data-transformation/
-│   ├── chunks/                           # 10 chunked JSONL files
-│   ├── filtered_outliers.jsonl
-│   └── logs/
-├── step-1-apply-prompt-template/
-│   ├── final_result_chunk*.jsonl         # 10 prompted chunks
-│   └── logs/
-├── step-2-convert-to-responses-api/
-│   ├── final_result.jsonl                # Responses API format
-│   └── logs/
-├── step-3-train-validation-split/
-│   ├── train.jsonl                       # ~1060 training examples
-│   ├── val.jsonl                         # ~120 validation examples
-│   └── logs/
+outputs/finance/demo/workflow-5-grpo/
+├── step-0-validate-questions/
+│   └── finance_sec_search/              # Only finance_sec_search (equivalence skips validation)
+│       └── final_result.jsonl
+├── step-1-data-transformation/
+│   ├── equivalence_llm_judge/
+│   │   └── chunks/
+│   └── finance_sec_search/
+│       └── chunks/
+├── step-2-apply-prompt-template/
+│   ├── equivalence_llm_judge/
+│   └── finance_sec_search/
+├── step-3-convert-to-responses-api/
+│   ├── equivalence_llm_judge/
+│   └── finance_sec_search/
 ├── step-4-prepare-data/
-│   ├── train.jsonl                       # With agent_ref routing fields
-│   ├── validation.jsonl
-│   ├── agent_config_overlay.yaml
-│   └── logs/
-├── step-5-collect-rollouts/
-│   ├── rollout/
-│   │   ├── output-rs*.jsonl              # 8 seed rollouts
-│   │   ├── analysis_rs*/                 # Per-seed reward analysis
-│   │   │   └── summary.txt
-│   │   └── aggregate/                    # Cross-seed pass@k metrics
-│   │       ├── difficulty.jsonl
-│   │       └── summary.txt
-│   ├── filter/
-│   │   └── filter_report.json            # ~37% kept (too-hard/too-easy removed)
-│   ├── train.jsonl                       # ~395 filtered training examples
-│   ├── validation.jsonl
-│   └── logs/
-├── step-7-training/
-│   └── grpo-qwen3-4b-*/
-│       ├── checkpoints/
-│       │   ├── step_10/                  # Checkpoint (save_period=10)
-│       │   └── step_20/                  # Final checkpoint (max_num_steps=20)
-│       ├── final_hf_model/              # HF-format model (auto-converted)
-│       └── training-logs/
-└── step-8-eval/
-    └── step-20/
-        ├── eval-results/
-        │   ├── secque/
-        │   │   └── metrics.json
-        │   └── financebench/
-        │       └── metrics.json
-        └── logs/
+│   ├── equivalence_llm_judge/
+│   │   ├── train.jsonl
+│   │   └── agent_config_overlay.yaml
+│   └── finance_sec_search/
+│       ├── train.jsonl
+│       └── agent_config_overlay.yaml
+├── qwen3_4b/
+│   ├── step-5-collect-rollouts/
+│   │   ├── equivalence_llm_judge/
+│   │   │   ├── rollout/aggregate/summary.txt
+│   │   │   ├── filter/filter_report.json
+│   │   │   └── train.jsonl
+│   │   └── finance_sec_search/
+│   │       ├── rollout/aggregate/summary.txt
+│   │       ├── filter/filter_report.json
+│   │       └── train.jsonl
+│   ├── step-8-training/
+│   │   ├── equivalence_llm_judge/      # Per-env model
+│   │   │   └── grpo-qwen3-4b-*/
+│   │   │       ├── checkpoints/
+│   │   │       └── training-logs/
+│   │   └── finance_sec_search/         # Per-env model
+│   │       └── grpo-qwen3-4b-*/
+│   │           ├── checkpoints/
+│   │           └── training-logs/
+│   └── step-9-eval/
+│       └── step-20/
+│           └── eval-results/
+│               ├── secque/metrics.json
+│               └── financebench/metrics.json
 ```
 
-> **Note:** Demo results will vary due to limited training data (7 companies) and rollout stochasticity. The filter stage typically keeps ~37% of questions (removing too-hard and too-easy), which provides the best RL training signal.
+> **Per-environment training:** Each environment produces a separate model checkpoint. To train a single combined model on both environments, omit `-e` in the training command.
 
-> **Tip:** For production, use `grpo/qwen3_14b.yaml` for Qwen3-14B or create a custom model config inheriting from `grpo/base.yaml`.
+> **Note:** Demo results will vary due to limited training data (7 companies) and rollout stochasticity. The filter stage typically keeps 25-40% of questions (removing too-hard and too-easy), which provides the best RL training signal.
+
+> **Tip:** For production (Qwen3-30B-A3B on S&P 500 data), use `grpo/qwen3_30b_a3b.yaml`.
 
 </details>
 

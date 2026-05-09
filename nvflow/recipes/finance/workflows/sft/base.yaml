@@ -173,14 +173,16 @@ stages:
     output_dir: ${directories.step-4-training}
 
     # MODEL-SPECIFIC - Override in model configs:
-    # model_name, hf_checkpoint_path, num_nodes, preset, overrides
+    # model_name, hf_checkpoint_path, total_gpus, preset, overrides
 
     dependencies:
       - train_validation_split
       - sequence_length_grouping
 
     # Cluster configuration (shared defaults)
-    num_gpus: 8
+    # total_gpus: total GPUs for the training job (auto-split across nodes
+    # using gpus_per_node from the cluster config)
+    total_gpus: 8
     dependent_jobs: 0
     backend: megatron
 
@@ -188,9 +190,9 @@ stages:
     wandb_project: finance-training
     wandb_mode: disabled        # online | offline | disabled
 
-    # Runtime environment customization (if needed)
-    # stage_kwargs:
-    #   installation_command: "uv pip install some-package"
+    # NeMo-RL source is overlay-mounted at /opt/NeMo-RL via my_cluster.yaml.
+    # This provides pyproject.toml on all nodes for the Ray _env_builder,
+    # and resolves the UV_PROJECT=/opt/NeMo-RL path used by training.py.
 
   # --------------------------------------------------------------------------
   # Stage 5: Evaluate Checkpoints on Finance Benchmarks

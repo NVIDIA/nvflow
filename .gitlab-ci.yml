@@ -1,6 +1,10 @@
 default:
   tags:
     - llm-mlops
+  interruptible: true
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git > /dev/null
+    - pip install -q uv
 
 stages:
   - lint
@@ -10,14 +14,12 @@ stages:
 
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
-  # Fetch full git history for hatch-vcs to determine version from tags
-  GIT_DEPTH: 0
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
 
 cache:
   key: ${CI_COMMIT_REF_SLUG}
   paths:
-    - .cache/pip/
-    - .venv/
+    - .cache/
 
 # =============================================================================
 # LINT STAGE
@@ -25,19 +27,13 @@ cache:
 lint:
   stage: lint
   image: python:3.12-slim
-  before_script:
-    - apt-get update && apt-get install -y git
-    - pip install uv==0.9.22  # Pin to match local version (newer uv has stricter TOML parsing; nemo-run fails)
-    - uv sync --all-extras
   script:
+    - uv sync --all-extras
     - uv run pre-commit run --all-files
   rules:
-    # Run on merge requests
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    # Run on main and dev branches
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "dev"
-    # Run on feature branches
     - if: $CI_COMMIT_BRANCH =~ /^feature\//
 
 # DCO sign-off check – only meaningful on MR pipelines where we validate
@@ -46,12 +42,9 @@ lint:
 dco-check:
   stage: lint
   image: python:3.12-slim
-  before_script:
-    - apt-get update && apt-get install -y git
   script:
     - python scripts/check_dco.py
   rules:
-    # Only run on merge requests – not on main or feature branch pushes
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 # =============================================================================
@@ -60,15 +53,13 @@ dco-check:
 test:
   stage: test
   image: python:3.12-slim
-  before_script:
-    - apt-get update && apt-get install -y git
-    - pip install uv==0.9.22
-    - uv venv --python 3.12
-    - uv pip install pytest pytest-cov pytest-timeout
-    - uv pip install PyYAML omegaconf rich
-    - uv pip install -e . --no-deps
   script:
-    - .venv/bin/pytest tests/ -v --tb=short
+    # Lightweight install: skip heavy core deps (nemo-skills ~200+ packages)
+    # that unit tests don't need.  Only install the project + test deps.
+    - uv venv --python 3.12
+    - uv pip install -e ".[dev]" --no-deps
+    - uv pip install pytest pytest-cov pytest-xdist pytest-timeout PyYAML omegaconf rich
+    - uv run pytest tests/ -v --tb=short
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
@@ -81,25 +72,24 @@ test:
 build:
   stage: build
   image: python:3.12-slim
+  variables:
+    GIT_DEPTH: 0
   before_script:
-    - apt-get update && apt-get install -y git
-    - git fetch --tags --force  # Ensure tags are available for version detection
+    - apt-get update -qq && apt-get install -y -qq git > /dev/null
+    - git fetch --tags --force
     - git describe --tags || echo "No tags found"
-    - pip install build hatch-vcs
+    - pip install -q build hatch-vcs
   script:
     - python -m build
     - ls -la dist/
-    # Show the version that was built
     - echo "Built version:" && ls dist/*.whl | sed 's/.*nvflow-\(.*\)-py3.*/\1/'
   artifacts:
     paths:
       - dist/
     expire_in: 1 week
   rules:
-    # Build on main and dev branches
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "dev"
-    # Build on version tags
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
 
 # =============================================================================
@@ -108,8 +98,9 @@ build:
 publish:
   stage: publish
   image: python:3.12-slim
+  interruptible: false
   before_script:
-    - pip install twine
+    - pip install -q twine
   script:
     - |
       echo "Publishing to GitLab Package Registry..."
@@ -126,7 +117,5 @@ publish:
   dependencies:
     - build
   rules:
-    # Publish on main branch only (not dev)
     - if: $CI_COMMIT_BRANCH == "main"
-    # Publish on version tags
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/

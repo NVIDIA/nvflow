@@ -194,11 +194,14 @@ def construct_question_verify_input(input_dir: Path, output_file: Path):
 
 def _check_verification(result: dict[str, Any]) -> bool:
     """Check if a verification result indicates 'Yes' (verified)."""
-    generation = result.get("generation", "")
+    generation = result.get("generation") or ""
     if not generation:
         ser_out = result.get("serialized_output", [])
         if isinstance(ser_out, list) and len(ser_out) > 0:
-            generation = ser_out[0].get("content", "")
+            generation = ser_out[0].get("content") or ""
+
+    if not generation:
+        return False
 
     if "<|channel|>final<|message|>" in generation:
         final_ans = generation.split("<|channel|>final<|message|>")[-1].strip()

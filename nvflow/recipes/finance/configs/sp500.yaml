@@ -61,7 +61,7 @@ tickers:
   - "BAC"
   - "BAX"
   - "BDX"
-  - "BRK.B"
+  - "BRK-B"
   - "BBY"
   - "TECH"
   - "BIIB"
@@ -76,7 +76,7 @@ tickers:
   - "AVGO"
   - "BR"
   - "BRO"
-  - "BF.B"
+  - "BF-B"
   - "BLDR"
   - "BG"
   - "BXP"
@@ -139,7 +139,8 @@ tickers:
   - "DRI"
   - "DDOG"
   - "DVA"
-  - "DAY"
+  # DAY removed: Dayforce not yet in SEC registry
+  - "MRSH"  # Marsh McLennan (formerly MMC)
   - "DECK"
   - "DE"
   - "DELL"
@@ -254,7 +255,7 @@ tickers:
   - "ICE"
   - "IFF"
   - "IP"
-  - "IPG"
+  # IPG removed: Interpublic delisted after Omnicom merger
   - "INTU"
   - "ISRG"
   - "IVZ"
@@ -268,7 +269,7 @@ tickers:
   - "JNJ"
   - "JCI"
   - "JPM"
-  - "K"
+  # K removed: Kellanova delisted after Mars acquisition
   - "KVUE"
   - "KDP"
   - "KEY"
@@ -300,7 +301,7 @@ tickers:
   - "MTB"
   - "MPC"
   - "MAR"
-  - "MMC"
+  # MMC removed: Marsh McLennan rebranded to MRSH (added above)
   - "MLM"
   - "MAS"
   - "MA"

@@ -80,8 +80,12 @@ nvflow/recipes/finance/datasets/finance_agent/*.jsonl
 nvflow/recipes/finance/datasets/finance_agent/*.csv
 nvflow/recipes/finance/datasets/finance_agent/*.json
 
+# Backup files
+*.bak
+
 # OS
 .DS_Store
+._*
 Thumbs.db
 
 # Jupyter

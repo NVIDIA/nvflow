@@ -59,7 +59,7 @@ class MapQuestionsToContextStage(BaseStage):
         run_cmd(
             ctx=wrap_arguments(
                 f"pip install -q --root-user-action=ignore jsonlines tiktoken markdownify && "
-                f"python /workspace/nvflow/recipes/finance/utils/shared/question_context_utils.py --input_file {input_file} --filings_metadata {filings_metadata} --filings_dir {filings_dir} --output_file {output_file} --token_limit {token_limit}"
+                f"python3 -m nvflow.recipes.finance.utils.shared.question_context_utils --input_file {input_file} --filings_metadata {filings_metadata} --filings_dir {filings_dir} --output_file {output_file} --token_limit {token_limit}"
             ),
             cluster=cluster,
             **config.get("stage_kwargs", {}),

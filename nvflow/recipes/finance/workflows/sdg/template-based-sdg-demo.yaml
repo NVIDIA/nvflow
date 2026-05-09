@@ -33,7 +33,7 @@ stages:
     dependencies: []
 
   # --------------------------------------------------------------------------
-  # Stage 1: Generate Questions - Smaller model, fewer GPUs
+  # Stage 1: Generate Questions - gpt-oss-20b with TP=4
   # --------------------------------------------------------------------------
   generate_questions:
     input_file: ${directories.step-0-create-seed-data}/seed_questions_demo.jsonl
@@ -44,9 +44,9 @@ stages:
     stage_kwargs:
       model: /hf_models/openai/gpt-oss-20b
       server_type: vllm
-      server_gpus: 2
+      server_gpus: 4
       server_nodes: 1
-      server_args: "--max-model-len 16384"
+      server_args: "--max-model-len 16384 --tensor-parallel-size 4"
 
 
   # --------------------------------------------------------------------------
@@ -56,43 +56,43 @@ stages:
     token_limit: 10000
 
   # --------------------------------------------------------------------------
-  # Stage 3: Generate Answers - Smaller model, fewer seeds
+  # Stage 3: Generate Answers - gpt-oss-20b with TP=4
   # --------------------------------------------------------------------------
   generate_answers:
     inline_args: "++inference.tokens_to_generate=8192 ++chat_template_kwargs.reasoning_effort=medium"
     stage_kwargs:
       model: /hf_models/openai/gpt-oss-20b
       server_type: vllm
-      server_gpus: 2
+      server_gpus: 4
       server_nodes: 1
       num_chunks: 2
       num_random_seeds: 3
-      server_args: "--max-model-len 16384"
+      server_args: "--max-model-len 16384 --tensor-parallel-size 4"
 
 
   # --------------------------------------------------------------------------
-  # Stage 4: GenSelect Answers - Smaller model
+  # Stage 4: GenSelect Answers - gpt-oss-20b with TP=4
   # --------------------------------------------------------------------------
   genselect_answers:
     inline_args: "++inference.tokens_to_generate=8192"
     stage_kwargs:
       model: /hf_models/openai/gpt-oss-20b
       server_type: vllm
-      server_gpus: 2
+      server_gpus: 4
       server_nodes: 1
       num_chunks: 4
-      server_args: "--max-model-len 16384"
+      server_args: "--max-model-len 16384 --tensor-parallel-size 4"
 
 
   # --------------------------------------------------------------------------
-  # Stage 5: Filter Answers - Smaller model
+  # Stage 5: Filter Answers - gpt-oss-20b with TP=4
   # --------------------------------------------------------------------------
   filter_answers:
     inline_args: "++generation_key=filter_generation ++inference.tokens_to_generate=4192"
     stage_kwargs:
       model: /hf_models/openai/gpt-oss-20b
       server_type: vllm
-      server_gpus: 2
+      server_gpus: 4
       server_nodes: 1
       num_chunks: 4
-      server_args: "--max-model-len 8192"
+      server_args: "--max-model-len 8192 --tensor-parallel-size 4"

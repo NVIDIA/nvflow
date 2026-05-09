@@ -61,24 +61,17 @@ class DGSDGPostProcessStage(BaseStage):
         console.detail("Random seed", str(seed))
         console.blank()
 
-        script_path = "/workspace/nvflow/recipes/finance/utils/sdg/dgsdg_post_process.py"
+        module = "nvflow.recipes.finance.utils.sdg.dgsdg_post_process"
 
         cmd = (
-            f"python {script_path} "
-            f"--input_file {input_file} "
-            f"--output_dir {output_dir} "
-            f"--seed {seed}"
+            f"python3 -m {module} --input_file {input_file} --output_dir {output_dir} --seed {seed}"
         )
-
-        preprocess_kwargs = config.get("preprocess_kwargs", {})
-        partition = preprocess_kwargs.get("partition", "cpu")
 
         run_cmd(
             ctx=wrap_arguments(cmd),
             cluster=cluster,
             expname=expname,
             run_after=run_after,
-            partition=partition,
         )
 
         console.success("Document grounded sdg data post processing job submitted")

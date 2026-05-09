@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Convert Q&A data to NeMo-Gym Responses API format for GRPO training."""
+"""Convert Q&A data to NeMo-Gym Responses API format for GRPO training.
+
+Runs per-environment: reads from ``{input_dir}/{env_name}/`` and writes
+to ``{output_dir}/{env_name}/final_result.jsonl``.
+"""
 
 from typing import Any
 
@@ -34,18 +38,49 @@ class ConvertToResponsesAPIStage(BaseStage):
         expname: str,
         run_after: list[str] | None = None,
     ) -> None:
-        """Submit the data conversion Slurm job."""
-        from nemo_skills.pipeline.cli import run_cmd, wrap_arguments
+        """Submit per-environment data conversion Slurm jobs."""
+        from nvflow.lib.rl.helpers import resolve_environments
 
-        input_path = config["input_path"]
-        output_dir = config["output_dir"]
+        environments = resolve_environments(config)
+        base_input_dir = config["input_dir"]
+        base_output_dir = config["output_dir"]
         container = config["container"]
-        output_file = f"{output_dir}/final_result.jsonl"
 
-        console.status("Converting data to NeMo-Gym Responses API format")
-        console.detail("Input", input_path)
-        console.detail("Output", output_file)
-        console.blank()
+        for env_name, env_cfg in environments.items():
+            if not env_cfg.get("raw_train_data"):
+                console.warning(f"Skipping environment '{env_name}': no raw_train_data configured")
+                continue
+            env_input_path = f"{base_input_dir}/{env_name}"
+            env_output_dir = f"{base_output_dir}/{env_name}"
+            env_output_file = f"{env_output_dir}/final_result.jsonl"
+
+            console.status(f"Converting data for environment: {env_name}")
+            console.detail("Input", env_input_path)
+            console.detail("Output", env_output_file)
+            console.blank()
+
+            self._submit_job(
+                input_path=env_input_path,
+                output_file=env_output_file,
+                output_dir=env_output_dir,
+                container=container,
+                cluster=cluster,
+                expname=f"{expname}-{env_name}",
+                run_after=run_after,
+            )
+
+    def _submit_job(
+        self,
+        *,
+        input_path: str,
+        output_file: str,
+        output_dir: str,
+        container: str,
+        cluster: str,
+        expname: str,
+        run_after: list[str] | None,
+    ) -> None:
+        from nemo_skills.pipeline.cli import run_cmd, wrap_arguments
 
         cmd = (
             f"python -m nvflow.recipes.finance.utils.rl.responses_api_converter "
@@ -66,6 +101,8 @@ class ConvertToResponsesAPIStage(BaseStage):
 
     def validate_config(self, config: dict[str, Any]) -> None:
         """Check that all required fields are present."""
-        for field in ("input_path", "output_dir", "container"):
+        for field in ("input_dir", "output_dir", "container"):
             if not config.get(field):
                 raise ValueError(f"'{field}' is required in convert_to_responses_api config")
+        if not config.get("environments"):
+            raise ValueError("'environments' is required in convert_to_responses_api config")

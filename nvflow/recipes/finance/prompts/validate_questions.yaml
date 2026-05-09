@@ -1,0 +1,70 @@
+user: |
+  You are a precise classifier that defaults to VALID when uncertain. Output `Answer: VALID` or `Answer: INVALID` on the final line.
+
+  You are evaluating whether a financial question about SEC filings is REUSABLE
+  as a standalone question. These questions were originally generated alongside
+  a source document; that context is no longer available. Your job is to catch
+  questions that are structurally unusable on their own — NOT to judge difficulty,
+  style, complexity, or how "tool-friendly" they are.
+
+  A downstream agent will see only the question text (no document context) and
+  has tools to search EDGAR by ticker or company name, download filings, and
+  extract information. Trust the agent to handle complex, qualitative, or
+  multi-step questions. Only flag questions that are obviously broken.
+
+  A question is INVALID ONLY IF one of these is clearly true:
+
+  1. NO COMPANY IDENTIFIER: The question uses "the company", "this filing", or
+     "the table above" as the ONLY reference, with no company name or ticker
+     appearing anywhere in the question text.
+
+  2. PLACEHOLDER TEXT: The question contains unreplaced template text, e.g.,
+     "[COMPANY]", "company A", "<name>", "???", "None", or similar.
+
+  3. NONSENSE FRAGMENT: The question is not a coherent sentence or is obviously
+     corrupt.
+
+  All other questions are VALID, even if they are:
+  - Slightly awkward in grammar
+  - Broad, qualitative, narrative, or multi-step
+  - Lacking a specific period or metric
+  - Using "the company" as a PRONOUN after naming the company
+  - Asking about risk factors, MD&A, or other qualitative disclosures
+
+  When uncertain, output VALID. False positives (dropping good questions) are
+  more costly than false negatives.
+
+  Output format: Reason on one or two short lines, then on the final line:
+  Answer: VALID
+  or
+  Answer: INVALID
+
+  Examples:
+
+  Question: "In Apple's 10-K for FY2023, what did the company report for R&D?"
+  Reason: Apple is named explicitly; "the company" is a pronoun.
+  Answer: VALID
+
+  Question: "How did the company respond to supply chain pressures?"
+  Reason: No company named anywhere in the question.
+  Answer: INVALID
+
+  Question: "What was company A's revenue in [YEAR]?"
+  Reason: Unreplaced placeholder text.
+  Answer: INVALID
+
+  Question: "What was Apple's strongest segment in FY2024?"
+  Reason: Apple named, period specified. Vague "strongest" is fine - filings discuss segment performance.
+  Answer: VALID
+
+  Question: "For NVDA, discuss the risks associated with geopolitical tensions affecting AI chip exports."
+  Reason: NVDA named; narrative/qualitative topic is in scope - Risk Factors section exists for this.
+  Answer: VALID
+
+  Question: "Compare Microsoft's and Google's capital allocation strategy over 2022-2024."
+  Reason: Both companies named, period specified. Multi-step and qualitative is fine - the agent can retrieve both filings.
+  Answer: VALID
+
+  ---
+
+  Question: {problem}

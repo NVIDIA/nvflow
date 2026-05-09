@@ -18,7 +18,8 @@
 NeMo-Gym environments may drop extra input fields (uuid, question,
 template_metadata, etc.) because their Pydantic response models don't
 use ``extra="allow"``.  This script restores those fields by matching
-output rows to input rows using ``expected_answer`` as the join key.
+output rows to input rows using ``expected_answer`` + prompt content
+as the join key.
 
 For each match: ``enriched = input_row | output_row`` -- input fields
 serve as defaults, output fields (response, reward, etc.) take
@@ -38,7 +39,6 @@ import hashlib
 import json
 import sys
 import uuid as uuid_mod
-from collections import defaultdict
 
 from nvflow.utils import setup_logger
 
@@ -66,19 +66,30 @@ def _deterministic_uuid(row: dict, index: int) -> str:
     return str(uuid_mod.UUID(hashlib.md5(key.encode()).hexdigest()))
 
 
-def _ensure_uuids(inputs: list[dict]) -> int:
-    """Add in-memory uuid to any input row missing one.  Returns count generated.
+def _ensure_uuids(inputs: list[dict], input_file: str | None = None) -> int:
+    """Add uuid to any input row missing one.  Returns count generated.
 
     UUIDs are deterministic (derived from expected_answer + problem + row index)
     so that concurrent merge jobs across seeds produce the same UUID for the
     same question.  The row index guarantees uniqueness even when content
-    fields are duplicated.  The input file is NOT rewritten.
+    fields are duplicated.
+
+    When *input_file* is provided and UUIDs were generated, the input file
+    is rewritten so that downstream steps (e.g. filter) can join on uuid.
+    Because UUIDs are deterministic, concurrent seeds writing the same file
+    produce identical content -- safe even under race conditions.
     """
     generated = 0
     for i, row in enumerate(inputs):
         if "uuid" not in row:
             row["uuid"] = _deterministic_uuid(row, i)
             generated += 1
+
+    if generated and input_file:
+        with open(input_file, "w") as f:
+            for row in inputs:
+                f.write(json.dumps(row) + "\n")
+
     return generated
 
 
@@ -93,42 +104,35 @@ def enrich(input_file: str, rollouts_file: str) -> None:
         logger.warning("No rollouts to enrich.")
         return
 
-    # Ensure every input row has a uuid (in-memory only).
-    num_generated = _ensure_uuids(inputs)
+    num_generated = _ensure_uuids(inputs, input_file=input_file)
     if num_generated:
-        logger.info("Generated in-memory UUIDs for %d/%d input rows", num_generated, len(inputs))
+        logger.info(
+            "Generated UUIDs for %d/%d input rows (written back to %s)",
+            num_generated,
+            len(inputs),
+            input_file,
+        )
 
-    # Fast path: if the environment already passes through all input fields
-    # (e.g. extra="allow"), there's nothing to restore.  However, if we
-    # generated deterministic UUIDs above, we must still enrich so that the
-    # rollout output gets the correct (stable) UUID for cross-seed grouping.
     sample_input_keys = set(inputs[0].keys()) if inputs else set()
     sample_output_keys = set(rollouts[0].keys())
     missing_keys = sample_input_keys - sample_output_keys
-    if not missing_keys and not num_generated:
-        logger.info("All input fields already present in output -- nothing to enrich.")
-        return
 
-    # Build lookup: expected_answer -> list of input rows.
-    # Most datasets have unique expected_answer per question, but we handle
-    # duplicates by also matching on the prompt content.
-    by_answer: dict[str, list[dict]] = defaultdict(list)
+    def _match_key(row: dict) -> str:
+        return row.get("expected_answer", "") + "|" + _extract_prompt(row)
+
+    by_key: dict[str, dict] = {}
+    key_collisions = 0
     for row in inputs:
-        by_answer[row.get("expected_answer", "")].append(row)
+        k = _match_key(row)
+        if k in by_key:
+            key_collisions += 1
+        else:
+            by_key[k] = row
+    if key_collisions:
+        logger.warning("%d input rows share the same (expected_answer, prompt) key", key_collisions)
 
     def _find_input(rollout: dict) -> dict | None:
-        ea = rollout.get("expected_answer", "")
-        candidates = by_answer.get(ea, [])
-        if len(candidates) == 1:
-            return candidates[0]
-        if not candidates:
-            return None
-        # Disambiguate by prompt content.
-        prompt = _extract_prompt(rollout)
-        for c in candidates:
-            if c.get("question", "") and prompt and c["question"] in prompt:
-                return c
-        return candidates[0]
+        return by_key.get(_match_key(rollout))
 
     matched = 0
     unmatched = 0
@@ -136,8 +140,8 @@ def enrich(input_file: str, rollouts_file: str) -> None:
         for rollout in rollouts:
             match = _find_input(rollout)
             if match:
-                merged = match | rollout
-                if num_generated and "uuid" in match:
+                merged = {**match, **rollout}
+                if "uuid" in match:
                     merged["uuid"] = match["uuid"]
                 matched += 1
             else:

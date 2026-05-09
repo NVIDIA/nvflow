@@ -57,15 +57,18 @@ benchmarks:
     seeds: 5
   financebench:
     seeds: 5
-  finance_agent:
-    seeds: 5
-    judge: *judge_finance_strict
-    installation_command: "pip install -q --ignore-requires-python --force-reinstall model-library==0.1.8 && pip install -q func-timeout 'backoff>=2.2.1' 'tavily==1.1.0' 'compute-eval @ git+https://github.com/NVIDIA/compute-eval.git@2d14770'"
-    extra_args: >-
-      ++max_turns=50
-      ++inference.tokens_to_generate=32000
-      ++inference.temperature=0.0
-      ++max_concurrent_requests=1
+  # finance_agent: disabled until multi-turn tool-calling eval is fully validated.
+  # Re-enable when ready by uncommenting below:
+  # finance_agent:
+  #   seeds: 5
+  #   judge: *judge_finance_strict
+  #   installation_command: "pip install -q --ignore-requires-python --force-reinstall model-library==0.1.8 && pip install -q func-timeout 'backoff>=2.2.1' 'tavily==1.1.0' 'compute-eval @ git+https://github.com/NVIDIA/compute-eval.git@2d14770'"
+  #   extra_args: >-
+  #     ++max_turns=50
+  #     ++inference.tokens_to_generate=32000
+  #     ++inference.temperature=0.0
+  #     ++max_concurrent_requests=1
+  finance_agent: null
 
 # ============================================================================
 # Shared Settings
@@ -73,10 +76,8 @@ benchmarks:
 
 datasets_dir: /workspace/nvflow/recipes/finance/datasets
 
-conversion:
-  num_gpus: 8
-  # Workaround for nemo-rl 0.7.1 bug - remove when container is updated
-  installation_command: "sed -i 's/hf_overrides=hf_overrides,//' /nemo_run/code/nemo_skills/training/nemo_rl/convert_megatron_to_hf.py"
+# num_gpus defaults to cluster's gpus_per_node at runtime (portable across clusters)
+conversion: {}
 
 # ============================================================================
 # Prepare Data Stage (used by baselines.yaml and shared reference)
@@ -84,5 +85,7 @@ conversion:
 
 stages:
   prepare_data:
-    dataset_names: [secque, financebench, finance_agent]
+    # finance_agent dataset prep disabled (benchmark disabled above).
+    # Re-add finance_agent to this list when the benchmark is re-enabled.
+    dataset_names: [secque, financebench]
     output_dir: /workspace/nvflow/recipes/finance/datasets

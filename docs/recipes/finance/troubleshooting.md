@@ -164,9 +164,9 @@ rm -rf /workspace/outputs/old_runs/
 # Check available GPUs
 sinfo -p your_partition
 
-# Adjust num_nodes in config
-# Example: Use 16 GPUs instead of 32
-num_nodes: 2  # 16 GPUs (2 nodes × 8 GPUs)
+# Adjust total_gpus in config
+# Example: Use 16 GPUs instead of 256
+total_gpus: 16
 ```
 
 ---
@@ -218,13 +218,13 @@ sec_identity_company: "Your Company Name"
 **Solutions:**
 ```bash
 # Validate JSONL format
-python -c "import jsonlines; list(jsonlines.open('file.jsonl'))"
+uv run python -c "import jsonlines; list(jsonlines.open('file.jsonl'))"
 
 # Check for empty files
 wc -l output.jsonl
 
 # Inspect sample records
-head -1 output.jsonl | python -m json.tool
+head -1 output.jsonl | uv run python -m json.tool
 ```
 
 ---
@@ -259,7 +259,7 @@ Check for training logs in any file of the form `ray-<jobid>-job.log` in the out
 wc -l outputs/finance/sap-500/workflow-4-sft/qwen3_14b/step-2-train-validation-split/train.jsonl
 
 # Inspect sample
-head -1 outputs/finance/sap-500/workflow-4-sft/qwen3_14b/step-2-train-validation-split/train.jsonl | python -m json.tool
+head -1 outputs/finance/sap-500/workflow-4-sft/qwen3_14b/step-2-train-validation-split/train.jsonl | uv run python -m json.tool
 ```
 
 **Adjust hyperparameters:**

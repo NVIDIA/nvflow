@@ -13,7 +13,7 @@ Key features:
 - **Reusability and reproducibility** with a structured, stage-based architecture
 - **Flexible execution** via CLI (`nflow`), Python scripts, or programmatic API
 - **Cluster integration** with native Slurm support
-- **Built on NeMo** leveraging NeMo-Skills and NeMo-RL infrastructure. Data Designer and NeMo-Gym are coming soon.
+- **Built on NeMo** leveraging NeMo-Skills, NeMo-RL, and NeMo-Gym infrastructure
 
 Example use case: The finance recipe demonstrates a complete pipeline: download SEC filings → generate synthetic Q&A data → fine-tune models → evaluate performance, producing 300K+ synthetic Q&A pairs.
 
@@ -85,17 +85,12 @@ pipeline_stages:
 ## 📋 Prerequisites
 
 - **Git** - to clone the repository
-- **uv 0.9.22** - Python package manager ([docs](https://docs.astral.sh/uv/))
+- **uv** - Python package manager ([docs](https://docs.astral.sh/uv/))
 
 ```bash
-# Install uv 0.9.22 (REQUIRED - newer versions have breaking TOML parsing changes)
-pip install uv==0.9.22
-
-# Verify installation
-uv --version  # Should show: uv 0.9.22
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
 ```
-
-> **⚠️ Important:** uv version 0.9.22 is required. Newer versions (0.9.29+) have stricter TOML parsing that's incompatible with upstream dependency (nemo-run) syntax. This is a temporary requirement until nemo-run fixes their `pyproject.toml`.
 
 ## 📦 Installation
 
@@ -255,9 +250,9 @@ Simple demonstration recipe for learning the framework:
 End-to-end pipeline for generating synthetic financial Q&A data from SEC filings and training financial reasoning models.
 
 **Quick Links:**
-- [Quick Start (~1.5 hour demo)](docs/recipes/finance/quick-start.md) - Get started quickly with 7 companies
+- [Quick Start (~3 hour demo)](docs/recipes/finance/quick-start.md) - Get started quickly with 7 companies
 - [Workflow Guides](docs/recipes/finance/workflows/) - Detailed guides for all 6 workflows
-- [Stage Reference](docs/recipes/finance/stages/) - Technical specifications for 27 stages
+- [Stage Reference](docs/recipes/finance/stages/) - Technical specifications for 42 stages
 
 **Pipeline:**
 ```
@@ -265,7 +260,7 @@ download-sec → template-sdg / document-sdg → sft → eval → grpo
 ```
 
 **Features:**
-- 27 stages across 6 workflows
+- 42 stages across 6 workflows
 - Two SDG approaches (template-based & document-grounded)
 - Multiple model support (GPT-OSS-120B, Qwen3, Nemotron)
 - Produces 80K+ synthetic Q&A pairs
@@ -276,8 +271,8 @@ download-sec → template-sdg / document-sdg → sft → eval → grpo
 ```bash
 nflow list-stages                           # List all stages (hierarchical)
 nflow list-stages --recipe finance          # Filter by recipe
-nflow list-stages --recipe finance --workflow training_sft  # Filter by workflow
-nflow stage-info STAGE_PATH                 # Stage details (e.g., finance.training_sft.sft)
+nflow list-stages --recipe finance --workflow sft  # Filter by workflow
+nflow stage-info STAGE_PATH                 # Stage details (e.g., finance.sft.sft)
 nflow stage-info STAGE --recipe R --workflow W  # Or with flags
 nflow validate --config FILE                # Validate config
 nflow run STAGE --config FILE               # Run specific stage (short name)
@@ -311,4 +306,4 @@ Apache-2.0
 
 Built on:
 - [NeMo-Skills](https://github.com/NVIDIA/NeMo-Skills)
-- [NeMo-RL](https://github.com/NVIDIA/NeMo-RL)
+- [NeMo-RL](https://github.com/NVIDIA-NeMo/RL)
