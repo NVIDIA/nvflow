@@ -5,6 +5,7 @@ Comprehensive troubleshooting guide for common issues across all finance recipe 
 ## Quick Navigation
 
 - [Cluster & Infrastructure](#cluster--infrastructure)
+- [Offline Runtime](#self-sufficient-runtime)
 - [Resource Issues](#resource-issues)
 - [Data Issues](#data-issues)
 - [Training Issues](#training-issues)
@@ -95,6 +96,88 @@ scontrol show config | grep SLURM_VERSION
 - If Ray cluster hangs during initialization, apply this fix
 - The fix changes how containers are executed (uses `enroot exec` instead of `--container-name`)
 - Test on your cluster - symptom is Ray cluster initialization hang
+
+---
+
+## Offline Runtime
+
+The default NVFlow images (`nvflow-nemo-rl`, `nvflow-nemo-skills`, `nvflow-vllm`, `nvflow-vllm-grpo`) are built to run with **no outbound network access** at job time. Most "weird" runtime errors on a freshly-deployed cluster trace back to a missing offline asset, a stale overlay mount, or an env var that was cleared.
+
+For the full build / deploy / verify flow, see [INSTALL.md](../../../INSTALL.md) and [`dockerfiles/docker_instructions.md`](../../../dockerfiles/docker_instructions.md).
+
+### GRPO `installation_command` fails with `No such file or directory`
+
+**Problem:** A GRPO stage (`prepare_data`, `collect_rollouts`, `compute_rewards`, or `training`) fails immediately after `source /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate` with:
+
+```
+bash: /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate: No such file or directory
+```
+
+**Cause:** You bind-mounted a host clone of NeMo-RL or NeMo-Gym at `/opt/NeMo-RL` (or `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym`), which shadows the baked `.venv` inside the `nvflow-nemo-rl` image.
+
+**Solution:** Remove the overlay mounts from `cluster_configs/my_cluster.yaml`. The self-sufficient image already contains everything GRPO needs:
+
+```yaml
+mounts:
+  # COMMENT THESE OUT (or delete) for normal production runs:
+  # - <PATH_TO_NEMO_RL_CLONE>:/opt/NeMo-RL
+  # - <PATH_TO_GYM_CLONE>:/opt/NeMo-RL/3rdparty/Gym-workspace/Gym
+```
+
+See [INSTALL.md → Setup NeMo-RL & NeMo-Gym Sources](../../../INSTALL.md#setup-nemo-rl--nemo-gym-sources-for-grpo) for when (rarely) the overlay is correct.
+
+### `huggingface_hub.errors.OfflineModeIsEnabled` / `LocalEntryNotFoundError`
+
+**Problem:** A stage fails trying to pull a model or dataset from HuggingFace Hub.
+
+**Cause:** Air-gap mode is on (`HF_HUB_OFFLINE=1`, etc.) but the asset isn't pre-staged on disk.
+
+**Solution:**
+- **Models:** Pre-download to your mounted `hf_models` directory with `hf download` -- see [INSTALL.md → Download Models](../../../INSTALL.md#download-models).
+- **Datasets / SEC filings:** Some stages (`download_sec_filings`, `create_seed_data`, eval `prepare_data`, GRPO `prepare_data` with `should_download: true`) need internet on first run. Run them on a connected node with the three `HF_*_OFFLINE` flags **temporarily commented out** in `my_cluster.yaml`; keep `UV_OFFLINE=true` set. The artifacts persist under `/workspace` and are reused by every subsequent run.
+
+### `uv` errors with "package not installed" or tries to resolve from PyPI
+
+**Problem:** A Ray worker or stage script fails because `uv` is trying to download a package.
+
+**Cause (usual):** Someone enabled `NRL_FORCE_REBUILD_VENVS=true` in offline mode. That flag forces Ray workers to re-resolve packages via `uv`, which requires internet.
+
+**Solution:** Comment out `NRL_FORCE_REBUILD_VENVS` in `my_cluster.yaml`. It's only safe to enable on a connected node when you've bind-mounted a host NeMo-RL source overlay and changed the source tree -- see [`docs/cluster-configuration.md`](../../cluster-configuration.md#nemo-rl--grpo-variables-dev-mode-only).
+
+**Cause (rare):** A baked venv is genuinely missing a dependency. Rebuild the image with the missing package added to the Dockerfile and re-run the sanity checks from [`dockerfiles/docker_instructions.md` §2](../../../dockerfiles/docker_instructions.md#2-sanity-checks-blockers).
+
+### `tiktoken` / `openai_harmony` fails to load offline
+
+**Problem:** An SDG, eval, or GRPO stage crashes with `tiktoken` / `openai_harmony` trying to fetch encoding files from `openaipublic.blob.core.windows.net`.
+
+**Cause:** The pre-cached encodings env vars are not set inside the container. `vllm` / `vllm-grpo` set them via image `ENV`, but `nemo-skills` and `nemo-rl` rely on the cluster config.
+
+**Solution:** Confirm `cluster_configs/my_cluster.yaml` has all three set:
+
+```yaml
+env_vars:
+  - TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
+  - TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
+  - TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
+```
+
+Verify the cache exists inside the image:
+```bash
+docker run --rm nvflow-nemo-skills:0229040 ls /opt/tiktoken_cache
+# Expect: cl100k_base.tiktoken (and o200k_base.tiktoken in vllm images)
+```
+
+### `pyarrow` / `pandas` blow up with `ArrowInvalid: timezone "UTC" not found`
+
+**Problem:** SEC data prep fails on first record with a timezone-related error.
+
+**Cause:** `tzdata` is not populated in the image.
+
+**Solution:** Already fixed in `Dockerfile.nemo-skills` (apt `tzdata`). If you see this in a custom-built image, confirm `tzdata` is installed:
+```bash
+docker run --rm nvflow-nemo-skills:0229040 bash -c \
+  'python3 -c "import pyarrow as pa; pa.array([], type=pa.timestamp(\"ns\", tz=\"UTC\")); print(\"OK\")"'
+```
 
 ---
 

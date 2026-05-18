@@ -188,6 +188,27 @@ def get_hf_output_paths(run_path: str | Path, step: int) -> tuple[Path, Path]:
     return hf_model_path, convert_log_dir
 
 
+MEGATRON_VENV_PYTHON = (
+    "/opt/ray_venvs/"
+    "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker"
+    "/bin/python"
+)
+
+# DTensor v1 Ray venv -- has the fsdp extra (torch.distributed.checkpoint).
+DTENSOR_V1_VENV_PYTHON = (
+    "/opt/ray_venvs/"
+    "nemo_rl.models.policy.workers.dtensor_policy_worker.DTensorPolicyWorker"
+    "/bin/python"
+)
+
+# DTensor v2 Ray venv -- has the automodel extra (nemo_automodel).
+DTENSOR_V2_VENV_PYTHON = (
+    "/opt/ray_venvs/"
+    "nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2"
+    "/bin/python"
+)
+
+
 def build_conversion_script(
     megatron_path: str | Path,
     hf_output_path: str | Path,
@@ -197,6 +218,9 @@ def build_conversion_script(
     Build a bash script that runs the conversion.
 
     The script invokes this module as a CLI tool on the cluster.
+    Uses the Megatron Ray venv Python because the megatron package
+    (including megatron.bridge) is only installed there, not in
+    /opt/nemo_rl_venv/.
 
     Args:
         megatron_path: Path to Megatron checkpoint
@@ -206,11 +230,14 @@ def build_conversion_script(
     Returns:
         Bash script as a string
     """
+    from nvflow.lib.runtime import ray_venv_python_preamble
+
+    megatron_preamble = ray_venv_python_preamble(MEGATRON_VENV_PYTHON, "mcore")
     script = f"""
 set -e
+{megatron_preamble}
 
-export UV_PROJECT=/opt/NeMo-RL
-uv run --extra mcore python -m nvflow.recipes.finance.utils.evaluation.checkpoint_converter \\
+$CONVERT_PYTHON -m nvflow.recipes.finance.utils.evaluation.checkpoint_converter \\
     --megatron-path "{megatron_path}" \\
     --hf-output-path "{hf_output_path}" \\
     --model-name "{model_name}"
@@ -226,8 +253,12 @@ def build_dcp_conversion_script(
     """Build a bash script that converts a DTensor checkpoint to HF format.
 
     Supports both checkpoint formats:
-    - **v1 (DCP)**: ``.metadata`` file → calls ``convert_dcp_to_hf.py``
-    - **v2 (safetensors)**: ``shard-*.safetensors`` files → calls ``offline_hf_consolidation.py``
+    - **v1 (DCP)**: ``.metadata`` → ``convert_dcp_to_hf.py`` in the DTensor v1 Ray venv.
+    - **v2 (safetensors)**: ``shard-*.safetensors`` → ``offline_hf_consolidation.py``
+      in the DTensor v2 Ray venv.
+
+    Each branch prefers the pre-built Ray venv if available, falling back
+    to ``uv run --extra`` in dev mode.
 
     The script runs ON THE CLUSTER. It resolves the run subdirectory under
     checkpoint_path (flat or GRPO layout), auto-detects the format, then
@@ -239,6 +270,8 @@ def build_dcp_conversion_script(
         step: Checkpoint step number
         hf_output_path: Where to write HF model (known at submit time)
     """
+    from nvflow.lib.runtime import ray_venv_python_preamble
+
     step_name = f"step_{step}"
     script = f"""
 set -euo pipefail
@@ -289,9 +322,8 @@ if ls "$MODEL_DIR"/shard-*.safetensors 1>/dev/null 2>&1; then
             --recreate-hf-metadata "$MODEL_DIR" "$STEP_DIR/config.yaml"
     fi
 
-    cd /opt/NeMo-RL
-    export UV_PROJECT=/opt/NeMo-RL
-    uv run --extra automodel python /opt/NeMo-RL/3rdparty/Automodel-workspace/Automodel/tools/offline_hf_consolidation.py \\
+    {ray_venv_python_preamble(DTENSOR_V2_VENV_PYTHON, "automodel")}
+    $CONVERT_PYTHON /opt/NeMo-RL/3rdparty/Automodel-workspace/Automodel/tools/offline_hf_consolidation.py \\
         --model-name unused \\
         --input-dir "$MODEL_DIR" \\
         --output-dir "$HF_OUTPUT"
@@ -302,8 +334,9 @@ else
     echo "Detected DTensor v1 (DCP) checkpoint"
     echo "Converting: $STEP_DIR -> $HF_OUTPUT"
 
+    {ray_venv_python_preamble(DTENSOR_V1_VENV_PYTHON, "fsdp")}
     cd /opt/NeMo-RL
-    uv run examples/converters/convert_dcp_to_hf.py \\
+    $CONVERT_PYTHON examples/converters/convert_dcp_to_hf.py \\
         --config="$STEP_DIR/config.yaml" \\
         --dcp-ckpt-path="$WEIGHTS_DIR" \\
         --hf-ckpt-path="$HF_OUTPUT"

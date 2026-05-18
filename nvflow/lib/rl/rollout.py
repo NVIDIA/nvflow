@@ -592,6 +592,7 @@ def _build_client_cmd(
         '    "+head_server.port=$HEAD_SERVER_PORT" \\\n'
         '    "+port_range_low=1024" \\\n'
         '    "+port_range_high=8999" \\\n'
+        '    "+skip_venv_if_present=true" \\\n'
         f"{judge_ng_run_overrides}"
         '    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &\n'
         "NG_RUN_PID=$!\n"
@@ -1060,14 +1061,9 @@ def _build_collection_jobs(
     chunk_job_specs: dict[int, list[dict]] = {}
     job_log_dir = f"{p.output_dir}/logs"
 
-    sbatch_kwargs = None
-    raw_args = cluster_config.get("extra_sbatch_args") or []
-    if raw_args:
-        sbatch_kwargs = {}
-        for arg in raw_args:
-            arg = arg.lstrip("-")
-            key, _, val = arg.partition("=")
-            sbatch_kwargs[key] = val if val else True
+    from nvflow.lib.sbatch import parse_extra_sbatch_args
+
+    sbatch_kwargs = parse_extra_sbatch_args(cluster_config) or None
 
     for seed, chunk_id in remaining:
         job_lbl = f"rs{seed}_chunk{chunk_id}"

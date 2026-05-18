@@ -123,9 +123,18 @@ pytest
 
 ## 🔧 Cluster Setup
 
-To run workflows on a Slurm cluster, you need to configure containers and cluster settings.
+To run workflows on a Slurm cluster you need to: (1) build the four NVFlow
+container images from the Dockerfiles in [`dockerfiles/`](dockerfiles/),
+(2) convert them to `.sqsh` for Slurm, and (3) write a cluster config
+(`cluster_configs/my_cluster.yaml`). The containers are self-sufficient —
+all dependencies are pre-installed, so no runtime downloads are needed.
 
-> **See [INSTALL.md](INSTALL.md)** for complete cluster setup (containers, cluster configuration, verification).
+> **See [INSTALL.md](INSTALL.md)** for the complete setup guide
+> (build, sanity-check, `.sqsh` conversion, model staging, cluster
+> configuration, and verification).
+>
+> **See [`dockerfiles/docker_instructions.md`](dockerfiles/docker_instructions.md)**
+> for the build / multi-arch / sanity-check reference.
 
 Once cluster setup is complete, set the config directory:
 

@@ -151,7 +151,9 @@ class GRPOStage(BaseStage):
         config_paths = [VLLM_MODEL_FOR_TRAINING]
         for env_cfg in environments.values():
             config_paths.extend(env_cfg.get("config_paths", []))
-        merged.setdefault("env", {}).setdefault("nemo_gym", {})["config_paths"] = config_paths
+        nemo_gym = merged.setdefault("env", {}).setdefault("nemo_gym", {})
+        nemo_gym["config_paths"] = config_paths
+        nemo_gym["skip_venv_if_present"] = True
 
         if config.get("training_datasets"):
             merged["data"]["train"] = config["training_datasets"]
@@ -582,12 +584,14 @@ class GRPOStage(BaseStage):
         ) or get_timeout_str(cluster_config, partition)
         hf_model = config.get("hf_checkpoint_path", config["model_name"])
 
+        from nvflow.lib.runtime import NRL_PYTHON_PREAMBLE
+
         cmd = (
+            f"{NRL_PYTHON_PREAMBLE} && "
             f"{config_snippet} && "
             f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/NeMo-RL && "
-            f"export UV_PROJECT=/opt/NeMo-RL && "
             f"echo 'Starting training' && "
-            f"uv run --active python /opt/NeMo-RL/examples/nemo_gym/run_grpo_nemo_gym.py "
+            f"$NRL_PYTHON /opt/NeMo-RL/examples/nemo_gym/run_grpo_nemo_gym.py "
             f"  --config {config_path}"
             f"  ++policy.model_name={hf_model}"
             f"  ++cluster.gpus_per_node={prepared.num_gpus}"

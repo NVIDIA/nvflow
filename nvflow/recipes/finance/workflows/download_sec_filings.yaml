@@ -26,12 +26,6 @@ stages:
     sec_identity_email: your.email@email.com  # UPDATE: Your email (required by SEC)
     sec_identity_company: YourCompany         # UPDATE: Your company name
     dependencies: []
-    stage_kwargs:
-      installation_command: >-
-        pip install -q --root-user-action=ignore
-        edgartools==5.20.2 sec-parser pandas pyarrow tqdm httpx tzdata &&
-        ln -sfn $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo
-        /usr/share/zoneinfo 2>/dev/null || true
 
   # Demo stage: 7 companies for quick testing
   demo:
@@ -40,12 +34,6 @@ stages:
     sec_identity_email: your.email@email.com  # UPDATE: Your email (required by SEC)
     sec_identity_company: YourCompany         # UPDATE: Your company name
     dependencies: []
-    stage_kwargs:
-      installation_command: >-
-        pip install -q --root-user-action=ignore
-        edgartools==5.20.2 sec-parser pandas pyarrow tqdm httpx tzdata &&
-        rm -rf /usr/share/zoneinfo &&
-        ln -s $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo /usr/share/zoneinfo
 
   # Production stage: Full S&P 500
   sap-500:
@@ -54,9 +42,3 @@ stages:
     sec_identity_email: your.email@email.com  # UPDATE: Your email (required by SEC)
     sec_identity_company: YourCompany         # UPDATE: Your company name
     dependencies: []
-    stage_kwargs:
-      installation_command: >-
-        pip install -q --root-user-action=ignore
-        edgartools==5.20.2 sec-parser pandas pyarrow tqdm httpx tzdata &&
-        rm -rf /usr/share/zoneinfo &&
-        ln -s $(python -c "import tzdata; print(tzdata.__path__[0])")/zoneinfo /usr/share/zoneinfo

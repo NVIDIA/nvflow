@@ -194,6 +194,10 @@ stages:
     # This provides pyproject.toml on all nodes for the Ray _env_builder,
     # and resolves the UV_PROJECT=/opt/NeMo-RL path used by training.py.
 
+    # All training deps are in the nemo-rl container
+    stage_kwargs:
+      installation_command: "true"
+
   # --------------------------------------------------------------------------
   # Stage 5: Evaluate Checkpoints on Finance Benchmarks
   # --------------------------------------------------------------------------

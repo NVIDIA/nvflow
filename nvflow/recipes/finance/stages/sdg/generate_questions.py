@@ -57,17 +57,16 @@ class GenerateQuestionsStage(BaseStage):
         console.detail("Inline args", str(inline_args))
         console.blank()
 
-        prepped_file = input_file.replace(".jsonl", "_prepped.jsonl")
+        output_dir = Path(output_file).parent
+        prepped_file = str(output_dir / (Path(input_file).stem + "_prepped.jsonl"))
         console.status(f"Prepped file: {prepped_file}")
 
-        output_dir = Path(output_file).parent
         generation_folder = output_dir / Path(input_file).stem
         prep_log_dir = str(generation_folder / "prep-logs")
 
         # Run prep command to generate company/year combinations
         run_cmd(
             ctx=wrap_arguments(
-                f"pip install -q --root-user-action=ignore jsonlines && "
                 f"python3 -m nvflow.recipes.finance.utils.sdg.prepare_question_gen_data "
                 f"--input_file {input_file} --company_info_file {company_info_file} "
                 f"--start_year {start_year} --end_year {end_year} --output_file {prepped_file}"

@@ -21,10 +21,16 @@
 #   Each environment has its own data pipeline and NeMo-Gym config.
 #   Use --environment <name> to run a single environment.
 #
-# NeMo-RL / NeMo-Gym versions (pinned for reproducibility):
-#   NeMo-RL main: e5a729cc438ea71bafa7138204f861196598a9b2
-#   NeMo-Gym feat/finance-sec-search-improvements: f24573bb157a1b4799591df1087d6db0b25e4e4c
-#   Mounted as overlay via my_cluster.yaml at /opt/NeMo-RL.
+# NeMo-RL / NeMo-Gym versions:
+#   Baked into the air-gapped `nvflow-nemo-rl` image (see dockerfiles/Dockerfile.nemo-rl):
+#     - Base: nvcr.io/nvidia/nemo-rl:v0.6.0
+#     - NeMo-Skills: 022904023ad7a83a87662a313cf72e7df5891d55 (`0229040`)
+#     - NeMo-Gym branch: ude/finance-sec-search-v2 (override via NEMO_GYM_BRANCH build arg)
+#     - Pre-built Gym .venv symlinked across all 6 components
+#   Do NOT bind-mount host clones at /opt/NeMo-RL or
+#   /opt/NeMo-RL/3rdparty/Gym-workspace/Gym in production -- the overlays
+#   shadow the baked .venv and break GRPO stages.  See INSTALL.md
+#   "Setup NeMo-RL & NeMo-Gym Sources (for GRPO)" for the dev-mode exception.
 # ============================================================================
 
 # Recipe identifier (defines which recipe this workflow belongs to)
@@ -36,8 +42,9 @@ workflow:
   type: "training"                               # Workflow category
   description: "GRPO RL training for financial reasoning with NeMo-Gym"
 
-# Cluster to run jobs on (references cluster_configs/<cluster>.yaml)
-# Uses my_cluster which mounts NeMo-RL + Gym overlays at /opt/NeMo-RL.
+# Cluster to run jobs on (references cluster_configs/<cluster>.yaml).
+# my_cluster.yaml selects the air-gapped `nvflow-nemo-rl` image, which already
+# contains NeMo-RL source + a pre-built Gym .venv -- no host overlays needed.
 cluster: my_cluster
 
 # Root directory for all finance pipeline outputs (shared across workflows).
@@ -379,15 +386,14 @@ stages:
     num_gpus: 1                         # nemo-rl container needs GPU node for nvidia-container-cli
     gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
 
-    # Sets up a NeMo-Gym venv in /tmp so writes stay container-local (not on
-    # the bind-mounted /opt/NeMo-RL).  SLURM_JOB_ID suffix guarantees
-    # uniqueness even if two jobs share a node.
+    # Activate NeMo-Gym venv: use pre-built if available, otherwise build via uv.
     # Anchored as &gym_install -- reused by prefetch_cache, collect_rollouts, and compute_rewards.
     installation_command: &gym_install >-
-      cd /opt/NeMo-RL/3rdparty/Gym-workspace/Gym
-      && uv venv /tmp/gym-venv-\${SLURM_JOB_ID} --python 3.12
-      && source /tmp/gym-venv-\${SLURM_JOB_ID}/bin/activate
-      && uv sync --active --extra dev
+      if [ -f /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate ]; then
+        source /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate;
+      else
+        cd /opt/NeMo-RL && uv sync --extra nemo_gym;
+      fi
 
   # --------------------------------------------------------------------------
   # Prefetch Cache (optional, CPU-only; no step-N -- writes to cache-finance-sec-search)
@@ -624,9 +630,8 @@ stages:
     wandb_project: finance-grpo
     wandb_mode: disabled             # online | offline | disabled
 
-    # Installs NeMo-Gym dependencies in the NeMo-RL container.
-    installation_command: >-
-      cd /opt/NeMo-RL && uv sync --extra nemo_gym
+    # NeMo-Gym dependencies are pre-installed in the container.
+    installation_command: "true"
 
     # Runtime environment customization
     # stage_kwargs:

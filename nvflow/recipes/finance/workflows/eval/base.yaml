@@ -76,8 +76,12 @@ benchmarks:
 
 datasets_dir: /workspace/nvflow/recipes/finance/datasets
 
+# All eval deps are in the nemo-skills container
+installation_command: "true"
+
 # num_gpus defaults to cluster's gpus_per_node at runtime (portable across clusters)
-conversion: {}
+conversion:
+  installation_command: "true"
 
 # ============================================================================
 # Prepare Data Stage (used by baselines.yaml and shared reference)
@@ -89,3 +93,5 @@ stages:
     # Re-add finance_agent to this list when the benchmark is re-enabled.
     dataset_names: [secque, financebench]
     output_dir: /workspace/nvflow/recipes/finance/datasets
+    stage_kwargs:
+      installation_command: "true"

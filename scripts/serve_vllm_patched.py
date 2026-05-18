@@ -191,8 +191,19 @@ _TIKTOKEN_FILES = {
 
 
 def _ensure_tiktoken_cache() -> None:  # WORKAROUND(harmony-aarch64)
-    """Download tiktoken vocab files if on aarch64 and set env vars."""
+    """Download tiktoken vocab files if on aarch64 and set env vars.
+
+    Skips the download when TIKTOKEN_CACHE_DIR or TIKTOKEN_RS_CACHE_DIR is
+    already set (e.g. pointing at files baked into the container), which is
+    required for airgap / offline environments.
+    """
     if platform.machine() not in ("aarch64", "arm64"):
+        return
+
+    existing = os.environ.get("TIKTOKEN_CACHE_DIR") or os.environ.get("TIKTOKEN_RS_CACHE_DIR")
+    if existing:
+        print(f"{_TAG} Tiktoken cache already configured ({existing}), skipping download.")
+        os.environ.setdefault("TIKTOKEN_ENCODINGS_BASE", existing)
         return
 
     cache_dir = Path("/tmp/tiktoken-encodings")

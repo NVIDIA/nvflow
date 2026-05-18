@@ -59,7 +59,10 @@ test:
     - uv venv --python 3.12
     - uv pip install -e ".[dev]" --no-deps
     - uv pip install pytest pytest-cov pytest-xdist pytest-timeout PyYAML omegaconf rich
-    - uv run pytest tests/ -v --tb=short
+    # --no-sync prevents `uv run` from implicitly auto-installing heavy core
+    # deps (nemo-skills etc) that we deliberately skipped above.  Without it,
+    # tests would pass here for the wrong reason and fail on GitHub CI.
+    - uv run --no-sync pytest tests/ -v --tb=short
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"

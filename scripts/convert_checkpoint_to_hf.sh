@@ -115,15 +115,16 @@ if [[ "$BACKEND" == "megatron" ]]; then
     CONVERT_CALL+="hf_output_path=\\\"${OUTPUT_DIR}\\\", "
     CONVERT_CALL+="model_name=\\\"${MODEL_NAME}\\\")"
 
-    FULL_CMD="export UV_PROJECT=/opt/NeMo-RL \
-        && export PYTHONPATH=\$PYTHONPATH:/nemo_run/code \
-        && uv run --extra mcore python -c \
+    # MegatronPolicyWorker Ray venv has the mcore extra; PYTHONPATH lets it find nvflow.
+    MCORE_VENV_PYTHON="/opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python"
+    FULL_CMD="export PYTHONPATH=\$PYTHONPATH:/nemo_run/code \
+        && ${MCORE_VENV_PYTHON} -c \
         \"from nvflow.recipes.finance.utils.evaluation.checkpoint_converter import convert_checkpoint; ${CONVERT_CALL}\""
 else
-    # DTensor/FSDP: NeMo-RL's converter + rsync tokenizer from checkpoint
-    FULL_CMD="export UV_PROJECT=/opt/NeMo-RL \
-        && cd /opt/NeMo-RL \
-        && uv run examples/converters/convert_dcp_to_hf.py \
+    # DTensor/FSDP: DTensorPolicyWorker Ray venv has the fsdp extra.
+    DTENSOR_V1_VENV_PYTHON="/opt/ray_venvs/nemo_rl.models.policy.workers.dtensor_policy_worker.DTensorPolicyWorker/bin/python"
+    FULL_CMD="cd /opt/NeMo-RL \
+        && ${DTENSOR_V1_VENV_PYTHON} examples/converters/convert_dcp_to_hf.py \
             --config=\"${STEP_PATH}/config.yaml\" \
             --dcp-ckpt-path=\"${STEP_PATH}/policy/weights\" \
             --hf-ckpt-path=\"${OUTPUT_DIR}\" \

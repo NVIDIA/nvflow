@@ -1,0 +1,131 @@
+# =============================================================================
+# NVFlow NeMo-RL Container
+# =============================================================================
+# Extends the NeMo-RL nightly container with NeMo-Skills and the NeMo-Gym
+# finance agent for NVFlow workflows.  The base image ships with frozen
+# environments and pre-built Ray venvs; this Dockerfile adds the NeMo-Skills
+# package, replaces the Gym submodule with a feature branch that includes the
+# finance-SEC-search resource server and finance agent, pre-builds all Gym
+# component venvs, and relocates paths for Slurm/enroot compatibility.
+#
+# Build:
+#   docker build -f dockerfiles/Dockerfile.nemo-rl -t nvflow-nemo-rl:latest .
+# =============================================================================
+
+ARG BASE_IMAGE=nvcr.io/nvidia/nemo-rl:v0.6.0
+FROM ${BASE_IMAGE}
+
+# --- Symlink for NeMo-Skills code that references /opt/NeMo-RL (wrong case) --
+RUN ln -sf /opt/nemo-rl /opt/NeMo-RL
+
+# --- Upgrade uv (nemo-gym may require newer features than what the nightly ships)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# --- Pre-cache Python interpreter for uv (air-gapped safety net) -------------
+# Gym's cli_setup_command runs `uv venv --python <version>`.  If
+# skip_venv_if_present ever misses, uv still needs a local interpreter.
+RUN /root/.local/bin/uv python install 3.12
+
+# --- Install NeMo-Skills into the frozen venv --------------------------------
+ARG NEMO_SKILLS_COMMIT=022904023ad7a83a87662a313cf72e7df5891d55
+RUN git clone https://github.com/NVIDIA-NeMo/Skills.git /opt/NeMo-Skills && \
+    cd /opt/NeMo-Skills && git checkout ${NEMO_SKILLS_COMMIT} && \
+    /root/.local/bin/uv pip install --python /opt/nemo_rl_venv/bin/python .
+
+# --- Replace NeMo-Gym submodule with feature branch -------------------------
+# The feature branch includes the finance-SEC-search resource server and
+# finance agent that are not yet on main.
+ARG NEMO_GYM_BRANCH=ude/finance-sec-search-v2
+RUN rm -rf /opt/nemo-rl/3rdparty/Gym-workspace/Gym && \
+    git clone --branch ${NEMO_GYM_BRANCH} \
+        https://github.com/NVIDIA-NeMo/Gym.git \
+        /opt/nemo-rl/3rdparty/Gym-workspace/Gym
+
+# --- Pre-build Gym venv ------------------------------------------------------
+WORKDIR /opt/nemo-rl/3rdparty/Gym-workspace/Gym
+RUN /root/.local/bin/uv venv .venv --python 3.12 && \
+    . .venv/bin/activate && \
+    /root/.local/bin/uv sync --active --extra dev
+
+# Install finance-specific dependencies into Gym venv
+# uvicorn>=0.37.0 is required for timeout_worker_healthcheck support;
+# uv sync resolves from the parent nemo-rl workspace lock (0.35.0) instead
+# of the Gym lock, so we force the correct version here.
+RUN . .venv/bin/activate && \
+    /root/.local/bin/uv pip install aiohttp beautifulsoup4 "tavily==1.1.0" tenacity "uvicorn>=0.37.0"
+
+# --- Symlink component venvs to the main Gym venv ---------------------------
+# Each NeMo-Gym component expects its own .venv/; symlinking avoids multi-GB
+# duplication and guarantees every component runs with the same packages.
+RUN for component in \
+      resources_servers/equivalence_llm_judge \
+      resources_servers/finance_sec_search \
+      responses_api_agents/simple_agent \
+      responses_api_agents/finance_agent \
+      responses_api_models/openai_model \
+      responses_api_models/vllm_model; do \
+        dir="/opt/nemo-rl/3rdparty/Gym-workspace/Gym/$component"; \
+        [ -d "$dir" ] && ln -sf /opt/nemo-rl/3rdparty/Gym-workspace/Gym/.venv "$dir/.venv"; \
+    done
+
+WORKDIR /
+
+# --- Install Gym into the NemoGym Ray venv ------------------------------------
+# The pre-built Ray venv from the base image is stale (built from the old Gym
+# submodule). Install the new Gym branch editable + all deps so the Ray actor
+# can import nemo_gym without missing modules (e.g. gprof2dot, pydot).
+RUN /root/.local/bin/uv pip install \
+      --python /opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym/bin/python \
+      -e /opt/nemo-rl/3rdparty/Gym-workspace/Gym
+
+# --- Align numpy across all Ray venvs to match the main venv ----------------
+# NeMo-Skills may upgrade numpy; mismatched versions cause pickle failures
+# when Ray serializes data between the main process and worker processes.
+RUN MAIN_NP=$(/opt/nemo_rl_venv/bin/python -c "import numpy; print(numpy.__version__)") && \
+    for venv in /opt/ray_venvs/*/; do \
+      "$venv/bin/pip" install --no-cache-dir "numpy==$MAIN_NP" 2>/dev/null || true; \
+    done
+
+# --- Relocate /root/.local/ → /opt/ -----------------------------------------
+# enroot/pyxis on Slurm mounts the user's home directory over /root at runtime,
+# which shadows everything uv installed there during the Docker build.
+# NOTE: Do NOT move /root/.cache/uv — base-image venvs symlink into it.
+RUN REAL_PYTHON=$(readlink /opt/nemo_rl_venv/bin/python) && \
+    mv /root/.local/share/uv/python /opt/uv-python && \
+    find /opt/uv-python -maxdepth 1 -type l | while read link; do \
+      target=$(readlink "$link") && \
+      new_target=$(echo "$target" | sed "s|/root/.local/share/uv/python|/opt/uv-python|") && \
+      ln -sf "$new_target" "$link"; \
+    done && \
+    NEW_PYTHON=$(echo "$REAL_PYTHON" | sed "s|/root/.local/share/uv/python|/opt/uv-python|") && \
+    ln -sf "$NEW_PYTHON" /opt/nemo_rl_venv/bin/python && \
+    sed -i "s|/root/.local/share/uv/python|/opt/uv-python|g" /opt/nemo_rl_venv/pyvenv.cfg && \
+    mv /root/.local/bin /opt/uv-bin
+
+# --- Fix pre-built Ray venvs (same /root/ relocation) -----------------------
+RUN for cfg in /opt/ray_venvs/*/pyvenv.cfg; do \
+      sed -i "s|/root/.local/share/uv/python|/opt/uv-python|g" "$cfg"; \
+    done && \
+    find /opt/ray_venvs/ -type l | while read link; do \
+      target=$(readlink "$link") && \
+      case "$target" in */root/.local/share/uv/python*) \
+        new_target=$(echo "$target" | sed "s|/root/.local/share/uv/python|/opt/uv-python|") && \
+        ln -sf "$new_target" "$link" ;; \
+      esac; \
+    done
+
+# --- Fix Gym venv (same /root/ relocation) ----------------------------------
+RUN GYM_VENV=/opt/nemo-rl/3rdparty/Gym-workspace/Gym/.venv && \
+    sed -i "s|/root/.local/share/uv/python|/opt/uv-python|g" "$GYM_VENV/pyvenv.cfg" && \
+    find "$GYM_VENV" -type l | while read link; do \
+      target=$(readlink "$link") && \
+      case "$target" in */root/.local/share/uv/python*) \
+        new_target=$(echo "$target" | sed "s|/root/.local/share/uv/python|/opt/uv-python|") && \
+        ln -sf "$new_target" "$link" ;; \
+      esac; \
+    done
+
+# --- Runtime environment -----------------------------------------------------
+ENV VIRTUAL_ENV=/opt/nemo_rl_venv
+ENV PATH=/opt/uv-bin:/opt/nemo_rl_venv/bin:$PATH
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python

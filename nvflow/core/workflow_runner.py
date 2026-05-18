@@ -244,6 +244,13 @@ class WorkflowRunner:
         # Validate that requested stages exist in config
         self._validate_stages(stages_to_run, all_stages)
 
+        # Ensure cluster-level extra_sbatch_args reach every Slurm submission.
+        # Installed lazily here (not at CLI startup) because importing
+        # nemo_skills.pipeline pulls in torch/transformers (~15s cold cache).
+        from nvflow.lib.sbatch import apply_sbatch_args_autopatch
+
+        apply_sbatch_args_autopatch()
+
         # Warn about sibling stages that are declared in pipeline_stages
         # but not currently registered (e.g., their import failed).
         self._preflight_pipeline_health(all_stages, stages_to_run)

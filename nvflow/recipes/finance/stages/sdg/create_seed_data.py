@@ -53,9 +53,6 @@ class CreateSeedDataStage(BaseStage):
         console.detail("Num seed questions", num_seed_questions)
         console.blank()
 
-        install_cmd = "pip install -q --root-user-action=ignore jsonlines datasets edgartools requests beautifulsoup4"
-
-        # Build command
         cmd = (
             f"python -m nvflow.recipes.finance.utils.sdg.create_seed_data "
             f"--output_file {output_file} "
@@ -79,7 +76,6 @@ class CreateSeedDataStage(BaseStage):
             log_dir=log_dir,
             expname=expname,
             run_after=run_after,
-            installation_command=install_cmd,
             **config.get("stage_kwargs", {}),
         )
 
