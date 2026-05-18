@@ -561,12 +561,14 @@ class SFTStage(BaseStage):
         timeout = get_timeout_str(cluster_config, partition)
         hf_model = config.get("hf_checkpoint_path", config["model_name"])
 
+        from nvflow.lib.runtime import NRL_PYTHON_PREAMBLE
+
         cmd = (
+            f"{NRL_PYTHON_PREAMBLE} && "
             f"{config_snippet} && "
             f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/NeMo-RL && "
-            f"export UV_PROJECT=/opt/NeMo-RL && "
             f"echo 'Starting training' && "
-            f"uv run --active python /opt/NeMo-RL/examples/run_sft.py "
+            f"$NRL_PYTHON /opt/NeMo-RL/examples/run_sft.py "
             f"  --config {config_path}"
             f"  ++policy.model_name={hf_model}"
             f"  ++cluster.gpus_per_node={prepared.num_gpus}"

@@ -1,0 +1,138 @@
+# =============================================================================
+# NVFlow NeMo-Skills Container
+# =============================================================================
+# Self-contained Dockerfile that builds the NeMo-Skills evaluation container
+# with all required packages pre-installed.
+#
+# Build:
+#   docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:latest .
+#
+# Upstream source:
+#   https://github.com/NVIDIA-NeMo/Skills/blob/main/dockerfiles/Dockerfile.nemo-skills
+# =============================================================================
+
+
+# Clone NeMo-Skills at a pinned commit (replaces build-context COPY commands)
+FROM scratch AS nemo-skills-src
+ARG NEMO_SKILLS_COMMIT=022904023ad7a83a87662a313cf72e7df5891d55
+ADD --keep-git-dir=true https://github.com/NVIDIA-NeMo/Skills.git#${NEMO_SKILLS_COMMIT} /
+
+
+# ===========================================================================
+# BEGIN UPSTREAM (adapted from NeMo-Skills Dockerfile.nemo-skills)
+# Source: https://github.com/NVIDIA-NeMo/Skills/blob/0229040/dockerfiles/Dockerfile.nemo-skills
+# Modifications:
+#   - COPY commands changed to COPY --from=nemo-skills-src
+#   - Added `tzdata` to apt packages (required by pyarrow/pandas; populates
+#     /usr/share/zoneinfo so libc tz lookups resolve, e.g. "UTC")
+# ===========================================================================
+
+FROM ubuntu:22.04
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    python3.10 \
+    python3-pip \
+    curl \
+    wget \
+    git \
+    git-lfs \
+    ffmpeg \
+    tzdata && \
+    ln -s /usr/bin/python3 /usr/bin/python && \
+    rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip setuptools uv
+
+RUN apt update && \
+    apt install -y software-properties-common && \
+    add-apt-repository -y ppa:apptainer/ppa && \
+    apt update && apt -y install apptainer && \
+    add-apt-repository -y ppa:apptainer/ppa && \
+    apt update && apt install -y apptainer-suid && \
+    rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
+
+RUN mkdir /opt/benchmarks
+RUN git clone https://github.com/google-research/google-research.git /opt/benchmarks/google-research --depth=1
+
+RUN git clone https://github.com/ShishirPatil/gorilla.git /opt/gorilla
+RUN cd /opt/gorilla && git checkout 86d0374d0db52623c5092a73f82c22b87b7e9a25
+RUN cd /opt/gorilla/berkeley-function-call-leaderboard && pip install --no-cache-dir -e . --extra-index-url https://download.pytorch.org/whl/cpu
+
+RUN apt remove -y python3-blinker
+
+ARG IFBENCH_COMMIT=c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c
+ARG IFBENCH_REPO=https://github.com/allenai/IFBench.git
+ARG IFBENCH_DIR=/opt/benchmarks/IFBench
+RUN git init "$IFBENCH_DIR" && cd "$IFBENCH_DIR" && git remote add origin "$IFBENCH_REPO" && \
+    git fetch --depth 1 origin "${IFBENCH_COMMIT}" && git reset --hard FETCH_HEAD
+RUN cd ${IFBENCH_DIR} && pip install -r requirements.txt
+
+COPY --from=nemo-skills-src /dockerfiles/ifbench.patch /opt/benchmarks/IFBench/ifbench.patch
+RUN cd /opt/benchmarks/IFBench && git apply ifbench.patch
+
+RUN pip install langdetect absl-py immutabledict nltk ipython && \
+    python -c "import nltk; from spacy.cli import download; nltk.download('punkt'); nltk.download('punkt_tab'); \
+    nltk.download('stopwords'); nltk.download('averaged_perceptron_tagger_eng'); download('en_core_web_sm')"
+
+RUN mkdir -p /opt/NeMo-Skills/requirements /opt/NeMo-Skills/core
+COPY --from=nemo-skills-src /pyproject.toml /opt/NeMo-Skills/pyproject.toml
+COPY --from=nemo-skills-src /README.md /opt/NeMo-Skills/README.md
+COPY --from=nemo-skills-src /requirements/ /opt/NeMo-Skills/requirements/
+COPY --from=nemo-skills-src /core/requirements.txt /opt/NeMo-Skills/core/requirements.txt
+RUN pip install git+https://github.com/NVIDIA/NeMo-speech-data-processor@29b9b1ec0ceaf3ffa441c1d01297371b3f8e11d2
+ARG CACHEBUST=4
+RUN echo "httpx>=0.28.1" > /tmp/overrides.txt && \
+    uv pip install --system --no-cache --override /tmp/overrides.txt \
+      -r /opt/NeMo-Skills/core/requirements.txt \
+      -r /opt/NeMo-Skills/requirements/pipeline.txt
+RUN pip install ddgs
+
+# ===========================================================================
+# END UPSTREAM
+# ===========================================================================
+
+
+# ===========================================================================
+# NVFlow Additional Packages
+# ===========================================================================
+# Pre-install packages used by NVFlow workflow steps so they are available
+# at runtime without needing to download anything.
+# ===========================================================================
+
+RUN pip install --no-cache-dir --ignore-requires-python \
+    jsonlines \
+    tiktoken \
+    markdownify \
+    "backoff>=2.2.1" \
+    func-timeout \
+    "tavily==1.1.0" \
+    "model-library==0.1.8" \
+    "compute-eval @ git+https://github.com/NVIDIA/compute-eval.git@2d14770"
+
+# Pre-cache tiktoken encodings so no downloads are needed at runtime.
+# cl100k_base is used by question_context_utils.py for token counting.
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
+RUN mkdir -p /opt/tiktoken_cache && \
+    python3 -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
+# SEC data-prep dependencies for workflow-2 (download_sec_filings) and
+# workflow-3 step-0 (create_seed_data). Baked in so the recipe-level
+# installation_command can stay empty -- no PyPI fetch at job-launch time.
+RUN pip install --no-cache-dir --ignore-requires-python \
+        edgartools==5.20.2 \
+        sec-parser \
+        pandas \
+        pyarrow \
+        tqdm \
+        httpx \
+        tzdata \
+        requests \
+        beautifulsoup4
+
+# Fail-fast smoke check so the image won't ship missing a needed dep.
+RUN python -c "from edgar import set_identity; \
+               import sec_parser, pandas, pyarrow, httpx, tzdata, requests; \
+               from bs4 import BeautifulSoup; \
+               from datasets import load_dataset; \
+               print('SEC-prep + create_seed_data deps OK')"

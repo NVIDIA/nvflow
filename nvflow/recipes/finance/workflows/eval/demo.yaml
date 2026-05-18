@@ -19,6 +19,21 @@ workflow:
 cluster: my_cluster
 base_output_dir: /workspace/outputs/finance/demo/workflow-1-baseline-eval
 
+# Local vLLM judge (overrides OpenAI default in base.yaml)
+judge:
+  model: /hf_models/openai/gpt-oss-120b
+  server_type: vllm
+  server_address: null
+  server_gpus: 2
+  server_nodes: 1
+  server_args: "--max-model-len 32768 --async-scheduling"
+  extra_args: >-
+    ++prompt_config=/workspace/nvflow/recipes/finance/prompts/sec_judge.yaml
+    ++inference.temperature=0.0
+    ++inference.tokens_to_generate=8192
+    ++generation_key=judgement
+    ++skip_extraction=True
+
 pipeline_stages:
   - prepare_data
   - qwen3-4b

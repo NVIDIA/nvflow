@@ -1,0 +1,56 @@
+# =============================================================================
+# NVFlow vLLM Container
+# =============================================================================
+# Self-contained Dockerfile that builds the vLLM inference container with
+# pre-cached tokenizer encodings.
+#
+# Build:
+#   docker build -f dockerfiles/Dockerfile.vllm -t nvflow-vllm:latest .
+#
+# Upstream source:
+#   https://github.com/NVIDIA-NeMo/Skills/blob/main/dockerfiles/Dockerfile.vllm
+# =============================================================================
+
+
+# ===========================================================================
+# BEGIN UPSTREAM (NeMo-Skills Dockerfile.vllm)
+# ===========================================================================
+
+ARG VLLM_VERSION=v0.18.1
+FROM vllm/vllm-openai:${VLLM_VERSION}
+
+RUN pip install "vllm[audio]"
+RUN pip install qwen-vl-utils
+RUN pip install ray
+
+# ===========================================================================
+# END UPSTREAM
+# ===========================================================================
+
+
+# ===========================================================================
+# NVFlow Additional Layers
+# ===========================================================================
+# Pre-cache tokenizer encodings so no downloads are needed at runtime.
+# ===========================================================================
+
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
+ENV TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
+ENV TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
+RUN mkdir -p /opt/tiktoken_cache
+
+# Download tiktoken encoding files explicitly with curl.
+# The Rust tiktoken-rs client inside openai_harmony fails to download under
+# QEMU arm64 emulation (docker buildx), so we fetch them reliably here and
+# point TIKTOKEN_ENCODINGS_BASE at the directory.  This also makes the image
+# fully air-gapped on both amd64 and arm64.
+RUN curl -fSL -o /opt/tiktoken_cache/o200k_base.tiktoken \
+      https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken && \
+    curl -fSL -o /opt/tiktoken_cache/cl100k_base.tiktoken \
+      https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken
+
+# Verify the harmony encoding loads from the pre-downloaded files
+RUN python3 -c "\
+from openai_harmony import load_harmony_encoding, HarmonyEncodingName; \
+load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS); \
+print('openai_harmony encoding loaded OK')"

@@ -144,6 +144,7 @@ def _build_verify_cmd(
         '    "+policy_model.responses_api_models.vllm_model.model=unused" \\\n'
         '    "+head_server.host=127.0.0.1" \\\n'
         '    "+head_server.port=$HEAD_SERVER_PORT" \\\n'
+        '    "+skip_venv_if_present=true" \\\n'
         f"{judge_ng_run_overrides}"
         '    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &\n'
         "NG_RUN_PID=$!\n"

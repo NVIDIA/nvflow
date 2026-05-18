@@ -124,6 +124,7 @@ stages:
   eval:
     eval_steps: [20]
     checkpoint_path: ${directories.step-8-training}/finance_sec_search/grpo-qwen3-4b-64g-tp2-cp8-seq128k
+    eval_output_dir: ${directories.step-9-eval}/finance_sec_search
     base_output_dir: ${model_output_dir}/finance_sec_search
     format: megatron
     base_model: ${hf_model_path}

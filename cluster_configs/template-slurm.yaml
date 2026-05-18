@@ -5,12 +5,12 @@
 #
 # Then update all <PLACEHOLDER> values with your settings.
 #
-# Container versions tested with this release:
-#   nemo-skills: NeMo-Skills @ 0229040
-#   vllm:        vllm/vllm-openai v0.18.1 (standalone SDG/eval)
-#   vllm-grpo:   vllm/vllm-openai v0.17.1 (standalone GRPO rollouts/judge)
+# Container versions tested with this release (self-sufficient, no runtime downloads):
+#   nemo-skills: nvflow-nemo-skills (NeMo-Skills @ 0229040)
+#   vllm:        nvflow-vllm (base vllm/vllm-openai v0.18.1, standalone SDG/eval)
+#   vllm-grpo:   nvflow-vllm-grpo (base vllm/vllm-openai v0.17.1, GRPO rollouts/judge)
 #   sglang:      lmsysorg/sglang v0.5.10.post1
-#   nemo-rl:     nvcr.io/nvidia/nemo-rl:v0.6.0 (includes vLLM 0.17.1 colocated)
+#   nemo-rl:     nvflow-nemo-rl (base nvcr.io/nvidia/nemo-rl:v0.6.0, pre-built venvs + Gym)
 #
 # Reference: https://github.com/NVIDIA/NeMo-Skills
 
@@ -79,12 +79,12 @@ extra_sandbox_args:
 # =============================================================================
 # After converting containers to .sqsh format (see INSTALL.md), paste paths here.
 containers:
-  # Required containers
-  nemo-skills: <PATH_TO_CONTAINERS>/nemo-skills.sqsh   # Orchestration client (eval, SDG, data prep)
-  vllm: <PATH_TO_CONTAINERS>/vllm.sqsh                 # vLLM v0.18.1 standalone (SDG, eval)
-  vllm-grpo: <PATH_TO_CONTAINERS>/vllm-grpo.sqsh       # vLLM v0.17.1 standalone (GRPO rollouts, judge)
-  sglang: <PATH_TO_CONTAINERS>/sglang.sqsh             # sglang inference server (SDG stages 3-5)
-  nemo-rl: <PATH_TO_CONTAINERS>/nemo-rl.sqsh           # NeMo-RL v0.6.0 for SFT and GRPO training
+  # Required containers (self-sufficient — all deps pre-installed, no runtime downloads)
+  nemo-skills: <PATH_TO_CONTAINERS>/nvflow-nemo-skills.sqsh    # Orchestration client (eval, SDG, data prep)
+  vllm: <PATH_TO_CONTAINERS>/nvflow-vllm.sqsh                  # vLLM v0.18.1 standalone (SDG, eval)
+  vllm-grpo: <PATH_TO_CONTAINERS>/nvflow-vllm-grpo.sqsh        # vLLM v0.17.1 standalone (GRPO rollouts, judge)
+  sglang: <PATH_TO_CONTAINERS>/sglang.sqsh                     # sglang inference server (SDG stages 3-5)
+  nemo-rl: <PATH_TO_CONTAINERS>/nvflow-nemo-rl.sqsh            # NeMo-RL v0.6.0 for SFT and GRPO training
   # Optional containers (not currently used by NVFlow recipes)
   # trtllm: <PATH_TO_CONTAINERS>/trtllm.sqsh
   # megatron: <PATH_TO_CONTAINERS>/megatron.sqsh
@@ -98,14 +98,16 @@ containers:
 mounts:
   - <CLUSTER_PATH_TO_HF_MODELS>:/hf_models   # HuggingFace models
   - <CLUSTER_PATH_TO_WORKSPACE>:/workspace   # Your workspace
-  # --- GRPO / RL Training (required for collect_rollouts and training stages) ---
-  # NeMo-RL source mount: overlays the container's built-in /opt/NeMo-RL.
-  - <PATH_TO_NEMO_RL_CLONE>:/opt/NeMo-RL
-  # Gym overlay: mount your NeMo-Gym clone inside the NeMo-RL source tree.
-  # Harmless for SFT/SDG/eval -- only accessed by GRPO stages.
-  - <PATH_TO_GYM_CLONE>:/opt/NeMo-RL/3rdparty/Gym-workspace/Gym
   # Add more mounts as needed:
   # - /lustre/data:/data
+  #
+  # --- NeMo-RL / NeMo-Gym source overlays (dev mode only) ---
+  # The nvflow-nemo-rl container includes NeMo-RL source and pre-built Gym
+  # venvs. Mounting host clones here shadows the container's venvs and
+  # breaks GRPO stages. Only uncomment for local source iteration with
+  # NRL_FORCE_REBUILD_VENVS=true enabled below.
+  # - <PATH_TO_NEMO_RL_CLONE>:/opt/NeMo-RL
+  # - <PATH_TO_GYM_CLONE>:/opt/NeMo-RL/3rdparty/Gym-workspace/Gym
 
 # =============================================================================
 # Timeouts (per partition)
@@ -131,10 +133,30 @@ env_vars:
   - TOKENIZERS_PARALLELISM=false  # Disable HF tokenizer Rayon threads (prevents vLLM RefCell race)
   - VIRTUAL_ENV=  # Unset to prevent host venv from interfering with container
   - VIRTUAL_ENV_PROMPT=  # Unset venv prompt
-  # Rebuild Ray venvs when NeMo-RL source mount changes (e.g., new branch/commit).
-  # Without this, workers reuse stale cached venvs and may fail with import errors.
-  # Safe to leave enabled — only rebuilds when the source tree actually changes.
+
+  # --- Offline enforcement (recommended) ---
+  # Prevents accidental network calls at runtime. Containers are self-sufficient.
+  # Clear HF_*_OFFLINE temporarily for one-time stages that download external
+  # data (download_sec_filings, create_seed_data). UV_OFFLINE should stay set.
+  - HF_HUB_OFFLINE=1
+  - HF_DATASETS_OFFLINE=1
+  - TRANSFORMERS_OFFLINE=1
+  - UV_OFFLINE=true
+
+  # Pre-cached tiktoken encodings (baked into vllm/vllm-grpo containers;
+  # set here for uniform coverage across all container types).
+  - TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
+  - TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
+  - TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
+
+  # Ray worker port range — avoids collisions with OS ephemeral ports.
+  - MIN_WORKER_PORT=7000
+  - MAX_WORKER_PORT=8000
+
+  # Only enable in dev mode when iterating on NeMo-RL/Gym source overlays.
+  # Forces Ray workers to rebuild venvs from mounted source (requires internet).
   # - NRL_FORCE_REBUILD_VENVS=true
+
   # API keys (keep these secret, don't commit to git!)
   # - HF_TOKEN=<YOUR_HF_TOKEN>
   # - WANDB_API_KEY=<YOUR_WANDB_KEY>

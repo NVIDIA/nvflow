@@ -253,22 +253,33 @@ mounts:
 | Root Lustre | `/lustre` | Access entire shared filesystem |
 | Dataset directory | `/data` | Training/evaluation datasets |
 
+### Do NOT bind-mount NeMo-RL / NeMo-Gym source over the image paths
+
+The self-sufficient `nvflow-nemo-rl` image (built from [`dockerfiles/Dockerfile.nemo-rl`](../dockerfiles/Dockerfile.nemo-rl)) already contains:
+
+- NeMo-RL source at `/opt/NeMo-RL` (and `/opt/nemo-rl` lowercase alias)
+- NeMo-Gym at `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym` (branch `ude/finance-sec-search-v2`)
+- A pre-built `.venv` symlinked across all 6 Gym components
+
+GRPO stages call `installation_command: source /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate`. Bind-mounting a host source tree at `/opt/NeMo-RL` or `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym` **shadows the baked `.venv`** and breaks `prepare_data`, `collect_rollouts`, `compute_rewards`, and `training` with `No such file or directory`.
+
+The overlay mounts in `template-slurm.yaml` are commented out for exactly this reason. Only uncomment them if you're deliberately iterating on NeMo-RL / Gym source against a host `.venv` you've built to be ABI-compatible with the image. In that dev-mode case you must also set `NRL_FORCE_REBUILD_VENVS=true` (see [Environment Variables](#environment-variables) below) -- which requires internet, so it can only be used on a connected node.
+
 ### Model-Specific Cluster Configs
 
-Some models require additional mounts not needed by others. Rather than cluttering a single config with conditional mounts, use separate cluster config files:
+Some models require additional cluster-level differences (e.g. different timeouts, partitions, or env vars). Rather than cluttering a single config with conditional logic, use separate cluster config files:
 
-| Cluster Config | Used By | Extra Mounts | Notes |
-|----------------|---------|-------------|-------|
-| `my_cluster.yaml` | Qwen3, Gemma3 (dense models) | None | Default for all standard models |
-| `my_cluster_nemotron.yaml` | Nemotron-3-Nano (MoE) | `/path/to/RL:/opt/NeMo-RL` | NeMo-RL overlay for MoE support |
+| Cluster Config | Used By | Notes |
+|----------------|---------|-------|
+| `my_cluster.yaml` | Qwen3, Gemma3 (dense models) | Default for all standard models |
+| `my_cluster_nemotron.yaml` | Nemotron-3-Nano (MoE) | Use only if Nemotron needs different mounts/env -- the self-sufficient `nvflow-nemo-rl` image now handles MoE without a host overlay |
 
 **How it works:**
 - `base.yaml` (SFT workflow) sets `cluster: my_cluster` as the default
-- `nemotron-3-nano.yaml` overrides with `cluster: my_cluster_nemotron`
-- Both configs are identical except for the NeMo-RL overlay mount
+- A model config can override with `cluster: my_cluster_nemotron`
 - Keep both configs in sync when making infrastructure changes
 
-> **Tip:** The NeMo-RL overlay mount is temporary. Once MoE support is merged into the main NeMo-RL branch, `my_cluster_nemotron.yaml` can be retired. See the [SFT Workflow Guide](recipes/finance/workflows/04-sft.md#nemotron-3-nano-special-requirements) for details.
+> **Note:** Previous versions of this guide recommended a NeMo-RL host overlay (`/path/to/RL:/opt/NeMo-RL`) for Nemotron-3-Nano MoE support. With the self-sufficient `nvflow-nemo-rl` image that overlay is no longer required and would shadow the baked `.venv`. See the [SFT Workflow Guide](recipes/finance/workflows/04-sft.md) for the current setup.
 
 ---
 
@@ -330,7 +341,15 @@ env_vars:
   - TOKENIZERS_PARALLELISM=false
   - VIRTUAL_ENV=
   - VIRTUAL_ENV_PROMPT=
-  # NeMo-RL / GRPO (uncomment as needed)
+  # --- Air-gap enforcement (recommended; on by default in template-slurm.yaml) ---
+  - HF_HUB_OFFLINE=1
+  - HF_DATASETS_OFFLINE=1
+  - TRANSFORMERS_OFFLINE=1
+  - UV_OFFLINE=true
+  - TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
+  - TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
+  - TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
+  # NeMo-RL / GRPO dev-mode only (do NOT enable in self-sufficient mode)
   # - NRL_FORCE_REBUILD_VENVS=true
   # API keys (keep secret, don't commit to git!)
   - HF_TOKEN=hf_...
@@ -349,11 +368,27 @@ env_vars:
 | `VIRTUAL_ENV` | *(empty)* | Unset to prevent host virtualenv from leaking into containers |
 | `VIRTUAL_ENV_PROMPT` | *(empty)* | Unset to prevent host venv prompt from leaking into containers |
 
-#### NeMo-RL / GRPO Variables
+#### Air-Gap Enforcement Variables
+
+These variables prevent the runtime from making outbound network calls and from missing baked-in tokenizer encodings. `template-slurm.yaml` ships them pre-populated; leave them set in normal production.
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `NRL_FORCE_REBUILD_VENVS` | `true` | Forces Ray workers to rebuild their virtual environments from the mounted NeMo-RL source tree instead of reusing cached venvs. **Enable this** when you update the NeMo-RL or Gym overlay mount (new branch, new commit). Without it, workers may use stale cached venvs with outdated code, causing import errors or silent behavior differences. Safe to leave enabled — only triggers a rebuild when the source tree actually changes |
+| `HF_HUB_OFFLINE` | `1` | Disables HuggingFace Hub network access (model + tokenizer downloads) |
+| `HF_DATASETS_OFFLINE` | `1` | Disables `datasets` network access |
+| `TRANSFORMERS_OFFLINE` | `1` | Disables `transformers` network access. `huggingface_hub` treats this as equivalent to `HF_HUB_OFFLINE=1` |
+| `UV_OFFLINE` | `true` | Prevents `uv` from resolving / downloading packages or Python interpreters at runtime. Keep this set **always** -- containers ship with frozen venvs |
+| `TIKTOKEN_CACHE_DIR` | `/opt/tiktoken_cache` | Points `tiktoken` at the cache baked into the images |
+| `TIKTOKEN_RS_CACHE_DIR` | `/opt/tiktoken_cache` | Points the Rust `tiktoken-rs` client at the cache (used by `openai_harmony`) |
+| `TIKTOKEN_ENCODINGS_BASE` | `/opt/tiktoken_cache` | Required for `openai_harmony` to load `HARMONY_GPT_OSS` offline |
+
+> **One-time connected-node stages:** A few stages (`download_sec_filings`, `create_seed_data`, eval `prepare_data`, GRPO `prepare_data` with `should_download: true`) need internet on first run to pull benchmark/seed datasets. For those submissions, **temporarily comment out** `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, and `TRANSFORMERS_OFFLINE`. Keep `UV_OFFLINE=true` set in all cases. See [INSTALL.md → One-Time Connected-Node Stages](../INSTALL.md#one-time-connected-node-stages-datasets).
+
+#### NeMo-RL / GRPO Variables (Dev Mode Only)
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `NRL_FORCE_REBUILD_VENVS` | `true` | **Dev mode only.** Forces Ray workers to rebuild their virtual environments from the mounted NeMo-RL source tree instead of reusing cached venvs. Requires internet (uses `uv` to resolve packages) -- **do not enable in self-sufficient production**. Only relevant when you've bind-mounted a host NeMo-RL / Gym source clone over `/opt/NeMo-RL` and want Ray workers to pick up the new source |
 
 #### API Keys (Secrets)
 

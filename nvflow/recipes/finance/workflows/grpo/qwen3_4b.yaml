@@ -57,8 +57,11 @@ _training_policy_32k: &training_policy_32k
     vllm_cfg:
       max_model_len: ${_env_seq_len_32k}
   sequence_packing:
+    enabled: true
     train_mb_tokens: ${_env_seq_len_32k}
     logprob_mb_tokens: ${_env_seq_len_32k}
+  logprob_chunk_size: 2048
+  make_sequence_length_divisible_by: 16
 
 environments:
   equivalence_llm_judge:
@@ -181,6 +184,7 @@ stages:
   eval:
     eval_steps: [20]
     checkpoint_path: ${directories.step-8-training}/equivalence_llm_judge/grpo-qwen3-4b-16g-tp2-cp1-seq32k
+    eval_output_dir: ${directories.step-9-eval}/equivalence_llm_judge
     base_output_dir: ${model_output_dir}/equivalence_llm_judge
     format: fsdp  # Triggers DCP/safetensors → HF conversion (auto-detects v1/v2)
     base_model: ${hf_model_path}

@@ -21,7 +21,6 @@ filings_dir: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-down
 # Demo Stage Overrides - Only override what's different from prod
 # ============================================================================
 stages:
-
   # --------------------------------------------------------------------------
   # Stage 0: Create Seed Data - Filter to 7 companies and 30 questions for demo
   # --------------------------------------------------------------------------

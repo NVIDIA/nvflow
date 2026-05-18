@@ -10,32 +10,46 @@
 #   # Edit my_containers.yaml with your registry paths
 #   sbatch --account=<acct> scripts/setup_containers.sh --config cluster_configs/my_containers.yaml ./containers
 #
+# Naming:
+#   YAML KEYS (nemo-skills, nemo-rl, vllm, vllm-grpo, sglang) match the
+#   short names the workflow code uses to look up containers -- do NOT rename
+#   them.  Only the values (registry/tag refs) change between deployments.
+#
 # Format:
-#   - Simple string: image reference (e.g., your-registry/nemo-skills:latest)
+#   - Simple string: image reference (e.g., your-registry/nvflow-nemo-skills:0229040)
 #   - Nested object: Platform-specific tags (amd64/arm64 keys)
+#
+# Self-sufficient containers (all deps pre-installed, no runtime downloads):
+#   nemo-rl     -> dockerfiles/Dockerfile.nemo-rl     (base: nvcr.io/nvidia/nemo-rl:v0.6.0)
+#   nemo-skills -> dockerfiles/Dockerfile.nemo-skills (base: ubuntu:22.04, NeMo-Skills @ 0229040)
+#   vllm        -> dockerfiles/Dockerfile.vllm        (base: vllm/vllm-openai:v0.18.1)
+#   vllm-grpo   -> dockerfiles/Dockerfile.vllm-grpo   (base: vllm/vllm-openai:v0.17.1)
+#   sglang      -> pulled as-is from Docker Hub (no custom Dockerfile)
 
 containers:
   # ---------------------------------------------------------------------------
-  # Required: Build from NeMo-Skills Dockerfiles (see INSTALL.md Step 1a)
+  # Required: Built locally from dockerfiles/, then pushed to your registry
+  # (see INSTALL.md Step 1 and Step 2).
   # ---------------------------------------------------------------------------
-  # Tested: NeMo-Skills @ 0229040
-  nemo-skills: <YOUR_REGISTRY>/nemo-skills:<TAG>
+  # Tested: nvflow-nemo-rl:v0.6.0 (extends nvcr.io/nvidia/nemo-rl:v0.6.0)
+  nemo-rl: <YOUR_REGISTRY>/nvflow-nemo-rl:v0.6.0
+
+  # Tested: nvflow-nemo-skills:0229040 (NeMo-Skills @ commit 0229040)
+  nemo-skills: <YOUR_REGISTRY>/nvflow-nemo-skills:0229040
+
+  # Tested: nvflow-vllm:v0.18.1 (extends vllm/vllm-openai:v0.18.1; pre-cached
+  # tiktoken + openai_harmony; multi-arch amd64 + arm64)
+  vllm: <YOUR_REGISTRY>/nvflow-vllm:v0.18.1
+
+  # Tested: nvflow-vllm-grpo:v0.17.1 (extends vllm/vllm-openai:v0.17.1; pinned
+  # to match NeMo-RL v0.6.0 colocated vLLM)
+  vllm-grpo: <YOUR_REGISTRY>/nvflow-vllm-grpo:v0.17.1
 
   # ---------------------------------------------------------------------------
-  # Required: Pull pre-built from Docker Hub / NGC (no build needed)
+  # Required: Pulled as-is from Docker Hub (no custom Dockerfile)
   # ---------------------------------------------------------------------------
-  # Tested: vllm/vllm-openai:v0.18.1 (standalone SDG/eval)
-  vllm: <YOUR_REGISTRY>/nemo-skills-vllm:<TAG>
-  # Tested: vllm/vllm-openai:v0.17.1 (standalone GRPO rollouts/judge)
-  vllm-grpo: vllm/vllm-openai:v0.17.1
   # Tested: lmsysorg/sglang:v0.5.10.post1
   sglang: lmsysorg/sglang:v0.5.10.post1
-
-  # ---------------------------------------------------------------------------
-  # Required: Pull from NGC (see INSTALL.md Step 1b)
-  # ---------------------------------------------------------------------------
-  # Tested: nvcr.io/nvidia/nemo-rl:v0.6.0
-  nemo-rl: nvcr.io/nvidia/nemo-rl:v0.6.0
 
   # ---------------------------------------------------------------------------
   # Optional: Not currently used by NVFlow recipes
