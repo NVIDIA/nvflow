@@ -192,7 +192,7 @@ agents:
       - name: train
         type: train
         license: "TBD"
-        jsonl_fpath: ${directories.step-3-train-validation-split}/train.jsonl
+        jsonl_fpath: ${directories.step-7-train-validation-split}/train.jsonl
 ```
 
 ### Outputs

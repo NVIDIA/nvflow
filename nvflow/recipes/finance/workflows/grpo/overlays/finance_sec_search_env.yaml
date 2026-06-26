@@ -10,6 +10,7 @@
 search_judge_model_base_url: "http://unused:0/v1"
 search_judge_model_api_key: "EMPTY"
 search_judge_model_name: "unused"
+tavily_api_key: ""  # airgap: tavily web_search disabled; placeholder only
 
 # Per-rollout wall-clock timeout. Tool calls after this budget return an error
 # asking the model to submit immediately. Prevents stragglers from blocking the batch.

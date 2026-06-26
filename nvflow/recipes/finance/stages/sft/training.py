@@ -648,6 +648,10 @@ class SFTStage(BaseStage):
                     num_gpus=prepared.num_gpus,
                     num_nodes=prepared.num_nodes,
                     cluster_config=cluster_config,
+                    # NeMo-RL training needs an in-allocation Ray cluster; on Slurm
+                    # with_ray=True is what sets use_with_ray_cluster (the GRPO stage
+                    # hardcodes this too). Gating on is_ray_backend() made it False on
+                    # Slurm and broke SFT-on-Slurm (no Ray cluster for run_sft.py).
                     with_ray=True,
                     sbatch_kwargs=sbatch_kwargs,
                     installation_command=stage_kwargs.get("installation_command"),

@@ -233,8 +233,12 @@ def determine_judge_mode(
 
     Reads from ``config.judge_vllm`` sub-config.
 
-    - ``base_url`` set → ``external_vllm`` (pre-launched vLLM server)
-    - ``model_path`` set (no base_url) → ``local_vllm`` (launch server in job)
+    - ``base_url`` set → ``external_vllm`` (pre-launched vLLM server). NOTE:
+      in this mode ``model_path`` is sent verbatim as the OpenAI request
+      ``model``, so it must equal the server's ``--served-model-name`` (e.g.
+      ``openai/gpt-oss-120b``), NOT a filesystem path.
+    - ``model_path`` set (no base_url) → ``local_vllm`` (launch server in job;
+      here ``model_path`` IS a filesystem path to load)
     - ``openai_base_url`` set → ``openai`` (OpenAI-compatible API)
     - None of the above → ``policy_as_judge`` (if allowed)
     """
@@ -331,7 +335,7 @@ def _build_overlay_setup_cmd(
     """
     overrides_json = json.dumps(hf_config_overrides, sort_keys=True)
     return (
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.create_overlay"
+        f"PYTHONPATH=${{PYTHONPATH:+$PYTHONPATH:}}{CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.create_overlay"
         f" --model-path {model_path}"
         f" --overlay-path {overlay_path}"
         f" --overrides '{overrides_json}'"

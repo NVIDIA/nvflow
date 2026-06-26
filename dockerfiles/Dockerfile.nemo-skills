@@ -12,19 +12,25 @@
 # =============================================================================
 
 
-# Clone NeMo-Skills at a pinned commit (replaces build-context COPY commands)
+# Clone NeMo-Skills at a pinned commit (replaces build-context COPY commands).
+# Pinned to 786d8c58 (PR #1479 HEAD — Ray Jobs backend: conditional
+# entrypoint_label_selector for Ray 2.54/2.55, plus the review fixes that keep
+# the Ray backend off the non-Ray code path).
 FROM scratch AS nemo-skills-src
-ARG NEMO_SKILLS_COMMIT=022904023ad7a83a87662a313cf72e7df5891d55
+ARG NEMO_SKILLS_COMMIT=786d8c589f7c18095459e566367546b4ba5a70f2
 ADD --keep-git-dir=true https://github.com/NVIDIA-NeMo/Skills.git#${NEMO_SKILLS_COMMIT} /
 
 
 # ===========================================================================
 # BEGIN UPSTREAM (adapted from NeMo-Skills Dockerfile.nemo-skills)
-# Source: https://github.com/NVIDIA-NeMo/Skills/blob/0229040/dockerfiles/Dockerfile.nemo-skills
+# Source: https://github.com/NVIDIA-NeMo/Skills/blob/9cd1e07/dockerfiles/Dockerfile.nemo-skills
 # Modifications:
 #   - COPY commands changed to COPY --from=nemo-skills-src
 #   - Added `tzdata` to apt packages (required by pyarrow/pandas; populates
 #     /usr/share/zoneinfo so libc tz lookups resolve, e.g. "UTC")
+#   - Bake the nemo_skills package itself (COPY nemo_skills/ + pip install --no-deps).
+#     Upstream omits it on purpose ("mounted from host"); the airgapped Ray
+#     Jobs API path has no host mount, so the image must be self-contained.
 # ===========================================================================
 
 FROM ubuntu:22.04
@@ -81,12 +87,27 @@ COPY --from=nemo-skills-src /README.md /opt/NeMo-Skills/README.md
 COPY --from=nemo-skills-src /requirements/ /opt/NeMo-Skills/requirements/
 COPY --from=nemo-skills-src /core/requirements.txt /opt/NeMo-Skills/core/requirements.txt
 RUN pip install git+https://github.com/NVIDIA/NeMo-speech-data-processor@29b9b1ec0ceaf3ffa441c1d01297371b3f8e11d2
-ARG CACHEBUST=4
-RUN echo "httpx>=0.28.1" > /tmp/overrides.txt && \
-    uv pip install --system --no-cache --override /tmp/overrides.txt \
-      -r /opt/NeMo-Skills/core/requirements.txt \
-      -r /opt/NeMo-Skills/requirements/pipeline.txt
+# Install from project dir so [tool.uv].override-dependencies in
+# pyproject.toml is honored (relaxes leptonai's httpx==0.27.2 pin so
+# litellm 1.83.x can install, and overrides torchx's urllib3<1.27
+# transitive pin so urllib3>=2.7.0 lands). Plain pip ignores [tool.uv].
+ARG CACHEBUST=5
+RUN cd /opt/NeMo-Skills && uv pip install --system --no-cache-dir \
+      -r core/requirements.txt -r requirements/pipeline.txt
 RUN pip install ddgs
+
+# --- NVFlow: bake the nemo_skills package itself (self-contained airgap image) ---
+# The COPYs above bring in only the manifests; upstream assumes nemo_skills/ is mounted
+# from the host at runtime ("we aren't copying main nemo_skills folder ..."). The
+# airgapped Ray Jobs API path has no host mount, so COPY the package source and
+# install it. --no-deps: deps were already resolved/installed above; tools/requirements.txt
+# is referenced by pyproject's optional-dependencies at metadata-build time.
+COPY --from=nemo-skills-src /nemo_skills/ /opt/NeMo-Skills/nemo_skills/
+COPY --from=nemo-skills-src /tools/requirements.txt /opt/NeMo-Skills/tools/requirements.txt
+RUN cd /opt/NeMo-Skills && uv pip install --system --no-cache --no-deps .
+
+# Fail-fast: don't ship without an importable nemo_skills + the Ray Jobs backend.
+RUN python -c "import nemo_skills, nemo_skills.pipeline.utils.ray_backend; print('nemo_skills baked OK:', nemo_skills.__file__)"
 
 # ===========================================================================
 # END UPSTREAM
@@ -129,6 +150,51 @@ RUN pip install --no-cache-dir --ignore-requires-python \
         tzdata \
         requests \
         beautifulsoup4
+
+# --- CVE: force lxml past nemo_skills transitive 5.x (GHSA-vfmq-68hx-4jfw) ---
+# urllib3 is already lifted to >=2.6.3 via NeMo-Skills pyproject [tool.uv]
+# override-dependencies (honored by the project-dir install above); lxml is not
+# listed there, so force it last (nothing downgrades it after this step).
+RUN uv pip install --system --no-cache "lxml>=6.1.0"
+
+# --- CVE: bump wandb to clear go-git/go-billy in the bundled wandb-core binary --
+# wandb's compiled wandb-core Go binary statically vendors go-git + go-billy;
+# <0.27.0 ships go-git 5.18.0 / go-billy 5.8.0 (GHSA-389r-gv7p-r3rp,
+# GHSA-qw64-3x98-g7q2). 0.27.2 ships the patched go-git 5.19.1 / go-billy 5.9.0.
+# All nemo-skills wandb imports are guarded (so it could be removed instead);
+# bumped to keep it usable. Placed last so nothing reinstalls an older wandb.
+RUN uv pip install --system --no-cache "wandb>=0.27.2"
+
+# --- CVE: release-gate findings from the 2026-06-22 prodsec scan -------------
+# litellm <1.84.0 -> CRITICAL GHSA-4xpc-pv4p-pm3w. Minor bump to the fixed release.
+RUN uv pip install --system --no-cache "litellm>=1.84.0"
+# libssl3 <3.0.2-0ubuntu1.25 -> HIGH CVE-2026-45447 (base ubuntu:22.04 dpkg pkg).
+RUN apt-get update && apt-get install -y --only-upgrade libssl3 && rm -rf /var/lib/apt/lists/*
+# starlette 0.52.1 -> HIGH GHSA-82w8-qh3p-5jfq / GHSA-wqp7-x3pw-xc5r (fixed in 1.3.1).
+# fastapi 0.138.0 requires starlette>=0.46.0 (no upper bound) -> 1.3.1 is compatible.
+RUN uv pip install --system --no-cache "starlette>=1.3.1"
+# nltk 3.9.4 -> HIGH GHSA-p4gq-832x-fm9v: no upstream fix. nltk is a transitive dep
+# not used anywhere in the nvflow finance pipeline (grep confirms zero imports) -> remove.
+RUN uv pip uninstall --system nltk || true
+
+# --- Trivy gate: strip vendored benchmark trees unused by the finance pipeline ----
+# These benchmark source checkouts are only read by the upstream `if`/`ifeval`,
+# `bfcl`, and `ifbench` evaluators (lazy-loaded by eval_type). The nvflow finance
+# recipe uses its own FinanceMetrics evaluator (secque/financebench/finance_agent)
+# and never requests those eval_types, so the trees are dead weight in this image.
+# google-research carries the bulk of the H/C findings, incl. the CISA-KEV Critical
+# CVE-2025-27363 (FreeType2_jll, Julia Manifest.toml) + the brush_splat Rust CVE;
+# gorilla/IFBench carry no H/C but removing them cuts medium/low scan noise.
+# (Also drops the .git dirs the prodsec file-regex flagged.)
+RUN rm -rf /opt/benchmarks/google-research /opt/gorilla /opt/benchmarks/IFBench
+
+# --- Trivy gate: drop Ray's bundled Java jar (ray/jars/ray_dist.jar) ---
+# It carries the 2 jackson-databind HIGH findings (CVE-2026-54512 / CVE-2026-54513)
+# and is only used by Ray's Java / cross-language workers. The finance pipeline
+# drives Ray purely via the Python Ray Jobs API, so removing the jar remediates
+# those CVEs without affecting Ray. The smoke below confirms Ray still imports.
+RUN rm -rf /usr/local/lib/python3*/dist-packages/ray/jars
+RUN python -c "import ray, nemo_skills.pipeline.utils.ray_backend; print('ray OK after jar strip:', ray.__version__)"
 
 # Fail-fast smoke check so the image won't ship missing a needed dep.
 RUN python -c "from edgar import set_identity; \

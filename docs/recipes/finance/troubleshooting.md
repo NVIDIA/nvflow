@@ -2,6 +2,8 @@
 
 Comprehensive troubleshooting guide for common issues across all finance recipe workflows.
 
+> **Ray gotchas** (dashboard unreachable, Python-minor-at-join, judge auth via the cluster head env) are in [`INSTALL-RAY.md` → Troubleshooting](../../../INSTALL-RAY.md#troubleshooting).
+
 ## Quick Navigation
 
 - [Cluster & Infrastructure](#cluster--infrastructure)
@@ -163,7 +165,7 @@ env_vars:
 
 Verify the cache exists inside the image:
 ```bash
-docker run --rm nvflow-nemo-skills:0229040 ls /opt/tiktoken_cache
+docker run --rm nvflow-nemo-skills:786d8c58 ls /opt/tiktoken_cache
 # Expect: cl100k_base.tiktoken (and o200k_base.tiktoken in vllm images)
 ```
 
@@ -175,7 +177,7 @@ docker run --rm nvflow-nemo-skills:0229040 ls /opt/tiktoken_cache
 
 **Solution:** Already fixed in `Dockerfile.nemo-skills` (apt `tzdata`). If you see this in a custom-built image, confirm `tzdata` is installed:
 ```bash
-docker run --rm nvflow-nemo-skills:0229040 bash -c \
+docker run --rm nvflow-nemo-skills:786d8c58 bash -c \
   'python3 -c "import pyarrow as pa; pa.array([], type=pa.timestamp(\"ns\", tz=\"UTC\")); print(\"OK\")"'
 ```
 

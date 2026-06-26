@@ -219,6 +219,21 @@ class WorkflowRunner:
                 expanded.append(stage)
         self.config["pipeline_stages"] = expanded
 
+    def _before_run(self) -> None:
+        """Executor-specific setup hook called at the start of :meth:`run`.
+
+        Default implementation applies the Slurm sbatch-args autopatch so
+        cluster-level ``extra_sbatch_args`` reach every Slurm submission.
+        Installed lazily here (not at CLI startup) because importing
+        nemo_skills.pipeline pulls in torch/transformers (~15s cold cache).
+
+        Subclasses (e.g. :class:`~nvflow.core.ray_workflow_runner.RayWorkflowRunner`)
+        override this to skip the Slurm patch or perform Ray-specific setup.
+        """
+        from nvflow.lib.sbatch import apply_sbatch_args_autopatch
+
+        apply_sbatch_args_autopatch()
+
     def run(
         self,
         stages: list[str] | None = None,
@@ -244,12 +259,8 @@ class WorkflowRunner:
         # Validate that requested stages exist in config
         self._validate_stages(stages_to_run, all_stages)
 
-        # Ensure cluster-level extra_sbatch_args reach every Slurm submission.
-        # Installed lazily here (not at CLI startup) because importing
-        # nemo_skills.pipeline pulls in torch/transformers (~15s cold cache).
-        from nvflow.lib.sbatch import apply_sbatch_args_autopatch
-
-        apply_sbatch_args_autopatch()
+        # Executor-specific pre-run setup (Slurm sbatch-args patch by default).
+        self._before_run()
 
         # Warn about sibling stages that are declared in pipeline_stages
         # but not currently registered (e.g., their import failed).
@@ -325,7 +336,20 @@ class WorkflowRunner:
         # Get stage configuration and inject environment filter
         stage_config = {**self.config["stages"][stage_name]}
         if environment is not None:
-            stage_config["_environment"] = environment
+            # `-e` is a filter, never an expansion: a stage that declares an
+            # ``environments`` scope only runs for the requested env(s) within
+            # that scope. A scoped stage with no in-scope env is skipped (it
+            # never declared that env, so forcing it would read stale/foreign
+            # source_data). Mirrors ``_resolve_env_names`` so dependency wiring
+            # and execution agree on a scoped stage's env set.
+            selected = self._filter_stage_environment(stage_config, environment)
+            if not selected:
+                info(
+                    f"Skipping stage '{stage_name}' for "
+                    f"{', '.join(environment)} (outside its environments scope)"
+                )
+                return
+            stage_config["_environment"] = selected
 
         # Get stage class from hierarchical registry with explicit context
         if not StageRegistry.has(self.recipe, self.workflow_name, stage_name):
@@ -355,12 +379,25 @@ class WorkflowRunner:
         # Validate stage configuration
         stage.validate_config(stage_config)
 
-        # Execute stage
+        # Execute stage on its resolved cluster (per-stage CPU/GPU routing
+        # for 2-cluster Ray; no-op on Slurm / single-URL Ray).
         stage.execute(
-            config=stage_config, cluster=self.cluster, expname=expname, run_after=run_after
+            config=stage_config,
+            cluster=self._resolve_stage_cluster(stage_config),
+            expname=expname,
+            run_after=run_after,
         )
 
         success(f"Stage '{stage_name}' completed")
+
+    def _resolve_stage_cluster(self, stage_config: dict):
+        """Return the workflow cluster unchanged (Slurm path — no per-stage routing).
+
+        Ray-specific 2-cluster routing lives in
+        :class:`~nvflow.core.ray_workflow_runner.RayWorkflowRunner`, which
+        overrides this method.
+        """
+        return self.cluster
 
     def _get_expname(self, stage_name: str, stage_config: dict) -> str:
         """Generate clean experiment name for a stage.
@@ -432,6 +469,26 @@ class WorkflowRunner:
         if environment:
             return [e for e in environment if e in envs]
         return list(envs.keys())
+
+    @staticmethod
+    def _filter_stage_environment(
+        stage_config: dict,
+        environment: list[str],
+    ) -> list[str]:
+        """Filter the CLI ``-e`` env(s) by a stage's own ``environments`` scope.
+
+        ``-e`` is a filter, not an expansion. A stage that declares an
+        ``environments`` block runs only for the requested env(s) that fall
+        within that block (the intersection); an empty result means the stage
+        is out of scope for every requested env and the caller should skip it.
+        A stage with no ``environments`` block is unscoped and runs for the
+        requested env(s) unchanged. Mirrors :meth:`_resolve_env_names` so
+        dependency wiring and execution agree on a scoped stage's env set.
+        """
+        stage_envs = stage_config.get("environments")
+        if not stage_envs:
+            return environment
+        return [e for e in environment if e in stage_envs]
 
     def _validate_stages(self, stages_to_run: list[str], all_stages: list[str]) -> None:
         """Validate that requested stages exist and are registered.

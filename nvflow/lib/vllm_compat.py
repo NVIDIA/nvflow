@@ -26,16 +26,31 @@ WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
 
 from __future__ import annotations
 
-# Path inside the container where the patched wrapper is mounted.
-_PATCHED_SERVER_ENTRYPOINT = (
+import os
+
+# Path inside the container to the patched vLLM wrapper.
+#
+# Default = /nemo_run/code/scripts/... (the nemo-run packaged-code dir, valid on
+# Slurm). On Ray Mode-3 (executor: none) /nemo_run/code is NOT populated and
+# nemo-skills rewrites "/nemo_run/code" -> "./" (exp.py), which from the job cwd
+# "/" yields "//./scripts/serve_vllm_patched.py" (file not found). The nvflow
+# repo is mounted at /workspace there, so set
+# NVFLOW_SERVE_VLLM_ENTRYPOINT=/workspace/scripts/serve_vllm_patched.py in the
+# cluster env_vars (same place as PYTHONPATH=/workspace). A caller-supplied
+# server_entrypoint (recipe policy_vllm/judge_vllm) still overrides this.
+_DEFAULT_PATCHED_SERVER_ENTRYPOINT = (
     "/nemo_run/code/scripts/serve_vllm_patched.py"  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
 )
+
+
+def _patched_server_entrypoint() -> str:
+    return os.environ.get("NVFLOW_SERVE_VLLM_ENTRYPOINT", _DEFAULT_PATCHED_SERVER_ENTRYPOINT)
 
 
 def get_server_entrypoint() -> str:
     """Return the patched vLLM server entrypoint path."""
     _ensure_ray_ports_patched()  # WORKAROUND(nemo-skills-ray-ports)
-    return _PATCHED_SERVER_ENTRYPOINT
+    return _patched_server_entrypoint()
 
 
 def inject_server_entrypoint(kwargs: dict, model_path: str = "", **_ignored) -> dict:
@@ -53,7 +68,7 @@ def inject_server_entrypoint(kwargs: dict, model_path: str = "", **_ignored) -> 
     if server_type not in ("vllm", "vllm_multimodal"):
         return kwargs
     if "server_entrypoint" not in kwargs:
-        kwargs = {**kwargs, "server_entrypoint": _PATCHED_SERVER_ENTRYPOINT}
+        kwargs = {**kwargs, "server_entrypoint": _patched_server_entrypoint()}
     return kwargs
 
 

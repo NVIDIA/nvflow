@@ -133,6 +133,13 @@ def perform_split(
     if filtered:
         logger.info(f"Filtered {filtered:,} records exceeding {max_tokens:,} tokens")
 
+    if total == 0:
+        raise ValueError(
+            f"No records to split: {input_file} yielded 0 records after token-length "
+            f"filtering (filtered={filtered}, max_tokens={max_tokens}). Cannot create a "
+            f"train/validation split from an empty dataset — check the upstream stage output."
+        )
+
     # Build validation indices per category
     logger.info(f"\nSplit by '{stratify_field}':")
     val_indices: dict[str, set[int]] = {}

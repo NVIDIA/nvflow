@@ -4,9 +4,11 @@
 # Single-environment config for finance_sec_search GRPO training.
 # Uses Megatron backend (required for YaRN context extension to 131K).
 #
-# Usage:
-#   uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml
-#   uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml
+# Usage (always pass `-e finance_sec_search`; the `-e/--environment` CLI flag is
+# the only reliable scoper -- a top-level `_environment:` recipe key is NOT
+# honored by `run-all` / `nflow run`):
+#   uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
+#   uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
 #
 # Pre-requisites:
 #   Run data prep + rollouts + split from qwen3_4b.yaml first:
@@ -130,6 +132,21 @@ stages:
     base_model: ${hf_model_path}
     server_type: vllm
     gpus: 4
+    # Local vLLM judge (keeps the quick-start air-gapped; production GRPO
+    # configs inherit the gpt-5 judge from workflows/eval/base.yaml).
+    judge:
+      model: /hf_models/openai/gpt-oss-120b
+      server_type: vllm
+      server_address: null
+      server_gpus: 2
+      server_nodes: 1
+      server_args: "--max-model-len 32768 --async-scheduling"
+      extra_args: >-
+        ++prompt_config=/workspace/nvflow/recipes/finance/prompts/sec_judge.yaml
+        ++inference.temperature=0.0
+        ++inference.tokens_to_generate=8192
+        ++generation_key=judgement
+        ++skip_extraction=True
     benchmarks:
       secque:
         seeds: 5

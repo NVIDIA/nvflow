@@ -237,7 +237,7 @@ Maps host file system paths to container paths.
 ```yaml
 mounts:
   - <CLUSTER_PATH_TO_HF_MODELS>:/hf_models   # HuggingFace models
-  - <CLUSTER_PATH_TO_WORKSPACE>:/workspace   # Your workspace
+  - <CLUSTER_PATH_TO_NVFLOW_REPO>:/workspace   # the nvflow repo checkout (mounted as /workspace)
   # Add more mounts as needed:
   # - /lustre/data:/data
 ```

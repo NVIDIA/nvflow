@@ -16,7 +16,7 @@ steps, air-gapped design rationale, and rebuild guidance — see
 ```bash
 # Requires `docker login nvcr.io` for the NGC registry (nemo-rl base image)
 docker build -f dockerfiles/Dockerfile.nemo-rl     -t nvflow-nemo-rl:v0.6.0 .
-docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:0229040 .
+docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:786d8c58 .
 docker build -f dockerfiles/Dockerfile.vllm        -t nvflow-vllm:v0.18.1 .
 docker build -f dockerfiles/Dockerfile.vllm-grpo   -t nvflow-vllm-grpo:v0.17.1 .
 
@@ -46,7 +46,8 @@ docker pull lmsysorg/sglang:v0.5.10.post1
 | Build Arg | Default | Where to find the right value |
 |-----------|---------|-------------------------------|
 | `BASE_IMAGE` (nemo-rl) | `nvcr.io/nvidia/nemo-rl:v0.6.0` | [NGC NeMo-RL tags](https://catalog.ngc.nvidia.com) |
-| `NEMO_SKILLS_COMMIT` | `022904023ad7a83a87662a313cf72e7df5891d55` (`0229040`) | Should match across `Dockerfile.nemo-skills` and `Dockerfile.nemo-rl` |
+| `NEMO_SKILLS_COMMIT` (nemo-skills) | `786d8c58` | The orchestrator image — carries the Ray Jobs backend (conditional `entrypoint_label_selector`). Keep in sync with the host `[skills]` pin in `pyproject.toml`. |
+| `NEMO_SKILLS_COMMIT` (nemo-rl) | `0229040` | nemo-rl bakes its own nemo-skills checkout (data-prep/sdp) — this pin is independent of the nemo-skills image and need NOT match it. |
 | `NEMO_GYM_BRANCH` | `ude/finance-sec-search-v2` | NeMo-Gym branch with finance agent |
 | `VLLM_VERSION` (vllm) | `v0.18.1` | [vLLM releases](https://github.com/vllm-project/vllm/releases) |
 | `VLLM_VERSION` (vllm-grpo) | `v0.17.1` | Pinned to match NeMo-RL v0.6.0 colocated vLLM |

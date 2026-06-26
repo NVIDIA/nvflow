@@ -5,8 +5,11 @@
 # Inherits shared pipeline logic from base.yaml and provides all Qwen3-4B
 # specific settings (model paths, parallelism, etc.)
 #
-# Usage:
-#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Usage (scope to ONE environment with `-e/--environment`; this is the only
+# reliable scoper -- a top-level `_environment:` recipe key is NOT honored by
+# `run-all` / `nflow run`. Without `-e`, every stage fans out to all envs and
+# finance_sec_search fails "Missing local datasets" without its SEC cache):
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 #
 # Data:
 #   data_transformation cleans raw SDG data, apply_prompt_template formats
@@ -190,6 +193,21 @@ stages:
     base_model: ${hf_model_path}
     server_type: vllm
     gpus: 4
+    # Local vLLM judge (keeps the quick-start air-gapped; production GRPO
+    # configs inherit the gpt-5 judge from workflows/eval/base.yaml).
+    judge:
+      model: /hf_models/openai/gpt-oss-120b
+      server_type: vllm
+      server_address: null
+      server_gpus: 2
+      server_nodes: 1
+      server_args: "--max-model-len 32768 --async-scheduling"
+      extra_args: >-
+        ++prompt_config=/workspace/nvflow/recipes/finance/prompts/sec_judge.yaml
+        ++inference.temperature=0.0
+        ++inference.tokens_to_generate=8192
+        ++generation_key=judgement
+        ++skip_extraction=True
     benchmarks:
       secque:
         seeds: 5

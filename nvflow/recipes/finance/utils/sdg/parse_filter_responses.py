@@ -16,6 +16,7 @@
 
 import argparse
 import re
+from pathlib import Path
 
 import orjson
 
@@ -78,6 +79,10 @@ def parse_filter_responses(input_file, output_file):
         output_file: Path to output JSONL file with 'filter_tag' and 'filter_explanation' fields
     """
     log_file = output_file.replace(".jsonl", "_parse_log.txt")
+    # Ensure the output directory exists: over the Ray Jobs API each stage runs
+    # as an isolated job, so the output step dir is not pre-created the way it is
+    # in a shared-filesystem Slurm run.
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     num_total_entries = 0
     num_failed_to_parse = 0
     num_successfully_parsed = 0

@@ -6,7 +6,7 @@
 # Then update all <PLACEHOLDER> values with your settings.
 #
 # Container versions tested with this release (self-sufficient, no runtime downloads):
-#   nemo-skills: nvflow-nemo-skills (NeMo-Skills @ 0229040)
+#   nemo-skills: nvflow-nemo-skills (NeMo-Skills @ 786d8c58)
 #   vllm:        nvflow-vllm (base vllm/vllm-openai v0.18.1, standalone SDG/eval)
 #   vllm-grpo:   nvflow-vllm-grpo (base vllm/vllm-openai v0.17.1, GRPO rollouts/judge)
 #   sglang:      lmsysorg/sglang v0.5.10.post1
@@ -97,7 +97,7 @@ containers:
 # Map cluster paths to container paths
 mounts:
   - <CLUSTER_PATH_TO_HF_MODELS>:/hf_models   # HuggingFace models
-  - <CLUSTER_PATH_TO_WORKSPACE>:/workspace   # Your workspace
+  - <CLUSTER_PATH_TO_NVFLOW_REPO>:/workspace   # the nvflow repo checkout (mounted as /workspace)
   # Add more mounts as needed:
   # - /lustre/data:/data
   #
@@ -160,7 +160,7 @@ env_vars:
   # API keys (keep these secret, don't commit to git!)
   # - HF_TOKEN=<YOUR_HF_TOKEN>
   # - WANDB_API_KEY=<YOUR_WANDB_KEY>
-  # - OPENAI_API_KEY=<YOUR_OPENAI_KEY>
+  # - OPENAI_API_KEY=<YOUR_OPENAI_KEY>   # GRPO/NeMo-Gym reward judge reads this by default (even against the NVIDIA API)
 
 # =============================================================================
 # Email Notifications (optional)

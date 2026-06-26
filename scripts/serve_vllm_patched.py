@@ -50,9 +50,11 @@ WORKAROUND(harmony-aarch64)
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import platform
 import subprocess
+import sys
 import urllib.request
 from importlib.util import find_spec
 from pathlib import Path
@@ -142,14 +144,51 @@ _NEW_INIT = (
 )
 
 
-def _patch_hermes_tool_parser() -> None:  # WORKAROUND(vllm-0.17-hermes)
-    """Patch hermes_tool_parser.py on disk before vLLM imports it."""
-    spec = find_spec("vllm")
-    if spec is None or not spec.submodule_search_locations:
-        print(f"{_TAG} vLLM not found -- skipping hermes patch.")
-        return
+def _vllm_base_dir_for(python: str) -> str | None:
+    """Return the on-disk ``vllm`` package dir as seen by *python*.
 
-    base_dir = next(iter(spec.submodule_search_locations))
+    Used so the on-disk hermes patch targets the SAME vLLM install the serve
+    interpreter will import, even when that interpreter is a separate per-actor
+    venv (see WORKAROUND(nemo-rl-vllm-separate-venv)).
+    """
+    try:
+        proc = subprocess.run(
+            [python, "-c", "import vllm, os; print(os.path.dirname(vllm.__file__))"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    base_dir = proc.stdout.strip()
+    return base_dir or None
+
+
+def _patch_hermes_tool_parser_via(python: str) -> None:  # WORKAROUND(vllm-0.17-hermes)
+    """Patch hermes_tool_parser.py for the vLLM install used by *python*."""
+    base_dir = _vllm_base_dir_for(python)
+    if base_dir is None:
+        print(f"{_TAG} Could not locate vllm via {python} -- skipping hermes patch.")
+        return
+    _patch_hermes_tool_parser(base_dir=base_dir)
+
+
+def _patch_hermes_tool_parser(base_dir: str | None = None) -> None:  # WORKAROUND(vllm-0.17-hermes)
+    """Patch hermes_tool_parser.py on disk before vLLM imports it.
+
+    When *base_dir* is given it is used as the vLLM package directory (e.g.
+    discovered via a separate per-actor venv); otherwise it is resolved from
+    the current interpreter via ``find_spec``.
+    """
+    if base_dir is None:
+        spec = find_spec("vllm")
+        if spec is None or not spec.submodule_search_locations:
+            print(f"{_TAG} vLLM not found -- skipping hermes patch.")
+            return
+        base_dir = next(iter(spec.submodule_search_locations))
+
     target = os.path.join(base_dir, "tool_parsers", "hermes_tool_parser.py")
 
     if not os.path.exists(target):
@@ -250,6 +289,98 @@ def _has_flag(args: list[str], flag: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# WORKAROUND(nemo-rl-vllm-separate-venv) -- vLLM lives in a per-actor venv
+#
+# nemo-skills builds the standalone serve cmd as ``python3 {entrypoint} ...``
+# (nemo_skills/pipeline/utils/server.py), so this script runs under whatever
+# ``python3`` resolves to first on PATH. On a NeMo-RL v0.6.0 Ray-on-Slurm
+# cluster that is the head's RAY_VENV (/opt/nemo_rl_venv), which does NOT have
+# vLLM installed -- the container keeps vLLM (~0.17.1) in a SEPARATE per-actor
+# uv venv created at runtime under /opt/ray_venvs/<hash>/ for NeMo-RL's
+# VllmGenerationWorker. A bare ``python3 -m vllm...`` therefore fails with
+# ``No module named 'vllm'`` for the standalone GRPO rollout *policy* serve.
+#
+# Fix: resolve an interpreter that can ``import vllm`` for the inner serve
+# subprocess. Resolution order (first hit wins):
+#   1. NVFLOW_VLLM_PYTHON  -- explicit interpreter path (operator override).
+#   2. NVFLOW_VLLM_VENV    -- explicit venv dir; uses <venv>/bin/python.
+#   3. The current interpreter (sys.executable) if it can import vllm -- this
+#      keeps the working Slurm / in-container path UNCHANGED (vLLM already
+#      importable in the running python).
+#   4. Auto-discovery: scan candidate globs (NVFLOW_VLLM_VENV_GLOB, default
+#      /opt/ray_venvs/*/bin/python*) and pick the first python that can
+#      ``import vllm``.
+#   5. Fallback to "python3" (preserves prior behavior / error if vLLM is
+#      genuinely absent everywhere).
+#
+# Remove when: the standalone policy serve runs in the same venv as vLLM
+# (e.g. nemo-skills launches the serve under the per-actor venv, or NeMo-RL
+# installs vLLM into RAY_VENV).
+# ---------------------------------------------------------------------------
+
+# Default glob for per-actor venvs that may contain vLLM. Overridable via
+# NVFLOW_VLLM_VENV_GLOB for containers that lay venvs out differently.
+_DEFAULT_VLLM_VENV_GLOB = "/opt/ray_venvs/*/bin/python*"
+
+
+def _python_has_vllm(python: str) -> bool:
+    """Return True if *python* can ``import vllm`` (best-effort, quiet)."""
+    try:
+        proc = subprocess.run(
+            [python, "-c", "import vllm"],
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _resolve_vllm_python() -> str:  # WORKAROUND(nemo-rl-vllm-separate-venv)
+    """Return a python interpreter that can ``import vllm``.
+
+    See the WORKAROUND(nemo-rl-vllm-separate-venv) section above for the
+    full resolution order and rationale.
+    """
+    # 1. Explicit interpreter override.
+    explicit = os.environ.get("NVFLOW_VLLM_PYTHON")
+    if explicit:
+        print(f"{_TAG} Using NVFLOW_VLLM_PYTHON={explicit} for vLLM serve.")
+        return explicit
+
+    # 2. Explicit venv override.
+    venv = os.environ.get("NVFLOW_VLLM_VENV")
+    if venv:
+        candidate = os.path.join(venv, "bin", "python")
+        print(f"{_TAG} Using NVFLOW_VLLM_VENV={venv} -> {candidate} for vLLM serve.")
+        return candidate
+
+    # 3. Current interpreter already has vLLM -> keep Slurm/in-container path
+    #    UNCHANGED. This is the common, working case.
+    if _python_has_vllm(sys.executable):
+        return sys.executable
+
+    # 4. Auto-discover a per-actor venv python that can import vLLM.
+    venv_glob = os.environ.get("NVFLOW_VLLM_VENV_GLOB", _DEFAULT_VLLM_VENV_GLOB)
+    print(
+        f"{_TAG} '{sys.executable}' cannot import vllm; scanning '{venv_glob}'"
+        f" for a python that can (set NVFLOW_VLLM_PYTHON to skip this)."
+    )
+    for candidate in sorted(glob.glob(venv_glob)):
+        if _python_has_vllm(candidate):
+            print(f"{_TAG} Discovered vLLM in {candidate}.")
+            return candidate
+
+    # 5. Fallback: preserve prior behavior (and its error) if nothing works.
+    print(
+        f"{_TAG} WARNING: no python with vllm found via override, sys.executable,"
+        f" or glob '{venv_glob}'. Falling back to 'python3'"
+        f" (set NVFLOW_VLLM_PYTHON=/path/to/python to fix)."
+    )
+    return "python3"
+
+
+# ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 
@@ -257,7 +388,20 @@ def _has_flag(args: list[str], flag: str) -> bool:
 def main():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    _patch_hermes_tool_parser()
+    # Resolve which interpreter runs the inner ``-m vllm...`` serve. On a
+    # NeMo-RL Ray-on-Slurm cluster this script may run under a python WITHOUT
+    # vLLM (RAY_VENV=/opt/nemo_rl_venv); vLLM lives in a per-actor venv.
+    # WORKAROUND(nemo-rl-vllm-separate-venv) -- see helper above.
+    vllm_python = _resolve_vllm_python()
+
+    # The on-disk hermes patch must target the SAME vLLM the serve will use.
+    # When the resolved interpreter differs from the current one, run the patch
+    # under that interpreter so find_spec("vllm") locates the right install;
+    # otherwise patch in-process (the working Slurm/in-container case).
+    if vllm_python == sys.executable:
+        _patch_hermes_tool_parser()
+    else:
+        _patch_hermes_tool_parser_via(vllm_python)
     _ensure_tiktoken_cache()
 
     parser = argparse.ArgumentParser(
@@ -288,7 +432,7 @@ def main():
     )
 
     cmd_list = [
-        "python3",
+        vllm_python,  # WORKAROUND(nemo-rl-vllm-separate-venv) -- not bare "python3"
         "-m",
         "vllm.entrypoints.openai.api_server",
         f"--model={args.model}",

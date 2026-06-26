@@ -22,7 +22,7 @@ offline on the cluster.
 | Build arg | Default | Where to find the right value |
 |---|---|---|
 | `BASE_IMAGE` (nemo-rl) | `nvcr.io/nvidia/nemo-rl:v0.6.0` | [NGC NeMo-RL tags](https://catalog.ngc.nvidia.com) |
-| `NEMO_SKILLS_COMMIT` | `022904023ad7a83a87662a313cf72e7df5891d55` (`0229040`) | Must match across `Dockerfile.nemo-skills` and `Dockerfile.nemo-rl` |
+| `NEMO_SKILLS_COMMIT` (nemo-skills) | `786d8c58` | The orchestrator image's nemo_skills (Ray Jobs backend). Keep in sync with the `[skills]` pin in `pyproject.toml`. Independent of nemo-rl's own nemo-skills pin (`0229040`) — they need NOT match. |
 | `NEMO_GYM_BRANCH` | `ude/finance-sec-search-v2` | NeMo-Gym branch with finance agent |
 | `VLLM_VERSION` (vllm) | `v0.18.1` | [vLLM releases](https://github.com/vllm-project/vllm/releases) |
 | `VLLM_VERSION` (vllm-grpo) | `v0.17.1` | Pinned to match NeMo-RL v0.6.0 colocated vLLM |
@@ -46,7 +46,7 @@ below produce amd64 images.
 cd /path/to/nvflow
 
 docker build -f dockerfiles/Dockerfile.nemo-rl     -t nvflow-nemo-rl:v0.6.0      .
-docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:0229040 .
+docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:786d8c58 .
 docker build -f dockerfiles/Dockerfile.vllm        -t nvflow-vllm:v0.18.1        .
 docker build -f dockerfiles/Dockerfile.vllm-grpo   -t nvflow-vllm-grpo:v0.17.1   .
 
@@ -176,7 +176,7 @@ print(\"uvicorn\", uvicorn.__version__, \"OK\")"'
 ### nemo-skills
 
 ```bash
-IMAGE=nvflow-nemo-skills:0229040
+IMAGE=nvflow-nemo-skills:786d8c58
 
 # A. tiktoken pre-cache loads offline
 docker run --rm --network=none -e HF_HUB_OFFLINE=1 $IMAGE bash -c '
@@ -231,12 +231,12 @@ Push each image, then `enroot import` from the registry on the cluster:
 REGISTRY=<your-registry>
 
 docker tag nvflow-nemo-rl:v0.6.0      $REGISTRY/nvflow-nemo-rl:v0.6.0
-docker tag nvflow-nemo-skills:0229040 $REGISTRY/nvflow-nemo-skills:0229040
+docker tag nvflow-nemo-skills:786d8c58 $REGISTRY/nvflow-nemo-skills:786d8c58
 docker tag nvflow-vllm:v0.18.1        $REGISTRY/nvflow-vllm:v0.18.1
 docker tag nvflow-vllm-grpo:v0.17.1   $REGISTRY/nvflow-vllm-grpo:v0.17.1
 
 docker push $REGISTRY/nvflow-nemo-rl:v0.6.0
-docker push $REGISTRY/nvflow-nemo-skills:0229040
+docker push $REGISTRY/nvflow-nemo-skills:786d8c58
 docker push $REGISTRY/nvflow-vllm:v0.18.1
 docker push $REGISTRY/nvflow-vllm-grpo:v0.17.1
 ```
@@ -313,7 +313,7 @@ operation.
 ```yaml
 containers:
   nemo-rl:     <CONTAINER_DIR>/nvflow-nemo-rl-v0.6.0.sqsh
-  nemo-skills: <CONTAINER_DIR>/nvflow-nemo-skills-0229040.sqsh
+  nemo-skills: <CONTAINER_DIR>/nvflow-nemo-skills-786d8c58.sqsh
   vllm:        <CONTAINER_DIR>/nvflow-vllm-v0.18.1.sqsh
   vllm-grpo:   <CONTAINER_DIR>/nvflow-vllm-grpo-v0.17.1.sqsh
   # sglang:    <CONTAINER_DIR>/sglang-v0.5.10.post1.sqsh

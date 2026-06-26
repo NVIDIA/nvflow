@@ -99,7 +99,9 @@ Thumbs.db
 credentials.yaml
 private_*.yaml
 
-# Cluster configs (only track containers.yaml and template-slurm.yaml)
+# Cluster configs: track only the example templates; real configs (e.g. my_cluster.yaml,
+# which holds dashboard URLs + endpoint keys) stay ignored.
 cluster_configs/*.yaml
 !cluster_configs/containers.yaml
 !cluster_configs/template-slurm.yaml
+!cluster_configs/template-ray.yaml

@@ -80,7 +80,8 @@ from rich.table import Table  # noqa: E402
 # Auto-discover all recipes and stages (must be after core imports)
 import nvflow.recipes  # noqa: E402, F401 - triggers recipe auto-discovery
 from nvflow import __version__  # noqa: E402
-from nvflow.core import BaseStage, StageRegistry, WorkflowRunner  # noqa: E402
+from nvflow.core import BaseStage, StageRegistry  # noqa: E402
+from nvflow.core.ray_workflow_runner import create_workflow_runner  # noqa: E402
 
 app = typer.Typer(
     name="nflow",
@@ -176,7 +177,7 @@ def list_stages(
     if config:
         # List stages from config file
         try:
-            runner = WorkflowRunner(config)
+            runner = create_workflow_runner(config)
             stages = runner.config["pipeline_stages"]
 
             print(f"\n[bold]Stages in {config}:[/bold]")
@@ -289,7 +290,7 @@ def run(
     """Run one or more specific stages."""
 
     try:
-        runner = WorkflowRunner(config)
+        runner = create_workflow_runner(config)
         runner.run(stages=stages, environment=environment)
     except Exception as e:
         print(f"[red]Error:[/red] {e}")
@@ -307,7 +308,7 @@ def run_all(
     """Run all stages defined in the workflow config."""
 
     try:
-        runner = WorkflowRunner(config)
+        runner = create_workflow_runner(config)
         runner.run(environment=environment)
     except Exception as e:
         print(f"[red]Error:[/red] {e}")
@@ -321,7 +322,7 @@ def validate(
     """Validate a workflow configuration file."""
 
     try:
-        runner = WorkflowRunner(config)
+        runner = create_workflow_runner(config)
         runner.validate_config()
         print("\n[green]✓ Configuration is valid[/green]")
         print(f"\nRecipe: {runner.recipe}")

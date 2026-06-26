@@ -15,6 +15,7 @@
 """Filter answers based on answerability tags."""
 
 import argparse
+from pathlib import Path
 
 import orjson
 
@@ -35,6 +36,10 @@ def apply_answer_filter(input_file, output_file, keep_tag="ANSWERABLE"):
         keep_tag: Tag value to keep (default: "ANSWERABLE")
     """
     log_file = output_file.replace(".jsonl", "_filter_log.txt")
+    # Ensure the output directory exists: over the Ray Jobs API each stage runs
+    # as an isolated job, so the output step dir is not pre-created the way it is
+    # in a shared-filesystem Slurm run.
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     num_total_entries = 0
     num_kept = 0
     num_filtered = 0

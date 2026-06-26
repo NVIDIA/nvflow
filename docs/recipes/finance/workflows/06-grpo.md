@@ -6,6 +6,12 @@ Further improve fine-tuned models using Group Relative Policy Optimization (GRPO
 
 > **Note:** GRPO training builds on an SFT checkpoint (or base model). For best results, run [SFT](04-sft.md) first.
 
+> **Running on Ray?** This guide is the **Slurm** path. To run GRPO on pre-provisioned Ray clusters,
+> follow [`quick-start-ray.md` → Step 5](../quick-start-ray.md) and [`INSTALL-RAY.md`](../../../../INSTALL-RAY.md)
+> instead — monitoring is `ray job list` (not `squeue`), paths must be absolute on the shared mount,
+> and the **in-job vLLM judge (Options A/C below) is Slurm-only / not supported on Ray** (use an
+> external/API judge: `num_gpus: 0` + `openai_base_url`).
+
 ## Quick Navigation
 
 - [Prerequisites](#prerequisites)
@@ -54,12 +60,12 @@ Further improve fine-tuned models using Group Relative Policy Optimization (GRPO
             │
             ▼
 ┌──────────────────────────────┐
-│ 5. prefetch_cache            │  Prefetch SEC filings cache (CPU/Network)
+│    prefetch_cache            │  Prefetch SEC filings cache (CPU/Network, no step-N)
 └───────────┬──────────────────┘
             │
             ▼
 ┌──────────────────────────────┐
-│ 6. collect_rollouts          │  Rollout collection + reward profiling + filter (GPU)
+│ 5. collect_rollouts          │  Rollout collection + reward profiling + filter (GPU)
 └───────────┬──────────────────┘
             │
             ▼
@@ -84,8 +90,8 @@ Further improve fine-tuned models using Group Relative Policy Optimization (GRPO
 3. **apply_prompt_template** (Step 2): Format the problem field using a prompt template and extract the concise expected answer
 4. **convert_to_responses_api** (Step 3): Convert prompted data to NeMo-Gym Responses API format (lossless)
 5. **prepare_data** (Step 4): Run `ng_prepare_data` to stamp JSONL records with agent routing fields for NeMo-Gym
-6. **prefetch_cache** (Step 5): Prefetch SEC filings cache for finance_sec_search environment
-7. **collect_rollouts** (Step 6): Collect model rollouts with reward scoring — includes enrichment (restore metadata), analysis (reward distribution, difficulty), and filtering
+6. **prefetch_cache** (no step-N): Prefetch SEC filings cache for finance_sec_search environment
+7. **collect_rollouts** (Step 5): Collect model rollouts with reward scoring — includes enrichment (restore metadata), analysis (reward distribution, difficulty), and filtering
 8. **train_validation_split** (Step 7): Split data into train/val sets with stratified sampling (shared with SFT pipeline)
 9. **training** (Step 8): GRPO training using NeMo-RL with online NeMo-Gym environment rewards
 10. **eval** (Step 9): Evaluate GRPO checkpoints on finance benchmarks
@@ -103,47 +109,55 @@ Further improve fine-tuned models using Group Relative Policy Optimization (GRPO
 
 ## Usage
 
+> **Scope every run to ONE environment with the `-e/--environment` CLI flag**
+> (e.g. `-e equivalence_llm_judge`). This is the only thing that scopes a run.
+> A top-level `_environment:` recipe key is **not** honored by `run-all` or
+> `nflow run` — it is silently ignored, so without `-e` every stage fans out to
+> all environments in the config (and `finance_sec_search` fails with
+> `AssertionError: Missing local datasets` unless its SEC cache is prefetched).
+
 ### Run Complete Workflow (Demo)
 
 ```bash
-# Qwen3-4B (demo — skips compute_rewards)
-uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Qwen3-4B (demo — skips compute_rewards). -e scopes to one environment.
+uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 ```
 
 ### Stage-by-Stage Execution
 
 ```bash
 CONFIG=nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+ENV=equivalence_llm_judge   # scope every stage to one environment
 
 # Step 0: Validate + deduplicate questions (GPU)
-uv run nflow run validate_questions --config $CONFIG
+uv run nflow run validate_questions --config $CONFIG -e $ENV
 
 # Step 1: SDG cleanup → model-agnostic schema (CPU)
-uv run nflow run data_transformation --config $CONFIG
+uv run nflow run data_transformation --config $CONFIG -e $ENV
 
 # Step 2: Apply prompt template + extract expected answer (CPU)
-uv run nflow run apply_prompt_template --config $CONFIG
+uv run nflow run apply_prompt_template --config $CONFIG -e $ENV
 
 # Step 3: Convert to NeMo-Gym Responses API format (CPU)
-uv run nflow run convert_to_responses_api --config $CONFIG
+uv run nflow run convert_to_responses_api --config $CONFIG -e $ENV
 
 # Step 4: Prepare data — add agent routing fields (CPU)
-uv run nflow run prepare_data --config $CONFIG
+uv run nflow run prepare_data --config $CONFIG -e $ENV
 
 # Prefetch SEC filings cache (CPU/Network)
-uv run nflow run prefetch_cache --config $CONFIG
+uv run nflow run prefetch_cache --config $CONFIG -e $ENV
 
 # Step 5: Collect rollouts (inference + reward scoring + filter) (GPU)
-uv run nflow run collect_rollouts --config $CONFIG
+uv run nflow run collect_rollouts --config $CONFIG -e $ENV
 
 # Step 7: Split into train/val sets (CPU)
-uv run nflow run train_validation_split --config $CONFIG
+uv run nflow run train_validation_split --config $CONFIG -e $ENV
 
 # Step 8: GRPO training (GPU)
-uv run nflow run training --config $CONFIG
+uv run nflow run training --config $CONFIG -e $ENV
 
 # Step 9: Evaluate checkpoints (GPU)
-uv run nflow run eval --config $CONFIG
+uv run nflow run eval --config $CONFIG -e $ENV
 ```
 
 ### Optional: Re-judge Rollouts
@@ -220,7 +234,7 @@ outputs/finance/demo/workflow-5-grpo/
     │   ├── val.jsonl                    # Validation split
     │   └── logs/
     ├── step-8-training/
-    │   └── grpo-qwen3-4b-2n-tp2-cp4-seq131k/   # Demo (FSDP v2)
+    │   └── grpo-qwen3-4b-16g-tp2-cp1-seq32k/   # Demo (FSDP v2, equivalence_llm_judge)
     │       ├── checkpoints/             # GRPO model checkpoints
     │       └── training-logs/
     └── step-9-eval/
@@ -277,10 +291,13 @@ ls $MODEL_DIR/step-9-eval/
 
 Three judge modes for `collect_rollouts`:
 
+> **On Ray:** Options A and C (in-job vLLM judge) are **Slurm-only** — not supported on Ray. Use
+> Option B (external/API judge) on Ray.
+
 ```yaml
 stages:
   collect_rollouts:
-    # Option A: Local vLLM judge (needs extra GPUs)
+    # Option A: Local vLLM judge (needs extra GPUs) — Slurm only, not on Ray
     judge_model_path: /hf_models/Qwen/Qwen3-30B-A3B-Instruct-2507
     judge_tensor_parallel_size: 4
     num_gpus: 8   # Must cover policy TP + judge TP
@@ -289,7 +306,7 @@ stages:
     # judge_openai_base_url: "https://api.openai.com/v1"
     # judge_openai_model: "gpt-4o"
 
-    # Option C: Policy-as-judge (default, testing only)
+    # Option C: Policy-as-judge (default, testing only) — Slurm only, not on Ray
     # Neither set — judge reuses the policy model
 ```
 

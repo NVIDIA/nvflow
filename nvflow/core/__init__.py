@@ -16,10 +16,18 @@
 
 from nvflow.core import console
 from nvflow.core.base_stage import BaseStage
+from nvflow.core.ray_workflow_runner import RayWorkflowRunner, create_workflow_runner
 from nvflow.core.stage_registry import StageRegistry
 from nvflow.core.workflow_runner import WorkflowRunner
 
-__all__ = ["BaseStage", "StageRegistry", "WorkflowRunner", "console"]
+__all__ = [
+    "BaseStage",
+    "StageRegistry",
+    "WorkflowRunner",
+    "RayWorkflowRunner",
+    "create_workflow_runner",
+    "console",
+]
 
 # Note: nemo-skills functions are imported directly in stage files when needed:
 # from nemo_skills.pipeline.cli import generate, run_cmd, wrap_arguments

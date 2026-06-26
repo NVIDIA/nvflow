@@ -59,6 +59,17 @@ def prepare_benchmarks(benchmarks: list[str], output_dir: str) -> None:
             benchmark_output_dir = Path(output_dir) / bench_name
             benchmark_output_dir.mkdir(parents=True, exist_ok=True)
 
+            # Airgap: prepare.py downloads the benchmark from HuggingFace
+            # (load_dataset). If the prepared eval.jsonl is already present
+            # (baked into the deploy / produced by a prior run), skip the
+            # download so this runs offline.  Pair with HF_*_OFFLINE in the
+            # cluster/job env so any unguarded load_dataset fails fast.
+            existing = benchmark_output_dir / "eval.jsonl"
+            if existing.exists() and existing.stat().st_size > 0:
+                logger.info(f"  {bench_name}: eval.jsonl already prepared — skipping download")
+                logger.info(f"✓ {bench_name} prepared successfully\n")
+                continue
+
             # Run prepare.py with benchmark-specific output_dir
             result = subprocess.run(
                 [sys.executable, str(prepare_script), "--output_dir", str(benchmark_output_dir)],

@@ -54,6 +54,22 @@ def _build_stage_kwargs(config: dict, model_path: str = "") -> dict:
     )  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
 
 
+def _resolve_judge(config: dict, base_config: dict) -> Any:
+    """Resolve the eval judge, preferring a per-workflow override.
+
+    Precedence: a ``judge:`` set under the workflow recipe's ``stages.eval``
+    block (``config``) wins over the shared default in ``eval/base.yaml``
+    (``base_config``).  This lets a customer point evaluation at a BYO
+    OpenAI-compatible judge (e.g. a self-hosted endpoint in an air-gapped
+    cluster) without editing the shared base config.
+
+    Uses ``or`` rather than ``dict.get(key, default)`` so a present-but-empty
+    override (``judge: null`` / ``judge: {}``) falls back to the base default
+    instead of silently disabling the judge -- safer for air-gapped runs.
+    """
+    return config.get("judge") or base_config.get("judge")
+
+
 def _load_eval_base_config() -> dict:
     """Load shared evaluation settings from ``eval/base.yaml``.
 
@@ -214,6 +230,23 @@ def _format_benchmarks(benchmarks_config: dict | list) -> list[str]:
     return []
 
 
+def _enabled_benchmark_names(benchmarks_config: dict | list) -> set[str]:
+    """Names of benchmarks that are enabled (non-disabled).
+
+    Mirrors :func:`_format_benchmarks` null-filtering so the prepare-data
+    stage only fetches datasets that will actually be evaluated — a
+    benchmark set to ``None`` in the recipe (e.g. ``financebench: null``)
+    must be skipped at prep time too, otherwise its ``prepare.py`` runs an
+    unguarded ``load_dataset()`` that fails under air-gap.  Accepts the same
+    dict or pre-formatted ``["name:seeds", ...]`` list forms.
+    """
+    if isinstance(benchmarks_config, dict):
+        return {name for name, cfg in benchmarks_config.items() if cfg is not None}
+    if isinstance(benchmarks_config, list):
+        return {str(entry).split(":", 1)[0] for entry in benchmarks_config}
+    return set()
+
+
 class _BaseFinanceEvaluator(BaseStage):
     """Evaluate a model on finance benchmarks using nemo-skills.
 
@@ -247,6 +280,13 @@ class _BaseFinanceEvaluator(BaseStage):
         judge = raw_config.get("judge", base.get("judge"))
         datasets_dir = raw_config.get("datasets_dir", base.get("datasets_dir"))
 
+        # When the model entry points at an already-hosted server
+        # (``server_address``), evaluate against it directly and do NOT prehost.
+        # This is the external-serve path for clusters whose eval image can't
+        # host vLLM in its base environment (e.g. the nemo-rl image keeps vLLM
+        # in a per-actor venv, not importable as ``python -m vllm``). Dropping
+        # ``server_gpus`` keeps nemo-skills from launching its own server.
+        server_address = raw_config.get("server_address")
         return {
             "benchmarks": _format_benchmarks(benchmarks),
             "datasets_dir": datasets_dir,
@@ -256,7 +296,8 @@ class _BaseFinanceEvaluator(BaseStage):
                 "model": raw_config["path"],
                 "skip_conversion": True,
                 "server_type": raw_config.get("server_type", "vllm"),
-                "server_gpus": raw_config.get("gpus", 1),
+                "server_address": server_address,
+                "server_gpus": None if server_address else raw_config.get("gpus", 1),
                 "server_nodes": raw_config.get("nodes", 1),
                 "extra_args": raw_config.get("inference_args", ""),
             },
@@ -478,12 +519,19 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         cluster: str,
         expname: str,
         run_after: list[str] | None = None,
+        enabled_benchmarks: set[str] | None = None,
     ) -> str:
         """Submit benchmark dataset preparation job and return its expname.
 
         Reads the ``stages.prepare_data`` config from ``eval/base.yaml`` and
         delegates to ``PrepareFinanceBenchmarksStage``.  The job is idempotent —
         re-running when data already exists is a fast no-op on the cluster.
+
+        When ``enabled_benchmarks`` is provided, the prep dataset list is
+        intersected with it so benchmarks disabled in the recipe (``<name>:
+        null``) are not fetched — ``stages.prepare_data.dataset_names`` in
+        ``eval/base.yaml`` is otherwise independent of the recipe's
+        ``benchmarks`` block and would prepare them regardless.
         """
         from nvflow.recipes.finance.stages.evaluation.prepare_data import (
             PrepareFinanceBenchmarksStage,
@@ -493,6 +541,19 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         if not prep_config:
             console.info("No prepare_data config in eval/base.yaml — skipping data prep")
             return ""
+
+        if enabled_benchmarks is not None:
+            requested = prep_config.get("dataset_names", prep_config.get("benchmarks", ["secque"]))
+            if isinstance(requested, str):
+                requested = [requested]
+            kept = [b for b in requested if b in enabled_benchmarks]
+            skipped = [b for b in requested if b not in enabled_benchmarks]
+            if skipped:
+                console.info(f"Skipping eval-prep for disabled benchmarks: {', '.join(skipped)}")
+            if not kept:
+                console.info("No enabled benchmarks to prepare — skipping data prep")
+                return ""
+            prep_config = {**prep_config, "dataset_names": kept}
 
         prep_expname = f"{expname}-prepare-data"
         console.info("Preparing benchmark datasets before evaluation")
@@ -515,6 +576,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         run_after: list[str] | None = None,
     ) -> None:
         base_config = _load_eval_base_config()
+        judge = _resolve_judge(config, base_config)
 
         eval_steps = config.get("eval_steps", [])
         if isinstance(eval_steps, int):
@@ -523,12 +585,19 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
             console.info("No eval_steps configured — skipping evaluation")
             return
 
-        # Sub-step 0: prepare benchmark datasets (idempotent)
+        # Resolve the effective benchmarks once (recipe overrides base; the
+        # null-filter disables benchmarks for both prep and scoring).
+        benchmarks_config = config.get("benchmarks", base_config.get("benchmarks", {}))
+
+        # Sub-step 0: prepare benchmark datasets (idempotent).  Restrict prep
+        # to benchmarks enabled in the recipe so a disabled one (e.g.
+        # `financebench: null`) isn't fetched (air-gap-unsafe load_dataset).
         prep_expname = self._prepare_benchmark_data(
             base_config=base_config,
             cluster=cluster,
             expname=expname,
             run_after=run_after,
+            enabled_benchmarks=_enabled_benchmark_names(benchmarks_config),
         )
 
         # All eval jobs depend on prepare_data completing first
@@ -543,9 +612,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         base_output_dir = config.get("base_output_dir", "")
         eval_output_dir = config.get("eval_output_dir", f"{base_output_dir}/step-5-eval")
 
-        benchmarks_list = _format_benchmarks(
-            config.get("benchmarks", base_config.get("benchmarks", {}))
-        )
+        benchmarks_list = _format_benchmarks(benchmarks_config)
 
         for step in eval_steps:
             console.info(f"Evaluating checkpoint step {step} (format: {checkpoint_format})")
@@ -556,7 +623,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                 stage_config = {
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": base_config.get("judge"),
+                    "judge": judge,
                     "output_dir": f"{eval_output_dir}/final",
                     "rollouts": {
                         "model": model_path,
@@ -575,7 +642,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                 stage_config = {
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": base_config.get("judge"),
+                    "judge": judge,
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
                         "model": model_path,
@@ -594,7 +661,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                     "_conversion_type": "dcp",
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": base_config.get("judge"),
+                    "judge": judge,
                     "conversion": base_config.get("conversion", {}),
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
@@ -614,7 +681,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                     "_step": step,
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": base_config.get("judge"),
+                    "judge": judge,
                     "conversion": conversion_config,
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
@@ -641,7 +708,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
             baseline_config = {
                 "benchmarks": benchmarks_list,
                 "datasets_dir": base_config.get("datasets_dir"),
-                "judge": base_config.get("judge"),
+                "judge": judge,
                 "output_dir": f"{eval_output_dir}/baseline",
                 "rollouts": {
                     "model": baseline_model,

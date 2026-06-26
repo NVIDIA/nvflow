@@ -16,12 +16,12 @@
 #   them.  Only the values (registry/tag refs) change between deployments.
 #
 # Format:
-#   - Simple string: image reference (e.g., your-registry/nvflow-nemo-skills:0229040)
+#   - Simple string: image reference (e.g., your-registry/nvflow-nemo-skills:786d8c58)
 #   - Nested object: Platform-specific tags (amd64/arm64 keys)
 #
 # Self-sufficient containers (all deps pre-installed, no runtime downloads):
 #   nemo-rl     -> dockerfiles/Dockerfile.nemo-rl     (base: nvcr.io/nvidia/nemo-rl:v0.6.0)
-#   nemo-skills -> dockerfiles/Dockerfile.nemo-skills (base: ubuntu:22.04, NeMo-Skills @ 0229040)
+#   nemo-skills -> dockerfiles/Dockerfile.nemo-skills (base: ubuntu:22.04, NeMo-Skills @ 786d8c58)
 #   vllm        -> dockerfiles/Dockerfile.vllm        (base: vllm/vllm-openai:v0.18.1)
 #   vllm-grpo   -> dockerfiles/Dockerfile.vllm-grpo   (base: vllm/vllm-openai:v0.17.1)
 #   sglang      -> pulled as-is from Docker Hub (no custom Dockerfile)
@@ -34,8 +34,8 @@ containers:
   # Tested: nvflow-nemo-rl:v0.6.0 (extends nvcr.io/nvidia/nemo-rl:v0.6.0)
   nemo-rl: <YOUR_REGISTRY>/nvflow-nemo-rl:v0.6.0
 
-  # Tested: nvflow-nemo-skills:0229040 (NeMo-Skills @ commit 0229040)
-  nemo-skills: <YOUR_REGISTRY>/nvflow-nemo-skills:0229040
+  # Built from Dockerfile.nemo-skills (NeMo-Skills @ commit 786d8c58, the ARG default)
+  nemo-skills: <YOUR_REGISTRY>/nvflow-nemo-skills:786d8c58
 
   # Tested: nvflow-vllm:v0.18.1 (extends vllm/vllm-openai:v0.18.1; pre-cached
   # tiktoken + openai_harmony; multi-arch amd64 + arm64)

@@ -83,7 +83,7 @@ NVFlow uses five containers converted to `.sqsh` format for running on Slurm clu
 | Container | Source | Tested Version | Action |
 |-----------|--------|----------------|--------|
 | `nvflow-nemo-rl` | [`dockerfiles/Dockerfile.nemo-rl`](dockerfiles/Dockerfile.nemo-rl) | base `nvcr.io/nvidia/nemo-rl:v0.6.0` | **Build** (see Step 1) |
-| `nvflow-nemo-skills` | [`dockerfiles/Dockerfile.nemo-skills`](dockerfiles/Dockerfile.nemo-skills) | NeMo-Skills @ `0229040` | **Build** (see Step 1) |
+| `nvflow-nemo-skills` | [`dockerfiles/Dockerfile.nemo-skills`](dockerfiles/Dockerfile.nemo-skills) | NeMo-Skills @ `786d8c58` | **Build** (see Step 1) |
 | `nvflow-vllm` | [`dockerfiles/Dockerfile.vllm`](dockerfiles/Dockerfile.vllm) | base `vllm/vllm-openai:v0.18.1` | **Build** (SDG/eval) |
 | `nvflow-vllm-grpo` | [`dockerfiles/Dockerfile.vllm-grpo`](dockerfiles/Dockerfile.vllm-grpo) | base `vllm/vllm-openai:v0.17.1` | **Build** (GRPO rollouts/judge) |
 | `sglang` | Docker Hub | `lmsysorg/sglang:v0.5.10.post1` | **Pull** (no custom Dockerfile) |
@@ -108,7 +108,7 @@ cd /path/to/nvflow
 
 # Build all four custom images (amd64, the common case)
 docker build -f dockerfiles/Dockerfile.nemo-rl     -t nvflow-nemo-rl:v0.6.0      .
-docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:0229040 .
+docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:786d8c58 .
 docker build -f dockerfiles/Dockerfile.vllm        -t nvflow-vllm:v0.18.1        .
 docker build -f dockerfiles/Dockerfile.vllm-grpo   -t nvflow-vllm-grpo:v0.17.1   .
 
@@ -116,11 +116,11 @@ docker build -f dockerfiles/Dockerfile.vllm-grpo   -t nvflow-vllm-grpo:v0.17.1  
 docker pull lmsysorg/sglang:v0.5.10.post1
 ```
 
-> **Tip:** The Dockerfiles expose `ARG`s for version pins (`NEMO_SKILLS_COMMIT`, `NEMO_GYM_BRANCH`, `VLLM_VERSION`, `BASE_IMAGE`). Defaults are listed in [`dockerfiles/README.md`](dockerfiles/README.md#version-pins). Keep `NEMO_SKILLS_COMMIT` consistent across `Dockerfile.nemo-skills`, `Dockerfile.nemo-rl`, and `pyproject.toml`.
+> **Tip:** The Dockerfiles expose `ARG`s for version pins (`NEMO_SKILLS_COMMIT`, `NEMO_GYM_BRANCH`, `VLLM_VERSION`, `BASE_IMAGE`). Defaults are listed in [`dockerfiles/README.md`](dockerfiles/README.md#version-pins). Keep `Dockerfile.nemo-skills`'s `NEMO_SKILLS_COMMIT` in sync with the host `[skills]` pin in `pyproject.toml`; `Dockerfile.nemo-rl` carries its own **independent** `NEMO_SKILLS_COMMIT` (nemo-rl's data-prep checkout) that need not match.
 
 For **cross-arch builds** (e.g. building an `amd64` image on Apple Silicon, or a multi-arch manifest list pushed directly to a registry), see [`dockerfiles/docker_instructions.md`](dockerfiles/docker_instructions.md#1-build). Cross-arch builds use `docker buildx` with QEMU emulation and are significantly slower than native.
 
-For optional containers (`megatron`, `sandbox`, `verl`), build them from the upstream [NeMo-Skills Dockerfiles](https://github.com/NVIDIA-NeMo/Skills/tree/022904023ad7a83a87662a313cf72e7df5891d55/dockerfiles).
+For optional containers (`megatron`, `sandbox`, `verl`), build them from the upstream [NeMo-Skills Dockerfiles](https://github.com/NVIDIA-NeMo/Skills/tree/9c631057c17ff37cb7f5c5470d76dc5b6c85c52f/dockerfiles).
 
 ### Step 1b: Sanity-Check Images Before Conversion
 
@@ -138,12 +138,12 @@ Push the built images to a registry accessible from your cluster (Docker Hub, NG
 REGISTRY=<your-registry>
 
 docker tag nvflow-nemo-rl:v0.6.0      $REGISTRY/nvflow-nemo-rl:v0.6.0
-docker tag nvflow-nemo-skills:0229040 $REGISTRY/nvflow-nemo-skills:0229040
+docker tag nvflow-nemo-skills:786d8c58 $REGISTRY/nvflow-nemo-skills:786d8c58
 docker tag nvflow-vllm:v0.18.1        $REGISTRY/nvflow-vllm:v0.18.1
 docker tag nvflow-vllm-grpo:v0.17.1   $REGISTRY/nvflow-vllm-grpo:v0.17.1
 
 docker push $REGISTRY/nvflow-nemo-rl:v0.6.0
-docker push $REGISTRY/nvflow-nemo-skills:0229040
+docker push $REGISTRY/nvflow-nemo-skills:786d8c58
 docker push $REGISTRY/nvflow-vllm:v0.18.1
 docker push $REGISTRY/nvflow-vllm-grpo:v0.17.1
 
@@ -160,7 +160,7 @@ For offline sites without a private registry, save the Docker image to a tarball
 ```bash
 # On the build host
 docker save nvflow-nemo-rl:v0.6.0      | gzip > nvflow-nemo-rl-v0.6.0.tar.gz
-docker save nvflow-nemo-skills:0229040 | gzip > nvflow-nemo-skills-0229040.tar.gz
+docker save nvflow-nemo-skills:786d8c58 | gzip > nvflow-nemo-skills-786d8c58.tar.gz
 docker save nvflow-vllm:v0.18.1        | gzip > nvflow-vllm-v0.18.1.tar.gz
 docker save nvflow-vllm-grpo:v0.17.1   | gzip > nvflow-vllm-grpo-v0.17.1.tar.gz
 
@@ -182,7 +182,7 @@ Edit `cluster_configs/my_containers.yaml` with your registry paths. The YAML **k
 ```yaml
 containers:
   nemo-rl:     your-registry/nvflow-nemo-rl:v0.6.0
-  nemo-skills: your-registry/nvflow-nemo-skills:0229040
+  nemo-skills: your-registry/nvflow-nemo-skills:786d8c58
   vllm:        your-registry/nvflow-vllm:v0.18.1          # v0.18.1 for SDG/eval
   vllm-grpo:   your-registry/nvflow-vllm-grpo:v0.17.1     # v0.17.1 for GRPO rollouts/judge
   sglang:      lmsysorg/sglang:v0.5.10.post1
@@ -353,7 +353,7 @@ This section is **dev mode only** - read it only if you're actively iterating on
 
 `nvflow-nemo-rl` is built from [`dockerfiles/Dockerfile.nemo-rl`](dockerfiles/Dockerfile.nemo-rl) on top of `nvcr.io/nvidia/nemo-rl:v0.6.0` and bakes in:
 
-- NeMo-Skills @ `0229040` installed into the frozen `/opt/nemo_rl_venv`
+- NeMo-Skills @ `786d8c58` installed into the frozen `/opt/nemo_rl_venv`
 - NeMo-Gym source at `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym`, checked out at the `ude/finance-sec-search-v2` branch (override via `NEMO_GYM_BRANCH` build arg)
 - A pre-built Gym `.venv` symlinked across all 6 components (`equivalence_llm_judge`, `finance_sec_search`, `simple_agent`, `finance_agent`, `openai_model`, `vllm_model`)
 - `/root/.local/share/uv/python` relocated to `/opt/uv-python` and `/root/.local/bin` to `/opt/uv-bin` so the venvs survive enroot/pyxis mounting `$HOME` over `/root`
@@ -438,7 +438,8 @@ For the one-time connected-node stages listed in [Download Models](#one-time-con
 ## Verify Installation
 
 ```bash
-# 1. Test NeMo-Skills import
+# 1. Test NeMo-Skills import (requires `uv sync --extra skills`, or run inside the
+#    nemo-skills container; the default `uv sync` does not install nemo_skills)
 uv run python -c "from nemo_skills.pipeline.cli import generate; print('✅ OK')"
 
 # 2. Check containers exist
@@ -567,7 +568,7 @@ Then head back to the [README.md](README.md#-quick-start) Quick Start section to
 - **NVFlow Self-Sufficient Build / Deploy Guide**: [`dockerfiles/docker_instructions.md`](dockerfiles/docker_instructions.md)
 - **Cluster Configuration Guide**: [`docs/cluster-configuration.md`](docs/cluster-configuration.md)
 - **NeMo-Skills**: https://github.com/NVIDIA-NeMo/Skills
-- **NeMo-Skills Dockerfiles (upstream reference)**: https://github.com/NVIDIA-NeMo/Skills/tree/022904023ad7a83a87662a313cf72e7df5891d55/dockerfiles
+- **NeMo-Skills Dockerfiles (upstream reference)**: https://github.com/NVIDIA-NeMo/Skills/tree/9c631057c17ff37cb7f5c5470d76dc5b6c85c52f/dockerfiles
 - **NeMo-RL**: https://github.com/NVIDIA-NeMo/RL
 - **NeMo-Gym**: https://github.com/NVIDIA-NeMo/Gym
 - **Official Container Config (NeMo-Skills)**: https://github.com/NVIDIA-NeMo/Skills/blob/main/cluster_configs/example-slurm.yaml

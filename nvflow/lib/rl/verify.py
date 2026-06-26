@@ -35,10 +35,12 @@ Judge modes:
   - Policy-as-judge is NOT supported (no policy vLLM to reuse).
 """
 
+import uuid
 from pathlib import Path
 from typing import Any
 
 from nvflow.core import console
+from nvflow.lib.executor import is_ray_backend
 
 from .helpers import (
     CONTAINER_CODE_DIR,
@@ -56,6 +58,7 @@ from .helpers import (
 )
 from .rollout import (
     _build_port_read_preamble,
+    _server_stop_sentinel,
     build_aggregate_cmd,
     build_filter_cmd,
     make_bash_script,
@@ -80,6 +83,8 @@ def _build_verify_cmd(
     judge_mode: str,
     environment_name: str,
     judge_ng_run_overrides: str,
+    is_ray: bool = False,
+    stop_sentinel: str = "",
 ) -> str:
     """Build the re-judge (verify) bash script.
 
@@ -114,7 +119,18 @@ def _build_verify_cmd(
         '    echo ""\n'
         '    echo "[Cleanup] Shutting down NeMo-Gym servers ..."\n'
         '    [ -n "$NG_RUN_PID" ] && kill $NG_RUN_PID 2>/dev/null && wait $NG_RUN_PID 2>/dev/null || true\n'
-        "}\n"
+        # Ray-only (see WORKAROUND in rollout.py): touch the server-stop sentinel
+        # UNCONDITIONALLY so the paired judge serve's watcher stops vLLM + exits 0
+        # on a SUCCESSFUL rejudge too (Slurm's allocation teardown does this, but
+        # nothing reaps the separate Ray serve job on success).  Empty on Slurm,
+        # so the emitted command stays byte-identical.
+        + (
+            f'    echo "[Cleanup] Touching server-stop sentinel {stop_sentinel}"\n'
+            f'    touch "{stop_sentinel}" 2>/dev/null || true\n'
+            if is_ray and stop_sentinel
+            else ""
+        )
+        + "}\n"
         "trap cleanup EXIT\n"
         "\n" + SHELL_WAIT_FOR_SERVER + "\n"
     )
@@ -131,6 +147,11 @@ def _build_verify_cmd(
     )
 
     # -- Step 1: Start NeMo-Gym servers (judge only) ----------------------
+    # See WORKAROUND(gym-forks-ray-cluster) in rollout.py: on the Ray (Mode-3)
+    # backend, attach the gym to the pre-provisioned cluster instead of letting
+    # it fork its own (which 500s the gym head).  Ray-only so the Slurm command
+    # stays byte-identical.
+    ray_attach_override = '    "+ray_head_node_address=auto" \\\n' if is_ray else ""
     step1_ng_run = (
         "\n"
         'cd "$GYM_PATH"\n'
@@ -145,6 +166,7 @@ def _build_verify_cmd(
         '    "+head_server.host=127.0.0.1" \\\n'
         '    "+head_server.port=$HEAD_SERVER_PORT" \\\n'
         '    "+skip_venv_if_present=true" \\\n'
+        f"{ray_attach_override}"
         f"{judge_ng_run_overrides}"
         '    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &\n'
         "NG_RUN_PID=$!\n"
@@ -153,17 +175,37 @@ def _build_verify_cmd(
     )
 
     # -- Step 2: Re-judge rollouts ----------------------------------------
+    # verify_worker already retries each /verify POST; this OUTER loop re-runs
+    # the whole worker a few times so a transient whole-seed failure (worker
+    # sys.exit(1) after its per-record retries are exhausted) re-attempts with
+    # backoff before the seed is abandoned.  Each attempt re-writes -async, so
+    # a retry restarts cleanly.  The `if !` keeps `set -e` from aborting early.
     step2_rejudge = (
         "\n"
         'echo ""\n'
         'echo "[Step 2/2] Re-judging rollouts ..."\n'
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.verify_worker \\\n"
-        '    "$INPUT_FILE" \\\n'
-        '    "$OUTPUT_FILE-async" \\\n'
-        '    "127.0.0.1" \\\n'
-        '    "$HEAD_SERVER_PORT" \\\n'
-        '    "$ENVIRONMENT_NAME" \\\n'
-        '    "$NUM_PARALLEL"\n'
+        "VERIFY_MAX_ATTEMPTS=3\n"
+        "VERIFY_RETRY_DELAY=10\n"
+        "verify_attempt=1\n"
+        "while true; do\n"
+        f"    if PYTHONPATH=${{PYTHONPATH:+$PYTHONPATH:}}{CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.verify_worker \\\n"
+        '        "$INPUT_FILE" \\\n'
+        '        "$OUTPUT_FILE-async" \\\n'
+        '        "127.0.0.1" \\\n'
+        '        "$HEAD_SERVER_PORT" \\\n'
+        '        "$ENVIRONMENT_NAME" \\\n'
+        '        "$NUM_PARALLEL"; then\n'
+        "        break\n"
+        "    fi\n"
+        '    if [ "$verify_attempt" -ge "$VERIFY_MAX_ATTEMPTS" ]; then\n'
+        '        echo "[nvflow] ERROR: verify_worker failed after $VERIFY_MAX_ATTEMPTS attempt(s) for [$JOB_LABEL]" >&2\n'
+        "        exit 1\n"
+        "    fi\n"
+        '    echo "[nvflow] verify_worker attempt $verify_attempt/$VERIFY_MAX_ATTEMPTS failed for [$JOB_LABEL]; retrying in ${VERIFY_RETRY_DELAY}s ..." >&2\n'
+        '    sleep "$VERIFY_RETRY_DELAY"\n'
+        "    verify_attempt=$((verify_attempt + 1))\n"
+        "    VERIFY_RETRY_DELAY=$((VERIFY_RETRY_DELAY * 2))\n"
+        "done\n"
     )
 
     # -- Finalize: rename output, mark done -------------------------------
@@ -175,6 +217,33 @@ def _build_verify_cmd(
     )
 
     return variables + setup + banner + step1_ng_run + step2_rejudge + finalize
+
+
+def _build_seeds_present_check(*, rejudge_dir: str, expected_seed_files: list[str]) -> str:
+    """Bash preflight asserting every expected seed produced a re-judged file.
+
+    Runs at the head of the aggregate job (after its seed deps).  Fails loudly
+    with a non-zero exit if any expected ``output-rs{seed}.jsonl`` / its
+    ``.done`` marker is missing, so cross-seed pass@k is never silently
+    computed over a subset when a seed died mid-run.
+    """
+    files_bash = " ".join(f'"{rejudge_dir}/{name}"' for name in expected_seed_files)
+    return (
+        "set -e\n"
+        f"EXPECTED_SEED_FILES=({files_bash})\n"
+        "_missing_seeds=0\n"
+        'for _seed_file in "${EXPECTED_SEED_FILES[@]}"; do\n'
+        '    if [ ! -s "$_seed_file" ] || [ ! -f "$_seed_file.done" ]; then\n'
+        '        echo "[nvflow] ERROR: missing/incomplete re-judged seed: $_seed_file (.done present? $([ -f "$_seed_file.done" ] && echo yes || echo no))" >&2\n'
+        "        _missing_seeds=$((_missing_seeds + 1))\n"
+        "    fi\n"
+        "done\n"
+        'if [ "$_missing_seeds" -ne 0 ]; then\n'
+        '    echo "[nvflow] ERROR: $_missing_seeds of ${#EXPECTED_SEED_FILES[@]} expected seed(s) missing; refusing to aggregate pass@k over a subset." >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        'echo "[nvflow] All ${#EXPECTED_SEED_FILES[@]} expected seed(s) present; aggregating."\n'
+    )
 
 
 def _build_analysis_cmd(
@@ -196,7 +265,7 @@ def _build_analysis_cmd(
     for seed_label, rewards_file in analysis_entries:
         parts.append(
             f'echo "Analyzing {seed_label} ..."\n'
-            f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {analyze_module} \\\n"
+            f"PYTHONPATH=${{PYTHONPATH:+$PYTHONPATH:}}{CONTAINER_CODE_DIR} python3 -m {analyze_module} \\\n"
             f'    "{rewards_file}" \\\n'
             f'    "{rejudge_dir}/analysis_{seed_label}" \\\n'
             '    "REWARD RE-COMPUTATION ANALYSIS"\n'
@@ -330,9 +399,28 @@ def verify(
         seed_label = rollout_file.stem.replace("output-", "")
         job_label = f"rejudge_{seed_label}"
 
+        # Per-attempt nonce baked into BOTH the judge server (writer) and the
+        # client port-read preamble (reader) so a re-run never reads a stale
+        # port.  Under Ray Mode-3 $SLURM_JOB_ID is constant for the head's whole
+        # life, so without this every attempt would reuse the same port file.
+        # Must be a Python-baked constant (writer and reader are different
+        # processes/nodes), never a bash $$/$RANDOM value.
+        attempt_id = uuid.uuid4().hex[:12]
+        # Ray-only stop sentinel: the verify client touches it on EXIT and the
+        # judge serve polls it.  Empty on Slurm so the serve stays foreground and
+        # the emitted command is byte-identical to the validated Slurm path.
+        is_ray = is_ray_backend(cluster_config)
+        stop_sentinel = _server_stop_sentinel(job_log_dir, job_label, attempt_id) if is_ray else ""
         judge_script = (
             make_server_script(
-                jcfg, cluster_config, role="judge", log_dir=job_log_dir, job_label=job_label
+                jcfg,
+                cluster_config,
+                role="judge",
+                log_dir=job_log_dir,
+                job_label=job_label,
+                attempt_id=attempt_id,
+                is_ray=is_ray,
+                stop_sentinel=stop_sentinel,
             )
             if need_judge_server
             else None
@@ -347,7 +435,7 @@ def verify(
             job_judge_overrides = judge_ng_run_overrides
 
         port_preamble = _build_port_read_preamble(
-            job_log_dir, job_label, has_judge=judge_script is not None
+            job_log_dir, job_label, has_judge=judge_script is not None, attempt_id=attempt_id
         )
 
         client_cmd_str = _build_verify_cmd(
@@ -362,6 +450,8 @@ def verify(
             judge_mode=judge_mode,
             environment_name=environment_name,
             judge_ng_run_overrides=job_judge_overrides,
+            is_ray=is_ray,
+            stop_sentinel=stop_sentinel,
         )
         if port_preamble:
             client_cmd_str = port_preamble + client_cmd_str
@@ -436,7 +526,14 @@ def verify(
     agg_job_spec: dict | None = None
 
     if run_aggregate:
-        agg_cmd_str = build_aggregate_cmd(
+        # Assert every expected seed (the full set discovered in input_dir)
+        # produced a re-judged file + .done before pass@k is computed, so a
+        # dead seed fails loudly instead of silently under-counting.
+        expected_seed_files = [rf.name for rf in rollout_files]
+        agg_cmd_str = _build_seeds_present_check(
+            rejudge_dir=rejudge_dir,
+            expected_seed_files=expected_seed_files,
+        ) + build_aggregate_cmd(
             rollout_dir=rejudge_dir,
             aggregate_module=aggregate_module,
         )
@@ -499,6 +596,7 @@ def verify(
         name=expname,
         cluster_config=cluster_config,
         jobs=jobs,
+        with_ray=is_ray_backend(cluster_config),
     )
     pipeline.run()
 

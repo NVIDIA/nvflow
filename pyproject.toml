@@ -10,12 +10,9 @@ requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 
 dependencies = [
-    # NeMo-Skills for cluster job submission (brings ~200+ dependencies)
-    # This is the core framework we orchestrate - list it first for clarity
-    # Pinned to specific commit for reproducibility (nemo-skills doesn't use version tags)
-    # Pinned on: 2026-05-05 | Commit: 0229040 (consistent with nemo-skills:0229040 container)
-    # To update: Find commit with containers in cluster_configs/example-slurm.yaml
-    "nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@022904023ad7a83a87662a313cf72e7df5891d55",
+    # nemo-skills (core orchestration framework, ~200+ deps) is provided by the
+    # container or local checkout, not pip-resolved here. For a non-container
+    # `uv sync` dev path, use the `skills` optional extra below.
 
     # Configuration & Workflow
     "omegaconf>=2.3.0",      # YAML config loading with variable interpolation
@@ -47,6 +44,19 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.7.0",
     "types-PyYAML",
+]
+
+# NeMo-Skills for running nflow FROM SOURCE without a container (local dev).
+# Container/airgap users do NOT need this — the image bakes nemo-skills at
+# NEMO_SKILLS_COMMIT (Dockerfile.nemo-skills). Pinned to 786d8c58 so the host
+# `uv run nflow` path carries the same Ray Jobs backend fix as the container:
+# nemo-skills passes `entrypoint_label_selector` to JobSubmissionClient.submit_job()
+# only when the installed Ray supports it (the older 9cd1e07 passed it unconditionally,
+# which crashes on Ray < 2.54 — the version a bare `uv run` resolves). Kept out of the
+# base dependencies so the default `uv sync` stays lean and airgap-CI-safe; opt in with
+# `uv sync --extra skills`.
+skills = [
+    "nemo-skills @ git+https://github.com/NVIDIA-NeMo/Skills.git@786d8c589f7c18095459e566367546b4ba5a70f2",
 ]
 
 [project.scripts]
@@ -110,6 +120,11 @@ override-dependencies = [
     "Pillow>=12.2.0",
     "Pygments>=2.20.0",
     "GitPython>=3.1.49",
+    # Floor Ray to the version whose Jobs API client accepts entrypoint_label_selector
+    # (added in 2.54.0). A bare resolve otherwise pins ray 2.53.0 via nemo-run→torchx,
+    # which the nemo-skills Ray backend's submit_job() call cannot run. Matches the
+    # container Ray floor (nemo-rl 2.54.0 / nemo-skills 2.55.1; both Jobs REST version:4).
+    "ray[default]>=2.54.0",
 ]
 
 [dependency-groups]

@@ -1,0 +1,35 @@
+# ray_hello_world: smoke test that submits a command via nemo-skills run_cmd.
+# Use with a cluster config that sets backend.name: ray.
+
+recipe: finance
+
+workflow:
+  name: "ray_hello_world"
+  type: "smoke-test"
+  description: "Submit a hello-world command through the Ray Jobs backend"
+
+# Resolved to cluster_configs/<cluster>.yaml via NEMO_SKILLS_CONFIG_DIR or ./cluster_configs/.
+cluster: my_cluster
+
+# base_output_dir MUST be a path mounted into the Ray cluster by the bringup
+# (scripts/start_ray_on_slurm.sb MOUNTS=...). On a pre-provisioned Ray cluster the
+# `mounts:` in my_cluster.yaml are NOT applied, so the default /workspace is ephemeral
+# unless your MOUNTS maps it. EDIT the value below to an ABSOLUTE shared path you mounted,
+# e.g.  base_output_dir: /lustre/<you>/ray_hello_world
+# (The `nflow` CLI does NOT accept `++key=value` overrides — set it here in the YAML.)
+# The hello_world stage verifies the output landed on a shared path (no silent false-pass).
+base_output_dir: /workspace/outputs/finance/ray_hello_world
+
+pipeline_stages:
+  - hello_world
+
+stages:
+  hello_world:
+    output_dir: ${base_output_dir}/step-1-hello-world
+    message: "hello world from nvflow finance via ray backend"
+    dependencies: []
+    stage_kwargs:
+      container: nemo-skills
+      num_nodes: 1
+      num_tasks: 1
+      dry_run: false

@@ -1,0 +1,70 @@
+# ============================================================================
+# Baseline eval on a pre-provisioned Ray cluster (Mode 3 / executor: none)
+# ============================================================================
+# Ready-to-edit copy of eval/demo.yaml with the Ray-specific overrides already
+# applied (see docs/recipes/finance/quick-start-ray.md Step 1). Run it with:
+#   uv run nflow run prepare_data --config nvflow/recipes/finance/workflows/eval/demo_ray.yaml
+#   uv run nflow run qwen3-4b     --config nvflow/recipes/finance/workflows/eval/demo_ray.yaml
+#
+# Fill the 3 placeholders before running:
+#   <GEN_SERVE>    host:port of YOUR external vLLM generation server (Qwen3-4B), e.g. 10.0.0.5:5000
+#   <JUDGE_SERVE>  host:port of YOUR external OpenAI-compatible judge (gpt-oss-120b), e.g. 10.0.0.6:5001
+#   /lustre/<you>  an absolute path visible IDENTICALLY on the driver host AND inside the cluster
+#                  container (NOT /workspace — that exists only in-container; with executor:none the
+#                  benchmark import, data-file check, and manifest writes happen driver-side).
+# The cluster config (my_cluster.yaml) must forward PYTHONPATH=/workspace + the judge key via env_vars.
+# ============================================================================
+
+_base_: demo.yaml
+cluster: my_cluster
+
+# Absolute /lustre paths (NOT /workspace) — driver-side import/check/manifest need a host-visible path.
+base_output_dir: /lustre/<you>/nvflow/outputs/finance/baseline-eval
+datasets_dir:    /lustre/<you>/nvflow/recipes/finance/datasets
+
+pipeline_stages:
+  - prepare_data
+  - qwen3-4b
+
+benchmarks:
+  secque:
+    seeds: 1
+  financebench: null
+
+stages:
+  prepare_data:
+    dataset_names: [secque]
+    output_dir: /lustre/<you>/nvflow/recipes/finance/datasets   # MUST match datasets_dir above
+
+# External OpenAI-compatible judge. The shipped demo.yaml judge is a self-hosted IN-JOB vLLM judge
+# (server_type: vllm, server_gpus: 2) which is NOT supported on Ray — repoint it to your external
+# endpoint. Omitting server_gpus tells nemo-skills not to prehost; the key arrives via env_vars.
+judge:
+  model: openai/gpt-oss-120b                 # MUST equal your judge serve's --served-model-name
+  server_type: openai
+  server_address: http://<JUDGE_SERVE>/v1    # full URL, scheme + /v1
+  server_gpus: null
+  server_nodes: null
+  extra_args: >-
+    ++prompt_config=/workspace/nvflow/recipes/finance/prompts/sec_judge.yaml
+    ++inference.temperature=0.0
+    ++inference.tokens_to_generate=8192
+    ++generation_key=judgement
+    ++skip_extraction=True
+
+# Single model stage routed to the CPU (nemo-skills) cluster against your external generation server.
+models:
+  qwen3-4b:
+    path: /hf_models/Qwen/Qwen3-4B             # MUST equal your gen serve's --served-model-name
+    server_type: vllm
+    server_address: http://<GEN_SERVE>/v1      # full URL, scheme + /v1 (NOT bare host:port)
+    gpus: 0                                     # CPU routing; with server_address set, nothing is prehosted
+    target_cluster: cpu
+    dependencies: [prepare_data]
+    inference_args: >-
+      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++inference.temperature=0.6
+      ++inference.top_p=0.95
+      ++inference.top_k=20
+      ++inference.tokens_to_generate=16384
+      ++chat_template_kwargs.enable_thinking=true

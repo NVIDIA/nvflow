@@ -210,5 +210,7 @@ stages:
   # eval_output_dir, inference_args, server_args
   eval:
     eval_output_dir: ${directories.step-5-eval}
+    # Generation server is external under Ray; eval's Ray jobs are CPU.
+    target_cluster: cpu
     dependencies:
       - training

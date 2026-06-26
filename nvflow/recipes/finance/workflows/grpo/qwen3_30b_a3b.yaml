@@ -16,8 +16,11 @@
 #     with thinking models)
 #   - Larger Megatron parallelism: TP=4, CP=4, EP=8 on 64 GPUs (DP=4)
 #
-# Usage:
-#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_30b_a3b.yaml
+# Usage (scope to ONE environment with `-e/--environment`; this is the only
+# reliable scoper -- a top-level `_environment:` recipe key is NOT honored by
+# `run-all` / `nflow run`. Without `-e`, every stage fans out to all three envs
+# below and finance_sec_search fails "Missing local datasets" without its cache):
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_30b_a3b.yaml -e equivalence_llm_judge
 #
 # Data:
 #   DG SDG hard_rl_data.jsonl (414K records, difficulty_score=0).

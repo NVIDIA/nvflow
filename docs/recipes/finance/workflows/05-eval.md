@@ -63,8 +63,8 @@ Run training and evaluation together — eval runs automatically after training:
 # SFT training + checkpoint eval
 uv run nflow run-all --config nvflow/recipes/finance/workflows/sft/qwen3_4b.yaml
 
-# GRPO training + checkpoint eval
-uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# GRPO training + checkpoint eval (-e scopes to one environment; required)
+uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 ```
 
 ### Eval Stage Only

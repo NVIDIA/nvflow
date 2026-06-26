@@ -65,10 +65,38 @@ def pass_at_k(n: int, c: int, k: int) -> float:
     return 1.0 - math.prod(1.0 - k / i for i in range(n - c + 1, n + 1))
 
 
+def _check_seed_survival(
+    rollout_files: list[Path],
+    expected_num_seeds: int | None,
+) -> None:
+    """Warn on partially-dead seeds; only fail if the live count is < 1.
+
+    Dead-seed policy (NV-5): a rollout/verify seed that dies or yields no usable
+    data mid-run should be *skipped with a logged warning* and aggregation
+    proceeds over the survivors, as long as at least one seed survives.  Only a
+    total wipe-out (zero usable seed files) is a hard, unambiguous failure.
+
+    ``expected_num_seeds`` is the seed count the launcher *intended* to collect
+    (``num_random_seeds``); when provided we can distinguish a partial death
+    (fewer files than expected) from a clean full set.  When ``None`` we can
+    only act on what is on disk.
+    """
+    live = len(rollout_files)
+    if expected_num_seeds is not None and live < expected_num_seeds:
+        print(
+            "[nvflow] WARNING: dead-seed(s) detected -- found "
+            f"{live} of {expected_num_seeds} expected seed file(s). "
+            "Proceeding with the survivors; pass@k will be computed over "
+            f"k=1..{live} only.",
+            file=sys.stderr,
+        )
+
+
 def aggregate(
     rollout_dir: str,
     output_dir: str,
     output_filename: str = "difficulty.jsonl",
+    expected_num_seeds: int | None = None,
 ) -> None:
     rollout_path = Path(rollout_dir)
     out = Path(output_dir)
@@ -78,11 +106,30 @@ def aggregate(
     rollout_files = [
         f for f in rollout_files if "_chunk_" not in f.name and not f.name.endswith("-async")
     ]
+    # Skip any seed file that produced no usable bytes (a dead/empty seed):
+    # keep it out of num_seeds so pass@k k-range and DP counts stay honest.
+    nonempty_files = [f for f in rollout_files if f.stat().st_size > 0]
+    if len(nonempty_files) != len(rollout_files):
+        dead = [f.name for f in rollout_files if f.stat().st_size == 0]
+        print(
+            f"[nvflow] WARNING: dropping {len(dead)} empty seed file(s): {dead}",
+            file=sys.stderr,
+        )
+    rollout_files = nonempty_files
 
+    # Dead-seed policy (NV-5): fail loudly only when ALL seeds are gone;
+    # otherwise warn and aggregate over the survivors.
     if not rollout_files:
-        logger.warning("No rollout files found.")
-        (out / "summary.txt").write_text("No rollout files found.\n")
-        return
+        logger.error("No usable rollout files found -- all seeds are dead/empty.")
+        (out / "summary.txt").write_text("No usable rollout files found (all seeds dead).\n")
+        print(
+            "[nvflow] ERROR: every rollout seed is dead/empty; refusing to emit "
+            "an empty difficulty set. Check the rollout/judge logs.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    _check_seed_survival(rollout_files, expected_num_seeds)
 
     num_seeds = len(rollout_files)
     logger.info("Found %d seed file(s): %s", num_seeds, [f.name for f in rollout_files])
@@ -106,9 +153,14 @@ def aggregate(
     logger.info("Total rows: %d, unique questions (uuid): %d", total_rows, num_questions)
 
     if not by_uuid:
-        logger.warning("No uuid-keyed rows found.")
+        logger.error("No uuid-keyed rows found across any seed -- no usable rollout data.")
         (out / "summary.txt").write_text("No uuid-keyed rows found.\n")
-        return
+        print(
+            "[nvflow] ERROR: no uuid-keyed rollout rows across any surviving seed; "
+            "nothing to aggregate. Check the rollout output schema / judge.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     k_values = list(range(1, num_seeds + 1))
     records: list[dict] = []
@@ -300,5 +352,20 @@ if __name__ == "__main__":
         default="difficulty.jsonl",
         help="Filename for the per-question reward stats JSONL (default: difficulty.jsonl).",
     )
+    parser.add_argument(
+        "--expected_num_seeds",
+        type=int,
+        default=None,
+        help=(
+            "Seed count the launcher intended to collect (num_random_seeds). "
+            "When set, a smaller live count is reported as a dead-seed warning "
+            "(aggregation still proceeds over the survivors)."
+        ),
+    )
     args = parser.parse_args()
-    aggregate(args.rollout_dir, args.output_dir, output_filename=args.output_filename)
+    aggregate(
+        args.rollout_dir,
+        args.output_dir,
+        output_filename=args.output_filename,
+        expected_num_seeds=args.expected_num_seeds,
+    )
