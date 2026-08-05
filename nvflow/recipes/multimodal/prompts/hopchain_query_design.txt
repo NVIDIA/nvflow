@@ -1,0 +1,392 @@
+#### **Role & Goal**
+
+You are a top-tier AI multimodal capability evaluation expert. Your task is to design a set of **{num_queries_word}** independent, high-difficulty **multi-hop vision-language reasoning** sub-queries based on a **complex image**. These sub-queries will serve as "capability modules" to evaluate a model's comprehensive visual intelligence.
+
+#### **Understanding VLM Perception Capabilities**
+
+VLM (Vision-Language Model) perception capabilities can be categorized into three levels:
+
+1. **Single-Object Perception (Level 1):** Perceiving attributes of a single object (e.g., color, shape, size, text content, position, category).
+2. **Multi-Object & Relationship Perception (Level 2):** Perceiving multiple objects and their relationships (e.g., spatial relationships like "A is to the left of B", comparative relationships like "A is larger than B", counting objects that satisfy certain conditions).
+3. **Multi-Hop Reasoning (Level 3):** Chaining multiple perception steps together. **Multi-hop can occur in TWO dimensions:**
+   - **Perception-Level Hops:** Moving between Level 1 and Level 2 perception tasks
+   - **Instance-to-Instance Hops:** Reasoning from instance_1 -> instance_2 -> instance_3 -> ... -> instance_n, where **finding the next instance DEPENDS ON the previous instance**. The key is that instance_N+1 can ONLY be located by using information from or relationships with instance_N.
+
+**YOUR TASK: Design queries that are strictly Level 3 (Multi-Hop Reasoning).** Each query must chain together multiple perception steps across BOTH dimensions - hopping between different perception levels AND hopping across different instances with DEPENDENCY relationships.
+
+#### **Types of Multi-Hop Reasoning (Design queries using ALL types)**
+
+**Type A - Instance Dependency Chain (MOST IMPORTANT):**
+- The NEXT instance can ONLY be found by using its relationship with the PREVIOUS instance
+- Each hop must establish a dependency: "the X that is [relationship] to the previous instance"
+- Example: "Start from the red shirt -> find the chair that THIS shirt is draped over -> find the table that THIS chair is placed next to -> count objects on THIS table"
+- Example: "Find person A -> locate the bag that A is holding -> identify the brand logo on THIS bag -> count similar logos in the image"
+- **BAD (no dependency):** "Find the largest car, then find the tallest tree" (tree doesn't depend on car)
+- **GOOD (with dependency):** "Find the largest car, then find the tree closest to THIS car" (tree depends on which car was found)
+
+**Type B - Perception Level Hop:**
+- Level 1 (single object) -> Level 2 (multi-object relationship) -> Level 1 -> Level 2 -> ...
+- Each level transition should maintain the instance dependency chain
+- Example: "Read the number on sign A (L1), find objects to the right of THIS sign (L2), among THESE objects find the closest to B (L2), read text on THIS object (L1)"
+
+**Type C - Combined with Strong Dependencies (PREFERRED):**
+- Combine instance dependency chains with perception level changes for maximum complexity
+- Every instance transition must have a clear dependency relationship
+- Example: "Find shirt A -> locate the chair THIS shirt is draped on -> find the person sitting on THIS chair -> read the text on the book THIS person is holding -> count pages visible in THIS book"
+
+**You are provided with MULTIPLE images:**
+1. **Image 1 (Original):** The original image containing all visual information. **This is the ONLY image that will be available when answering the queries.**
+2. **Instance Patch Images (Image 2, 3, 4, ...):** Cropped patches of each individual instance from the original image. Each patch shows one specific instance extracted using its bounding box. These patches help you precisely identify each instance's appearance and content. **These patches are ONLY for your reference during question design and will NOT be available when answering queries.**
+
+**CRITICAL: You are designing queries for a SPECIFIC COMBINATION of objects. The following object instances are the ONLY instances you should consider for this task. Each instance is provided as a separate cropped patch with its bounding box location in the original image (coordinates in 0-1000 range). The category, object_name, and instance identifier labels are localization hints only and may be inaccurate; the original image and instance patch images are authoritative. If a label conflicts with the visual evidence in the original image or crop, trust the visual evidence and describe the instance using what is visibly present:**
+
+{object_list}
+
+**[WARNING] MANDATORY REQUIREMENT - INVOLVE ALL INSTANCES:**
+- **Each sub-query MUST involve AS MANY instances as possible from the combination list above.**
+- **Ideally, every query should reference or require reasoning about ALL or MOST of the listed instances.**
+- If the combination has N instances, each query should involve at least (N-1) instances, preferably all N instances.
+- The `involved_objects` field in your output MUST list ALL instances that are referenced or reasoned about in that query.
+- **DO NOT design queries that only involve 2-3 objects when 5-6 objects are available in the combination.**
+
+**CRITICAL CONSTRAINT - NO PATCH/BOX REFERENCES & UNAMBIGUOUS INSTANCE REFERENCES:**
+- The cropped patches and bounding box coordinates are **ONLY** visual aids to help you understand which object is which during question design.
+- **When writing the actual query text, you MUST NEVER mention:**
+  - Detection borders, bounding boxes, patches, or any detection-related visual markers
+  - Bounding box coordinates or positions in the 0-1000 coordinate system
+  - Any reference to the cropped patch images or instance visualization aids
+- **You MUST describe objects using ONLY:**
+  - Spatial positions (e.g., "the object on the left", "the topmost item")
+  - Contextual relationships (e.g., "the object next to the table", "the item above the text")
+  - Functional descriptions (e.g., "the button", "the icon", "the label")
+  - Visual attributes from the original image itself (e.g., actual colors of objects, sizes, shapes)
+- **[WARNING] CRITICAL: UNAMBIGUOUS INSTANCE REFERENCES (MOST IMPORTANT):**
+  - **Each instance reference in your query MUST uniquely identify exactly ONE instance in the original image (Image 1) without any borders.**
+  - **Test each reference:** Imagine the query is given to someone looking ONLY at Image 1 (no colored borders). Can they identify the EXACT instance you mean without any confusion?
+  - **BAD (ambiguous):** "the car" when there are multiple cars in the image
+  - **BAD (ambiguous):** "the person on the right" when there are two people on the right side
+  - **BAD (ambiguous):** "the red object" when multiple objects are red
+  - **GOOD (unambiguous):** "the car closest to the bottom-left corner"
+  - **GOOD (unambiguous):** "the person wearing a blue shirt standing next to the lamppost"
+  - **GOOD (unambiguous):** "the largest red object that is positioned above the text area"
+  - **GOOD (unambiguous):** "the bicycle located between the tree and the bench"
+  - **Use multiple discriminating features:** Combine spatial position + visual attributes + contextual relationships to ensure uniqueness
+  - **Verify uniqueness:** For each instance reference, mentally check if ANY other object in Image 1 could match that description. If yes, add more distinguishing details.
+- **Reason:** The final questions will be evaluated on Image 1 (the original image) **without any borders, markers, or detection aids**. Any ambiguous reference will make the question unsolvable or lead to multiple valid interpretations.
+
+#### **Core Principles: Requirements for Each Sub-query**
+
+**Every** sub-query you design must strictly adhere to all of the following standards:
+
+1.  **Independence:** Each query must be completely self-contained. Solving it must not depend on information or answers from any other query.
+
+2.  **[VERY IMPORTANT] MANDATORY Multi-Hop Structure (MOST CRITICAL):**
+    - **Each query MUST be a genuine multi-hop reasoning problem with {target_hop_count_info}.**
+    - **Number of hops = {target_hop_count_info}.** Push the boundaries of complexity within this range.
+    - Each hop can be:
+      - **Level 1 (Single-Object Perception):** Extract information from one specific object (e.g., read text, identify color, determine position)
+      - **Level 2 (Multi-Object Relationship):** Reason about relationships between multiple objects (e.g., compare sizes, count objects satisfying a condition, determine spatial arrangement)
+    - **Instance-to-Instance Chaining is REQUIRED:** The reasoning should hop from instance_1 -> instance_2 -> instance_3 -> ... involving as many instances as possible in a chain.
+    - **The hops must be logically chained:** The result of each hop must be REQUIRED for the next hop. No hop should be skippable.
+    - **Example of a HIGH-QUALITY multi-hop structure (5 hops, all instances involved):**
+      - Hop 1 (L1 on A): Read the number on object A -> get value X
+      - Hop 2 (L2 on A,B,C): Find objects to the right of A that are smaller than B -> get set S containing C
+      - Hop 3 (L1 on C): Identify the color of object C (from set S) -> get color Y
+      - Hop 4 (L2 on D,E,F): Count objects among D,E,F that share color Y -> get count Z
+      - Hop 5 (L2 on result): Compute X x Z and compare with the area ratio of E to F -> final answer
+    - **INVALID (too few hops):** "How many red objects are there?" (1 hop)
+    - **INVALID (too simple):** "What is the color of the largest object?" (2 hops at most)
+    - **INVALID (no instance chain):** Query that only touches 2 instances
+
+3.  **[IMPORTANT] Maximum Instance Coverage (CRITICAL):**
+    - **Each query MUST involve ALL instances from the provided combination list - no exceptions.**
+    - Design queries where EVERY instance plays a meaningful role in the reasoning chain.
+    - **Good pattern:** "Starting from A, find the instance closest to it (hop to B), then find instances sharing B's color (hop to C,D), compare their sizes with E (hop to E), and count those larger than F (hop to F) -> final answer uses info from ALL instances"
+    - **Bad pattern:** "Compare object 1 and object 2" (ignores other instances)
+
+4.  **[IMPORTANT] High Perception & Logic Difficulty (CRITICAL):**
+    - **Perception difficulty:** Each hop should require non-trivial perception:
+      - Reading small or partially occluded text
+      - Distinguishing subtle color differences
+      - Determining complex spatial relationships (e.g., "between", "surrounded by", "aligned with")
+      - Counting objects under multiple constraints
+    - **Logic difficulty:** The reasoning chain should require:
+      - Conditional logic (if-then-else based on visual observations). **IMPORTANT: Ensure that the "if" conditions are NOT always true. Aim for a balanced and random distribution of "Yes" and "No" outcomes for these conditions across different queries and hops to avoid bias.**
+      - Set operations (intersection, union, difference of object sets)
+      - Numerical computations (ratios, differences, products)
+      - Comparative reasoning with multiple criteria
+    - **Avoid trivial hops** like "identify that this is a car" - instead require "identify the car that is closest to the pedestrian and has a license plate starting with a letter"
+
+5.  **Deterministic Numerical Answer:** The final answer to each query must be a specific, unambiguous **number**.
+
+6.  **Visual Grounding:** All information required to solve the query must be obtainable **only** from the image and must not rely on external knowledge.
+
+7.  **Avoid "Shortcut" Hints:** Strictly prohibit using low-level visual features (e.g., "the red text," "the largest icon") to locate information. Guidance should be provided through the object's **function, context, or logical relationships**.
+
+8.  **Avoid Visual Information Leakage:** The wording of the query **must not contain** any specific text or numbers that the model would need to acquire from the image via visual recognition (e.g., OCR). This ensures the model finds the answer by understanding the image content, not through text matching.
+
+9.  **Unambiguous Phrasing & Deterministic Solution:**
+    - **The query itself must be phrased precisely, allowing for only one logical, unambiguous interpretation within the context of the image.**
+    - **The solution process must be completely deterministic with no room for dispute:**
+      - Every instance reference must uniquely identify exactly one object (see CRITICAL CONSTRAINT above)
+      - Every spatial relationship must have a clear, unambiguous definition (e.g., "to the left of" means the object's center is to the left of the reference object's center)
+      - Every comparison criterion must be objective and measurable (e.g., "larger" means larger area, not perceived importance)
+      - Every counting task must have clear inclusion/exclusion criteria
+      - Every numerical operation must be well-defined
+    - **BAD (ambiguous solution):** "Count objects near the tree" - what distance counts as "near"?
+    - **GOOD (deterministic):** "Count objects whose center is within a distance of twice the tree's width from the tree's center"
+    - **BAD (ambiguous):** "Find the most prominent object" - subjective judgment
+    - **GOOD (deterministic):** "Find the object with the largest area"
+    - **Verification test:** Two different people with good vision looking at Image 1 should arrive at the EXACT SAME numerical answer through the EXACT SAME reasoning steps.
+
+10. **Diversity of Reasoning:** For a set of sub-queries designed for the same image, avoid using the same reasoning logic or template. Each sub-query should test different reasoning paths, hop combinations, and instance chains. **This includes diversifying the outcomes of conditional steps (mixing "if true" and "if false" paths) so that the correct answer is neither always "Yes" nor always "No".**
+
+11. **Capability Coverage:** The {num_queries_word} queries you design, **as a whole**, should cover the following core capability dimensions:
+    *   **Color Comprehension**
+    *   **Spatial Reasoning**
+    *   **Counting & Aggregation**
+    *   **Text & Symbol Recognition**
+    *   **Logical & Conditional Inference**
+
+12. **No Detection Border/Color References:** **STRICTLY FORBIDDEN** to mention detection borders, border colors, bounding boxes, or any detection-related visual markers in the query text.
+13. **Balanced Conditional Outcomes (CRITICAL):** For queries involving conditional logic (if-then-else), you MUST ensure a balanced and random distribution of "Yes" and "No" outcomes for the conditions. **Do not make the "if" condition always true or always false.** Across all queries and hops, roughly half of the conditional checks should evaluate to "No" (triggering the 'else' or 'otherwise' path). For example, if an object is red, you might design a condition like "if this object is blue, add 5; otherwise, add 2", forcing the reasoning to follow the "otherwise" path. This prevents the model from developing a bias and ensures it actually performs the visual verification.
+
+#### **Workflow & Output Format**
+
+Your final output should be a **single JSON object**. This object contains an array named `sub_queries`, with {num_queries_word} elements, each representing a meticulously designed sub-query.
+
+**IMPORTANT: The `involved_objects` field MUST list ALL instances from the combination that are referenced in the query. Aim to involve ALL available instances in each query.**
+
+**CRITICAL: In the `query` field, do NOT include any literal instance/reference identifiers (e.g., `instance_1`, `logo_1`, `bar_chart_1`, `donut_chart_1`, `line_chart_4`). This restriction applies only to the `query` field.**
+
+- **BAD (bare parenthetical):** `"Starting from logo_1, find the chart_2 positioned directly below it..."`
+- **BAD (backtick identifier):** ``"Find the clip (`binder_clip_1`) and the map (`map_1`) and count..."``
+- **BAD (explicit keyword):** `"Locate the chart (instance: chart_1) and the icon (instance: icon_2)..."`
+
+Please strictly follow the JSON structure below:
+
+"`json
+{{
+  "sub_queries": [
+    {{
+      "id": 1,
+      "primary_capability": "Spatial Reasoning + Counting + Conditional Logic",
+      "involved_objects": ["instance_1", "instance_2", "instance_3", "instance_4", "instance_5"],
+      "query": "Your complex multi-hop query here. It should naturally chain through multiple instances: Start from A, hop to B based on some relationship, then hop to C, then to D, and finally involve E to compute the answer.",
+      "instance_chain": "A -> B -> C -> D -> E (describe how reasoning flows between instances)",
+      "reasoning_hops": [
+        {{
+          "hop_number": 1,
+          "hop_type": "Level 1 (Single-Object)",
+          "from_instance": "instance_1",
+          "to_instance": null,
+          "description": "Extract specific information from instance_1",
+          "objects_involved": ["instance_1"],
+          "output": "value_X extracted from instance_1"
+        }},
+        {{
+          "hop_number": 2,
+          "hop_type": "Level 2 (Multi-Object Relationship)",
+          "from_instance": "instance_1",
+          "to_instance": "instance_2",
+          "description": "Use value_X to find/filter among other instances, identifying instance_2",
+          "objects_involved": ["instance_1", "instance_2", "instance_3"],
+          "output": "instance_2 identified based on relationship with instance_1"
+        }},
+        {{
+          "hop_number": 3,
+          "hop_type": "Level 2 (Multi-Object Relationship)",
+          "from_instance": "instance_2",
+          "to_instance": "instance_4",
+          "description": "From instance_2, determine relationship with instance_4",
+          "objects_involved": ["instance_2", "instance_4"],
+          "output": "relationship_result between instance_2 and instance_4"
+        }},
+        {{
+          "hop_number": 4,
+          "hop_type": "Level 1 (Single-Object)",
+          "from_instance": "instance_4",
+          "to_instance": null,
+          "description": "Extract value from instance_4",
+          "objects_involved": ["instance_4"],
+          "output": "value_Y from instance_4"
+        }},
+        {{
+          "hop_number": 5,
+          "hop_type": "Level 2 (Multi-Object Relationship)",
+          "from_instance": "instance_4",
+          "to_instance": "instance_5",
+          "description": "Compare or compute using instance_5 as reference",
+          "objects_involved": ["instance_4", "instance_5"],
+          "output": "final_numerical_answer"
+        }}
+      ],
+      "hypothetical_answer": "42",
+      "design_rationale": "Explain: (1) The instance chain A->B->C->D->E, (2) Why each hop is necessary, (3) What makes the perception/logic difficult"
+    }},
+    {{
+      "id": 2,
+      "primary_capability": "Text Recognition + Logical Inference + Conditional",
+      "involved_objects": ["ALL instances - list them all"],
+      "query": "Another complex multi-hop query with instance chain...",
+      "instance_chain": "Describe the instance flow",
+      "reasoning_hops": [
+        {{"hop_number": 1, "hop_type": "L1", "from_instance": "...", "to_instance": "...", "description": "...", "objects_involved": [...], "output": "..."}},
+        {{"hop_number": 2, "hop_type": "L2", "from_instance": "...", "to_instance": "...", "description": "...", "objects_involved": [...], "output": "..."}},
+        {{"hop_number": 3, "hop_type": "...", "from_instance": "...", "to_instance": "...", "description": "...", "objects_involved": [...], "output": "..."}},
+        {{"hop_number": 4, "hop_type": "...", "from_instance": "...", "to_instance": "...", "description": "...", "objects_involved": [...], "output": "..."}}
+      ],
+      "hypothetical_answer": "150",
+      "design_rationale": "..."
+    }},
+    {{
+      "id": 3,
+      "primary_capability": "Counting & Aggregation + Spatial + Set Operations",
+      "involved_objects": ["ALL instances"],
+      "query": "Complex multi-hop query...",
+      "instance_chain": "...",
+      "reasoning_hops": ["... {target_hop_count_info} ..."],
+      "hypothetical_answer": "24",
+      "design_rationale": "..."
+    }},
+    {{
+      "id": 4,
+      "primary_capability": "Color + Comparison + Conditional Branching",
+      "involved_objects": ["ALL instances"],
+      "query": "Complex multi-hop query...",
+      "instance_chain": "...",
+      "reasoning_hops": ["... {target_hop_count_info} ..."],
+      "hypothetical_answer": "3",
+      "design_rationale": "..."
+    }},
+    {{
+      "id": {num_queries},
+      "primary_capability": "Comprehensive: All Capabilities Combined",
+      "involved_objects": ["ALL instances"],
+      "query": "Most complex multi-hop query combining all capability types with longest instance chain...",
+      "instance_chain": "...",
+      "reasoning_hops": ["... {target_hop_count_info} ..."],
+      "hypothetical_answer": "1800",
+      "design_rationale": "..."
+    }}
+  ]
+}}
+"`
+
+#### **Examples of Well-Designed Multi-Hop Queries**
+
+Suppose the combination contains: person_1, car_1, bicycle_1, sign_1, tree_1
+
+---
+
+**EXCELLENT Example (5 hops, instance chain, all 5 objects, high difficulty, UNAMBIGUOUS references):**
+
+**Context:** Assume in the image: sign is in top-right corner, car is red sedan in center, bicycle is yellow near bottom, person wearing blue shirt in left, tree is large with green leaves in right background.
+
+Query (with unambiguous references): "Starting from the traffic sign located in the top-right corner of the image, read the speed limit number displayed on it. Then find which vehicle - either the red car in the center or the yellow bicycle near the bottom edge - has its center point closest to the sign's center. Check whether that vehicle's center is closer to the person wearing the blue shirt on the left side, or to the large tree with green leaves in the right background. If it's closer to the person, count all objects whose centers lie on the straight line connecting the person and the tree; if closer to the tree, count all objects positioned to the left of the tree's leftmost edge. Finally, multiply the speed limit number by this count, then subtract the total number of wheels visible on both vehicles (the red car and the yellow bicycle). What is the result?"
+
+- **Hop 1** (L1 -> sign_1): Read number from "traffic sign in top-right corner" -> speed_limit = 30
+- **Hop 2** (L2 -> sign_1, car_1, bicycle_1): Compare distances: "red car in center" vs "yellow bicycle near bottom" to sign -> closest = car_1
+- **Hop 3** (L2 -> car_1, person_1, tree_1): Compare distances: car's center to "person in blue shirt on left" vs "large tree in right background" -> closer to person_1
+- **Hop 4** (L2 -> person_1, tree_1, car_1, bicycle_1): Count objects on line between "person in blue" and "tree in right" -> count = 2 (car and bicycle)
+- **Hop 5** (L1+L2 -> car_1, bicycle_1): Count wheels: "red car" (4) + "yellow bicycle" (2) -> wheels = 6
+- **Final**: 30 x 2 - 6 = 54
+
+**Why this is unambiguous:**
+- Every instance has multiple distinguishing features (color + position + distinctive attributes)
+- "Red car in center" - unique by color and position
+- "Yellow bicycle near bottom" - unique by color and position
+- "Person wearing blue shirt on left" - unique by clothing and position
+- "Traffic sign in top-right corner" - unique by function and position
+- "Large tree with green leaves in right background" - unique by size, color, position
+
+Instance Chain: sign_1 -> car_1 -> person_1/tree_1 -> car_1,bicycle_1 -> final
+involved_objects: ["person_1", "car_1", "bicycle_1", "sign_1", "tree_1"] [OK] ALL 5!
+
+---
+
+**GOOD Example (4 hops, instance chain, all objects):**
+
+Query: "Find the object that is furthest from the person. Then identify all objects that share at least one visual attribute (color, shape, or size category) with it. Among those objects, find the one closest to the bicycle. Read any text or number visible on or near that object. If no text exists, use the count of objects to its left. What is this value?"
+
+- **Hop 1** (L2 -> person_1, all others): Find furthest object from person_1 -> sign_1
+- **Hop 2** (L2 -> sign_1, car_1, bicycle_1, tree_1): Find objects sharing attributes with sign_1 -> result set contains tree_1 (both have vertical structure)
+- **Hop 3** (L2 -> tree_1, bicycle_1): Find which object in result set is closest to bicycle_1 -> tree_1
+- **Hop 4** (L1 -> tree_1): Check for text on tree_1, if none, count objects to its left -> 2
+
+Instance Chain: person_1 -> sign_1 -> tree_1 -> bicycle_1 -> tree_1 -> final
+involved_objects: ["person_1", "car_1", "bicycle_1", "sign_1", "tree_1"] [OK] ALL 5!
+
+---
+
+**BAD Example (too few hops, too simple):**
+- Query: "What color is the car?"
+- Problems: Only 1 hop, only 1 object, trivial perception
+
+**BAD Example (few objects, weak chain):**
+- Query: "Read the number on the sign and add it to the count of people."
+- Problems: Only 2 objects involved, only 2 hops, no instance chain
+
+**BAD Example (hops not logically dependent):**
+- Query: "Count red objects and count blue objects. What is the sum?"
+- Problems: The two counts are independent (can be done in parallel), not a true chain
+
+**BAD Example (AMBIGUOUS instance references - CRITICAL FAILURE):**
+- Query: "Find the car, then count objects to its right."
+- Problems:
+  - "the car" - which car? If there are 2+ cars, this is ambiguous
+  - "to its right" - to the right of what point? Edge? Center? Entire bounding region?
+  - Cannot be solved deterministically without borders
+
+**BAD Example (SUBJECTIVE/NON-DETERMINISTIC):**
+- Query: "Find the most important object, then count nearby objects."
+- Problems:
+  - "most important" - subjective, not measurable
+  - "nearby" - no clear distance threshold defined
+  - Two people would give different answers
+
+**GOOD Fix (making it unambiguous and deterministic):**
+- Query: "Find the red sedan car located in the center-bottom area of the image (the only car with visible license plate), then count all objects whose center points are within a horizontal distance of 100 pixels to the right of this car's rightmost edge."
+- Why it works:
+  - "Red sedan car in center-bottom with visible license plate" - multiple features ensure uniqueness
+  - "Center points" - clear reference point
+  - "Horizontal distance of 100 pixels to the right of rightmost edge" - precise, measurable criterion
+  - Completely deterministic
+
+#### **Final Checklist Before Outputting**
+
+For EACH of your {num_queries_word} sub-queries, verify:
+- [ ] **Hop Count:** Does it have {target_hop_count_info}?
+- [ ] **Instance Chain:** Does the reasoning hop from instance to instance (A->B->C->...)?
+- [ ] **Full Coverage:** Does `involved_objects` contain ALL instances from the combination?
+- [ ] **Logical Dependency:** Is the result of each hop REQUIRED for the next hop? (no parallel/skippable hops)
+- [ ] **Perception Difficulty:** Does each hop require non-trivial perception (not just "identify object type")?
+- [ ] **Logic Complexity:** Does the chain include conditionals, set operations, or multi-step computations?
+- [ ] **Numerical Answer:** Is the final answer a specific, computable number?
+- [ ] **No Border References:** Does it avoid mentioning detection borders or visualization colors?
+- [ ] **[VERY IMPORTANT] Unambiguous Instance References (CRITICAL):** For EACH instance reference in the query, verify:
+  - Can someone looking ONLY at the original image (no borders) uniquely identify this exact instance?
+  - Would ANY other object in the image match this description? If yes, add more distinguishing details.
+  - Does the description use multiple discriminating features (spatial + visual + contextual)?
+- [ ] **[VERY IMPORTANT] Deterministic Solution Process (CRITICAL):** Verify:
+  - Would two different people arrive at the EXACT SAME answer?
+  - Are all spatial relationships clearly defined? (e.g., "left of" = center is to the left)
+  - Are all comparisons objective? (e.g., "larger" = larger area, not importance)
+  - Are all counting criteria explicit? (what counts as "between", "near", etc.)
+  - Is there NO room for subjective interpretation?
+
+**Quality Scoring (aim for 10+):**
+- 1 point per hop
+- 1 point if ALL instances involved
+- 1 point if instance chain covers 4+ different instances
+- 1 point if includes conditional logic (if-then)
+- 1 point if includes numerical computation beyond counting
+- **2 points if ALL instance references are unambiguous and solution is deterministic (CRITICAL)**
+
+**Please Note:**
+- Your task is to generate the JSON content that conforms to the format and requirements above.
+- **CRITICAL REMINDERS:**
+  - Each `query` field must be answerable using ONLY the original image (Image 1) without any detection borders or markers.
+  - **EVERY query MUST be multi-hop with {target_hop_count_info}.**
+  - **EVERY query MUST involve ALL or MOST of the instances in the provided combination list.**
+  - The `involved_objects` field must accurately list all instances referenced in the query.

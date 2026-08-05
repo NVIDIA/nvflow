@@ -63,12 +63,12 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
-## Merge Requests
+## Pull Requests
 
 1. Fork the repository and create a branch from `main`.
 2. Make your changes with signed-off commits (`git commit -s`).
-3. Push your branch and open a Merge Request into `main`.
-4. Ensure the MR description references any related issues and describes the change clearly.
+3. Push your branch and open a Pull Request into `main`.
+4. Ensure the PR description references any related issues and describes the change clearly.
 
 ## Code and Documentation
 
@@ -80,7 +80,6 @@ By making a contribution to this project, I certify that:
 
 By contributing, you agree that your contributions will be licensed under the same license as the project: the Apache License, Version 2.0. See [LICENSE](LICENSES/LICENSE) for the full text.
 
-## IP Review and Open Source Compliance
+## Third-Party Code
 
-- **Ongoing modifications**: For changes to project code (including contributions by third parties), follow NVIDIA's IP review process: [https://nv/ip_review_process](https://nv/ip_review_process).
-- **Open Source compliance**: This project follows NVIDIA OSRB recommendations for Apache 2.0 release.
+If your contribution adds or updates a third-party dependency, make sure its license is compatible with Apache 2.0 and record it in [`LICENSES/THIRD_PARTY_SW_LICENSE_INFO.md`](LICENSES/THIRD_PARTY_SW_LICENSE_INFO.md).

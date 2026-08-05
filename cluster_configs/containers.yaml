@@ -11,45 +11,72 @@
 #   sbatch --account=<acct> scripts/setup_containers.sh --config cluster_configs/my_containers.yaml ./containers
 #
 # Naming:
-#   YAML KEYS (nemo-skills, nemo-rl, vllm, vllm-grpo, sglang) match the
+#   YAML KEYS (nemo-rl, nemo-gym, nemo-skills, vllm, vllm-grpo, sglang) match the
 #   short names the workflow code uses to look up containers -- do NOT rename
 #   them.  Only the values (registry/tag refs) change between deployments.
 #
 # Format:
-#   - Simple string: image reference (e.g., your-registry/nvflow-nemo-skills:0229040)
+#   - Simple string: image reference (e.g., your-registry/nvflow-nemo-skills:v1.1.2)
 #   - Nested object: Platform-specific tags (amd64/arm64 keys)
 #
-# Self-sufficient containers (all deps pre-installed, no runtime downloads):
-#   nemo-rl     -> dockerfiles/Dockerfile.nemo-rl     (base: nvcr.io/nvidia/nemo-rl:v0.6.0)
-#   nemo-skills -> dockerfiles/Dockerfile.nemo-skills (base: ubuntu:22.04, NeMo-Skills @ 0229040)
-#   vllm        -> dockerfiles/Dockerfile.vllm        (base: vllm/vllm-openai:v0.18.1)
-#   vllm-grpo   -> dockerfiles/Dockerfile.vllm-grpo   (base: vllm/vllm-openai:v0.17.1)
-#   sglang      -> pulled as-is from Docker Hub (no custom Dockerfile)
+# Built locally (custom images; all deps pre-installed, no runtime downloads):
+#   nemo-rl     -> dockerfiles/Dockerfile.nemo-rl     (base: nvcr.io/nvidia/nemo-rl:v0.7.0)
+#   nemo-skills -> dockerfiles/Dockerfile.nemo-skills (base: ubuntu:22.04, NeMo-Skills @ e06c9b90)
+#   vllm        -> dockerfiles/Dockerfile.vllm        (base: vllm/vllm-openai:v0.22.0)
+#   vllm-grpo   -> dockerfiles/Dockerfile.vllm --build-arg VLLM_VERSION=v0.20.0
+#   nemo-gym    -> dockerfiles/Dockerfile.nemo-gym    (base: python:3.12-slim, CPU-only Gym client)
+# Pulled as-is (no custom Dockerfile):
+#   sglang      -> lmsysorg/sglang:v0.5.10.post1
+#
+# Optional launcher image for airgapped users (airgap-only; NOT a worker -- see
+# the nvflow-client entry below):
+#   nvflow-client -> dockerfiles/Dockerfile.nvflow   (base: digest-pinned ubuntu:24.04; multi-arch amd64+arm64)
 
 containers:
   # ---------------------------------------------------------------------------
   # Required: Built locally from dockerfiles/, then pushed to your registry
   # (see INSTALL.md Step 1 and Step 2).
   # ---------------------------------------------------------------------------
-  # Tested: nvflow-nemo-rl:v0.6.0 (extends nvcr.io/nvidia/nemo-rl:v0.6.0)
-  nemo-rl: <YOUR_REGISTRY>/nvflow-nemo-rl:v0.6.0
+  # SFT/GRPO trainer. Extends the NeMo-RL v0.7.0 base with the NeMo-Gym
+  # per-component venvs baked in, so no `uv` resolve happens at job runtime.
+  # dockerfiles/Dockerfile.nemo-rl (upstream Gym main 33ef60369). The stock base
+  # also works if your compute nodes have internet during training.
+  nemo-rl: <YOUR_REGISTRY>/nvflow-nemo-rl:v0.7.0
 
-  # Tested: nvflow-nemo-skills:0229040 (NeMo-Skills @ commit 0229040)
-  nemo-skills: <YOUR_REGISTRY>/nvflow-nemo-skills:0229040
+  # CPU-only Gym client for the Gym-only stages (DG-SDG gym stages + GRPO
+  # prepare_data/prefetch_cache). dockerfiles/Dockerfile.nemo-gym (base:
+  # python:3.12-slim; upstream Gym main 33ef60369; per-component venvs baked).
+  nemo-gym: <YOUR_REGISTRY>/nvflow-nemo-gym:0.4.0
 
-  # Tested: nvflow-vllm:v0.18.1 (extends vllm/vllm-openai:v0.18.1; pre-cached
-  # tiktoken + openai_harmony; multi-arch amd64 + arm64)
-  vllm: <YOUR_REGISTRY>/nvflow-vllm:v0.18.1
+  # Tested: nvflow-nemo-skills:v1.1.2 (NeMo-Skills @ commit e06c9b90)
+  nemo-skills: <YOUR_REGISTRY>/nvflow-nemo-skills:v1.1.2
 
-  # Tested: nvflow-vllm-grpo:v0.17.1 (extends vllm/vllm-openai:v0.17.1; pinned
-  # to match NeMo-RL v0.6.0 colocated vLLM)
-  vllm-grpo: <YOUR_REGISTRY>/nvflow-vllm-grpo:v0.17.1
+  # Tested: nvflow-vllm:v0.22.0 (extends vllm/vllm-openai:v0.22.0;
+  # pre-cached tiktoken + openai_harmony; multi-arch amd64 + arm64)
+  vllm: <YOUR_REGISTRY>/nvflow-vllm:v0.22.0
+
+  # Tested: nvflow-vllm:v0.20.0 (extends vllm/vllm-openai:v0.20.0; pinned to
+  # match NeMo-RL v0.7.0 colocated vLLM). Same repo as `vllm`, different tag.
+  vllm-grpo: <YOUR_REGISTRY>/nvflow-vllm:v0.20.0
 
   # ---------------------------------------------------------------------------
-  # Required: Pulled as-is from Docker Hub (no custom Dockerfile)
+  # Required: Pulled as-is (no custom Dockerfile)
   # ---------------------------------------------------------------------------
   # Tested: lmsysorg/sglang:v0.5.10.post1
   sglang: lmsysorg/sglang:v0.5.10.post1
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL -- launcher image, ONLY for users in an airgapped environment who
+  # cannot `uv sync` / pip-install. It is NOT a worker and is NOT referenced by
+  # my_cluster.yaml `containers:`; it bundles the `nflow` CLI + baked venv to
+  # drive NVFlow over an ssh_tunnel with no host install and no user-side internet.
+  # The default install remains `uv sync` (README / INSTALL.md).
+  # Built multi-arch (amd64 + arm64) from dockerfiles/Dockerfile.nvflow; see
+  # docs/remote-launch.md.
+  #
+  # Tested: nvflow-client:v1.1.2. Substitute the tag you built and pushed.
+  # ---------------------------------------------------------------------------
+  nvflow-client: <YOUR_REGISTRY>/nvflow-client:<RELEASE_TAG>
 
   # ---------------------------------------------------------------------------
   # Optional: Not currently used by NVFlow recipes

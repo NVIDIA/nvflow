@@ -23,9 +23,11 @@ Runs per-environment: only environments whose config includes a
 ``prefetch`` block are processed; others are silently skipped.
 """
 
+import shlex
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.cli_cmd import build_python_script_cmd
 
 
 @StageRegistry.register(recipe="finance", workflow="grpo", stage="prefetch_cache")
@@ -63,8 +65,20 @@ class PrefetchCacheStage(BaseStage):
             ticker_config = prefetch["ticker_config"]
             force = prefetch.get("force", False)
 
-            cmd = f"cd {gym_path} && python {script} --cache_dir {cache_dir} --ticker_config {ticker_config}"
+            # Compose: ``cd <gym_path> && python3 <script> --cache_dir ... --ticker_config ...``
+            # The ``cd`` is required because the upstream script imports
+            # config files relative to the Gym repo root.  Both the cd
+            # target and the script invocation are shlex-quoted to match
+            # the safety contract used elsewhere in this repo (Phase A).
+            script_cmd = build_python_script_cmd(
+                script,
+                cache_dir=cache_dir,
+                ticker_config=ticker_config,
+            )
+            cmd = f"cd {shlex.quote(gym_path)} && {script_cmd}"
             if force:
+                # ``--force`` is a value-less flag; build_python_script_cmd
+                # only renders ``--key value`` pairs, so we append manually.
                 cmd += " --force"
 
             console.status(f"Prefetching cache for environment: {env_name}")

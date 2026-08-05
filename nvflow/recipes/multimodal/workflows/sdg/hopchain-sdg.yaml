@@ -1,0 +1,485 @@
+# HopChain SDG workflow
+
+recipe: multimodal
+
+workflow:
+  name: "hopchain_sdg"
+  type: "sdg"
+  description: "HopChain-inspired multimodal synthetic data generation workflow"
+
+cluster: my_cluster
+
+model_profiles:
+  qwen:
+    model: qwen3.5-397b-a17b
+    server_type: sglang
+    server_gpus: 8
+    server_nodes: 2
+    server_args: >-
+      --model-path /hf_models/Qwen/Qwen3.5-397B-A17B
+      --served-model-name qwen3.5-397b-a17b
+      --context-length 131072
+      --tp 16
+      --ep-size 16
+      --trust-remote-code
+      --reasoning-parser qwen3
+      --mem-fraction-static 0.80
+      --chunked-prefill-size 4096
+    max_image_dimension: 2048
+    tokens_to_generate: 16384
+    max_concurrent_requests: 64
+    time_min: 120
+    use_base64_images: true
+
+  omni:
+    model: omni
+    server_type: vllm
+    server_gpus: 4
+    server_nodes: 1
+    server_args: >-
+      --model /hf_models/nvidia/omni-step70
+      --served-model-name omni
+      --trust-remote-code
+      --max-model-len 32768
+      --allowed-local-media-path /
+      --gpu-memory-utilization 0.9
+      --limit-mm-per-prompt.image 1
+      --mamba_ssm_cache_dtype float32
+      --reasoning-parser nemotron_v3
+    tokens_to_generate: 30000
+    max_concurrent_requests: 4
+    time_min: 240
+    use_base64_images: false
+
+  sam:
+    model: /hf_models/facebook/sam3.1/sam3.1_multiplex.pt
+    container: vllm
+
+# Run from the repository root. Machine-specific mounts, partitions, and
+# container paths belong in cluster_configs/my_cluster.yaml.
+project_root: ${oc.env:PWD}
+base_data_dir: ${project_root}/outputs/hopchain
+execution_id: full
+image_filter_execution_id: full
+
+cluster_config_dir: ${project_root}/cluster_configs
+sdg_data_dir: ${base_data_dir}/sdg
+base_output_dir: ${sdg_data_dir}/execution/${execution_id}
+source_kept_images_file: ${base_data_dir}/image_filter/execution/${image_filter_execution_id}/image-filter/kept_images.jsonl
+gpu_time_min: 240
+cpu_time_min: 240
+max_image_dimension: 1536
+localize_dataloader_num_workers: 16
+localize_dataloader_prefetch_factor: 2
+localize_num_chunks: 6
+sample_instance_combinations_selection_strategy: balanced_by_category_then_area_confidence
+sample_instance_combinations_min_instances: 3
+sample_instance_combinations_max_instances: 8
+sample_instance_combinations_max_instances_considered_per_image: 24
+sample_instance_combinations_max_instances_per_category: 2
+sample_instance_combinations_iou_dedup_threshold: 0.9
+sample_instance_combinations_iou_dedup_candidate_pool_size: 72
+sample_instance_combinations_debug_copy_selected_images: false
+sample_instance_combinations_max_combinations_per_image: 6
+sample_instance_combinations_size_strategy: weighted_random
+sample_instance_combinations_size_weights:
+  3: 1
+  4: 2
+  5: 3
+  6: 4
+  7: 4
+  8: 4
+# area_confidence strategy params (used when selection_strategy is
+# balanced_by_category_then_area_confidence or area_confidence)
+sample_instance_combinations_area_confidence_area_weight: 0.5
+sample_instance_combinations_area_confidence_confidence_weight: 0.5
+sample_instance_combinations_sampling_seed: 20260430
+# sample_instance_combinations_min_confidence_threshold: 0.6  # uncomment to filter low-confidence instances
+generate_multihop_queries_num_queries: 2
+generate_multihop_queries_target_hop_count_info: "4-10 hops"
+generate_multihop_queries_temperature: 0.2
+generate_multihop_queries_top_p: 0.95
+generate_multihop_queries_tokens_to_generate: 32768
+# Heuristic: ~ (input_size * max_combinations_per_image / 2 * num_queries) / 1000 * factor.
+# Check the actual step-3 combination count before enabling paid judge stages.
+generate_multihop_queries_num_chunks: 18 # ~ 2000 * 6 / 2 * 2 / 1000 * 1.5 = 18
+verify_candidate_queries_min_hop_count: 4
+llm_judge_prompt_file: nvflow/recipes/multimodal/prompts/hopchain_llm_judge_answer_question.txt
+llm_judge_temperature: 0.0
+llm_judge_top_p: 1.0
+llm_judge_reasoning_effort: medium
+llm_judge_timeout_seconds: 300
+llm_judge_max_retries: 3
+llm_judge_max_workers: 64
+llm_judge_time_min: 240
+difficulty_filter_k: 5
+# 2K images * 6 max combos/image / 2 expected kept combos * 2 queries
+# * ~70% LLM-judge accepted * difficulty_filter_k ~= 42K Omni requests. Omni is roughly
+# 2K requests/hour/chunk, so use 21 chunks to target about 1 hour.
+difficulty_filter_num_chunks: 21
+difficulty_filter_temperature: 0.6
+difficulty_filter_top_p: 0.95
+difficulty_filter_enable_thinking: false  # note: omni-step70 always reasons via vLLM --reasoning-parser; this flag sets chat_template_kwargs per-datapoint which nemo_skills inference does not read
+difficulty_filter_prompt_file: nvflow/recipes/multimodal/prompts/hopchain_llm_judge_answer_question.txt
+difficulty_filter_min_pass_rate: 0.0  # inclusive lower bound; 0.0 = no lower filter
+difficulty_filter_max_pass_rate: 1.0  # inclusive upper bound; 1.0 = no upper filter
+sft_trace_k: 3
+sft_trace_generation_prompt_file: nvflow/recipes/multimodal/prompts/hopchain_sft_answer_question.txt
+sft_trace_judge_prompt_file: nvflow/recipes/multimodal/prompts/hopchain_sft_trace_judge.txt
+sft_trace_generation_num_chunks: 21
+sft_trace_judge_num_chunks: 21
+sft_trace_generation_temperature: 0.6
+sft_trace_generation_top_p: 0.95
+sft_trace_generation_tokens_to_generate: 32768
+sft_trace_judge_temperature: 0.6
+sft_trace_judge_top_p: 0.95
+sft_trace_judge_tokens_to_generate: 32768
+
+directories:
+  step-0-prepare-filtered-inputs: ${base_output_dir}/step-0-prepare-filtered-inputs
+  step-1-identify-categories: ${base_output_dir}/step-1-identify-categories
+  step-1-preprocess-identify-categories: ${base_output_dir}/step-1-identify-categories/temp
+  step-2-localize-instances: ${base_output_dir}/step-2-localize-instances
+  step-3-sample-instance-combinations: ${base_output_dir}/step-3-sample-instance-combinations
+  step-4-preprocess-generate-multihop-queries: ${base_output_dir}/step-4-generate-multihop-queries/temp
+  step-4-generate-multihop-queries: ${base_output_dir}/step-4-generate-multihop-queries
+  step-5-verify-candidate-queries: ${base_output_dir}/step-5-verify-candidate-queries
+  step-6-visualize-candidate-hopchain-data: ${base_output_dir}/step-6-visualize-candidate-hopchain-data
+  step-7-judge-candidate-queries-openai: ${base_output_dir}/step-7-judge-candidate-queries-openai
+  step-8-reconcile-llm-judges: ${base_output_dir}/step-8-reconcile-llm-judges
+  step-9-visualize-reconciled-hopchain-data: ${base_output_dir}/step-9-visualize-reconciled-hopchain-data
+  step-10-preprocess-filter-easy-candidates: ${base_output_dir}/step-10-filter-easy-candidates/temp
+  step-10-filter-easy-candidates: ${base_output_dir}/step-10-filter-easy-candidates
+  step-11-preprocess-generate-sft-reasoning-traces: ${base_output_dir}/step-11-generate-sft-reasoning-traces/temp
+  step-11-generate-sft-reasoning-traces: ${base_output_dir}/step-11-generate-sft-reasoning-traces
+  step-12-preprocess-filter-sft-reasoning-traces: ${base_output_dir}/step-12-filter-sft-reasoning-traces/temp
+  step-12-filter-sft-reasoning-traces: ${base_output_dir}/step-12-filter-sft-reasoning-traces
+
+pipeline_stages:
+  - prepare_filtered_image_inputs
+  - preprocess_identify_categories
+  - identify_categories
+  - localize_instances
+  - sample_instance_combinations
+  - preprocess_generate_multihop_queries
+  - generate_multihop_queries
+  - verify_candidate_queries
+  - visualize_candidate_hopchain_data
+  - judge_candidate_queries_openai
+  - reconcile_llm_judges
+  - visualize_reconciled_hopchain_data
+  - preprocess_filter_easy_candidates
+  - filter_easy_candidates
+  - preprocess_generate_sft_reasoning_traces
+  - generate_sft_reasoning_traces
+  - preprocess_filter_sft_reasoning_traces
+  - filter_sft_reasoning_traces
+
+stages:
+  prepare_filtered_image_inputs:
+    run_name: ${execution_id}
+    input_file: ${source_kept_images_file}
+    output_file: ${directories.step-0-prepare-filtered-inputs}/filtered_image_inputs.jsonl
+    summary_file: ${directories.step-0-prepare-filtered-inputs}/summary.json
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    # sample_count: 100  # disabled for full-shard 10k execution; uncomment for small calibration runs
+    # sample_count_per_domain: 40  # disabled for full-shard 10k execution; uncomment for per-domain calibration runs
+    # sample_seed: 42
+    time_min: ${cpu_time_min}
+    dependencies: []
+
+  preprocess_identify_categories:
+    run_name: ${execution_id}
+    input_file: ${directories.step-0-prepare-filtered-inputs}/filtered_image_inputs.jsonl
+    output_file: ${directories.step-1-preprocess-identify-categories}/input_openai_format.jsonl
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    prompt_file: nvflow/recipes/multimodal/prompts/hopchain_category_identification.txt
+    model_config: ${model_profiles.qwen}
+    max_image_dimension: ${max_image_dimension}
+    time_min: ${cpu_time_min}
+    dependencies:
+      - prepare_filtered_image_inputs
+
+  identify_categories:
+    run_name: ${execution_id}
+    input_file: ${directories.step-0-prepare-filtered-inputs}/filtered_image_inputs.jsonl
+    preprocessed_input_file: ${directories.step-1-preprocess-identify-categories}/input_openai_format.jsonl
+    output_dir: ${directories.step-1-identify-categories}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    prompt_file: nvflow/recipes/multimodal/prompts/hopchain_category_identification.txt
+    model_config: ${model_profiles.qwen}
+    max_image_dimension: ${max_image_dimension}
+    temperature: 0.0
+    top_p: 1.0
+    tokens_to_generate: 8192
+    num_chunks: 2 # ~ input_size / 1000 = 2000 / 1000 = 2
+    time_min: ${gpu_time_min}
+    dependencies:
+      - preprocess_identify_categories
+
+  localize_instances:
+    run_name: ${execution_id}
+    input_file: ${directories.step-1-identify-categories}/final_output.jsonl
+    output_dir: ${directories.step-2-localize-instances}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    container: ${model_profiles.sam.container}
+    prompt_file: nvflow/recipes/multimodal/prompts/hopchain_instance_localization_sam3.txt
+    model: ${model_profiles.sam.model}
+    filter_list:
+      - filter_method: min_image_size
+        min_w: 50
+        min_h: 50
+    max_image_dimension: ${max_image_dimension}
+    num_gpus: 1
+    dataloader_num_workers: ${localize_dataloader_num_workers}
+    dataloader_prefetch_factor: ${localize_dataloader_prefetch_factor}
+    num_chunks: ${localize_num_chunks}
+    max_localization_phrases_per_category: 3
+    prompt_alias_iou_dedup_threshold: 0.9
+    debug_save_annotated_images: true
+    debug_annotated_images_dir: ${directories.step-2-localize-instances}/annotated_images
+    threshold: 0.5
+    time_min: ${gpu_time_min}
+    dependencies:
+      - identify_categories
+
+  sample_instance_combinations:
+    run_name: ${execution_id}
+    input_file: ${directories.step-2-localize-instances}/final_output.jsonl
+    output_file: ${directories.step-3-sample-instance-combinations}/instance_combinations.jsonl
+    summary_file: ${directories.step-3-sample-instance-combinations}/summary.json
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    min_instances: ${sample_instance_combinations_min_instances}
+    max_instances: ${sample_instance_combinations_max_instances}
+    selection_strategy: ${sample_instance_combinations_selection_strategy}
+    max_instances_considered_per_image: ${sample_instance_combinations_max_instances_considered_per_image}
+    max_instances_per_category: ${sample_instance_combinations_max_instances_per_category}
+    iou_dedup_threshold: ${sample_instance_combinations_iou_dedup_threshold}
+    iou_dedup_candidate_pool_size: ${sample_instance_combinations_iou_dedup_candidate_pool_size}
+    area_confidence_area_weight: ${sample_instance_combinations_area_confidence_area_weight}
+    area_confidence_confidence_weight: ${sample_instance_combinations_area_confidence_confidence_weight}
+    debug_copy_selected_images: ${sample_instance_combinations_debug_copy_selected_images}
+    debug_selected_images_dir: ${directories.step-3-sample-instance-combinations}/selected_images
+    max_combinations_per_image: ${sample_instance_combinations_max_combinations_per_image}
+    combination_size_strategy: ${sample_instance_combinations_size_strategy}
+    combination_size_weights: ${sample_instance_combinations_size_weights}
+    sampling_seed: ${sample_instance_combinations_sampling_seed}
+    time_min: ${cpu_time_min}
+    dependencies:
+      - localize_instances
+
+  preprocess_generate_multihop_queries:
+    run_name: ${execution_id}
+    input_file: ${directories.step-3-sample-instance-combinations}/instance_combinations.jsonl
+    output_file: ${directories.step-4-preprocess-generate-multihop-queries}/input_openai_format.jsonl
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    prompt_file: nvflow/recipes/multimodal/prompts/hopchain_query_design.txt
+    model_config: ${model_profiles.qwen}
+    num_queries: ${generate_multihop_queries_num_queries}
+    target_hop_count_info: ${generate_multihop_queries_target_hop_count_info}
+    time_min: ${cpu_time_min}
+    dependencies:
+      - sample_instance_combinations
+
+  generate_multihop_queries:
+    run_name: ${execution_id}
+    input_file: ${directories.step-3-sample-instance-combinations}/instance_combinations.jsonl
+    preprocessed_input_file: ${directories.step-4-preprocess-generate-multihop-queries}/input_openai_format.jsonl
+    output_dir: ${directories.step-4-generate-multihop-queries}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    prompt_file: nvflow/recipes/multimodal/prompts/hopchain_query_design.txt
+    model_config: ${model_profiles.qwen}
+    num_queries: ${generate_multihop_queries_num_queries}
+    target_hop_count_info: ${generate_multihop_queries_target_hop_count_info}
+    temperature: ${generate_multihop_queries_temperature}
+    top_p: ${generate_multihop_queries_top_p}
+    tokens_to_generate: ${generate_multihop_queries_tokens_to_generate}
+    num_chunks: ${generate_multihop_queries_num_chunks} # see top-level estimate
+    time_min: ${gpu_time_min}
+    dependencies:
+      - preprocess_generate_multihop_queries
+
+  verify_candidate_queries:
+    run_name: ${execution_id}
+    input_file: ${directories.step-4-generate-multihop-queries}/final_output.jsonl
+    output_dir: ${directories.step-5-verify-candidate-queries}
+    output_file: ${directories.step-5-verify-candidate-queries}/verified_queries.jsonl
+    summary_file: ${directories.step-5-verify-candidate-queries}/summary.json
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    min_hop_count: ${verify_candidate_queries_min_hop_count}
+    time_min: ${cpu_time_min}
+    dependencies:
+      - generate_multihop_queries
+
+  visualize_candidate_hopchain_data:
+    run_name: ${execution_id}
+    queries_input_file: ${directories.step-5-verify-candidate-queries}/final_candidates.jsonl
+    combinations_input_file: ${directories.step-3-sample-instance-combinations}/instance_combinations.jsonl
+    output_dir: ${directories.step-6-visualize-candidate-hopchain-data}
+    summary_file: ${directories.step-6-visualize-candidate-hopchain-data}/summary.json
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    rows_per_file: 100
+    sample_count: 200
+    sample_seed: 42
+    image_max_dimension: 1024
+    title: HopChain Candidate Query Review
+    time_min: ${cpu_time_min}
+    dependencies:
+      - verify_candidate_queries
+
+  judge_candidate_queries_openai:
+    run_name: ${execution_id}
+    input_file: ${directories.step-5-verify-candidate-queries}/final_candidates.jsonl
+    output_file: ${directories.step-7-judge-candidate-queries-openai}/judged_candidates.jsonl
+    output_dir: ${directories.step-7-judge-candidate-queries-openai}
+    summary_file: ${directories.step-7-judge-candidate-queries-openai}/summary.json
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    prompt_file: ${llm_judge_prompt_file}
+    judge_name: openai_gpt_5_5
+    provider: openai
+    model: gpt-5.5
+    api_key_name: OPENAI_API_KEY
+    max_image_dimension: ${max_image_dimension}
+    temperature: ${llm_judge_temperature}
+    top_p: ${llm_judge_top_p}
+    reasoning_effort: ${llm_judge_reasoning_effort}
+    timeout_seconds: ${llm_judge_timeout_seconds}
+    max_retries: ${llm_judge_max_retries}
+    max_workers: ${llm_judge_max_workers}
+    time_min: ${llm_judge_time_min}
+    dependencies:
+      - verify_candidate_queries
+
+  reconcile_llm_judges:
+    run_name: ${execution_id}
+    input_file: ${directories.step-5-verify-candidate-queries}/final_candidates.jsonl
+    output_file: ${directories.step-8-reconcile-llm-judges}/reconciled_queries.jsonl
+    output_dir: ${directories.step-8-reconcile-llm-judges}
+    summary_file: ${directories.step-8-reconcile-llm-judges}/summary.json
+    judge_output_files:
+      - ${directories.step-7-judge-candidate-queries-openai}/judged_candidates.jsonl
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    time_min: ${cpu_time_min}
+    dependencies:
+      - judge_candidate_queries_openai
+
+  preprocess_filter_easy_candidates:
+    run_name: ${execution_id}
+    input_file: ${directories.step-8-reconcile-llm-judges}/reconciled_queries.jsonl
+    output_file: ${directories.step-10-preprocess-filter-easy-candidates}/input_openai_format.jsonl
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    prompt_file: ${difficulty_filter_prompt_file}
+    k: ${difficulty_filter_k}
+    time_min: ${cpu_time_min}
+    dependencies:
+      - reconcile_llm_judges
+
+  filter_easy_candidates:
+    run_name: ${execution_id}
+    input_file: ${directories.step-8-reconcile-llm-judges}/reconciled_queries.jsonl
+    preprocessed_input_file: ${directories.step-10-preprocess-filter-easy-candidates}/input_openai_format.jsonl
+    output_dir: ${directories.step-10-filter-easy-candidates}
+    summary_file: ${directories.step-10-filter-easy-candidates}/summary.json
+    model_config: ${model_profiles.omni}
+    prompt_file: ${difficulty_filter_prompt_file}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    k: ${difficulty_filter_k}
+    num_chunks: ${difficulty_filter_num_chunks}
+    temperature: ${difficulty_filter_temperature}
+    top_p: ${difficulty_filter_top_p}
+    enable_thinking: ${difficulty_filter_enable_thinking}
+    min_pass_rate: ${difficulty_filter_min_pass_rate}
+    max_pass_rate: ${difficulty_filter_max_pass_rate}
+    time_min: ${gpu_time_min}
+    dependencies:
+      - preprocess_filter_easy_candidates
+
+  preprocess_generate_sft_reasoning_traces:
+    run_name: ${execution_id}
+    input_file: ${directories.step-10-filter-easy-candidates}/kept_output.jsonl
+    output_file: ${directories.step-11-preprocess-generate-sft-reasoning-traces}/input_openai_format.jsonl
+    model_config: ${model_profiles.qwen}
+    prompt_file: ${sft_trace_generation_prompt_file}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    max_image_dimension: ${max_image_dimension}
+    k: ${sft_trace_k}
+    time_min: ${cpu_time_min}
+    dependencies:
+      - filter_easy_candidates
+
+  generate_sft_reasoning_traces:
+    run_name: ${execution_id}
+    preprocessed_input_file: ${directories.step-11-preprocess-generate-sft-reasoning-traces}/input_openai_format.jsonl
+    output_file: ${directories.step-11-generate-sft-reasoning-traces}/final_result.jsonl
+    incorrect_output_file: ${directories.step-11-generate-sft-reasoning-traces}/incorrect_answers.jsonl
+    output_dir: ${directories.step-11-generate-sft-reasoning-traces}
+    summary_file: ${directories.step-11-generate-sft-reasoning-traces}/summary.json
+    model_config: ${model_profiles.qwen}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    num_chunks: ${sft_trace_generation_num_chunks}
+    temperature: ${sft_trace_generation_temperature}
+    top_p: ${sft_trace_generation_top_p}
+    tokens_to_generate: ${sft_trace_generation_tokens_to_generate}
+    time_min: ${gpu_time_min}
+    dependencies:
+      - preprocess_generate_sft_reasoning_traces
+
+  preprocess_filter_sft_reasoning_traces:
+    run_name: ${execution_id}
+    input_file: ${directories.step-11-generate-sft-reasoning-traces}/final_result.jsonl
+    output_file: ${directories.step-12-preprocess-filter-sft-reasoning-traces}/input_openai_format.jsonl
+    prompt_file: ${sft_trace_judge_prompt_file}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    time_min: ${cpu_time_min}
+    dependencies:
+      - generate_sft_reasoning_traces
+
+  filter_sft_reasoning_traces:
+    run_name: ${execution_id}
+    input_file: ${directories.step-11-generate-sft-reasoning-traces}/final_result.jsonl
+    preprocessed_input_file: ${directories.step-12-preprocess-filter-sft-reasoning-traces}/input_openai_format.jsonl
+    output_dir: ${directories.step-12-filter-sft-reasoning-traces}
+    summary_file: ${directories.step-12-filter-sft-reasoning-traces}/summary.json
+    model_config: ${model_profiles.qwen}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    num_chunks: ${sft_trace_judge_num_chunks}
+    temperature: ${sft_trace_judge_temperature}
+    top_p: ${sft_trace_judge_top_p}
+    tokens_to_generate: ${sft_trace_judge_tokens_to_generate}
+    time_min: ${gpu_time_min}
+    dependencies:
+      - preprocess_filter_sft_reasoning_traces
+
+  visualize_reconciled_hopchain_data:
+    run_name: ${execution_id}
+    queries_input_file: ${directories.step-8-reconcile-llm-judges}/final_candidates.jsonl
+    combinations_input_file: ${directories.step-3-sample-instance-combinations}/instance_combinations.jsonl
+    output_dir: ${directories.step-9-visualize-reconciled-hopchain-data}
+    summary_file: ${directories.step-9-visualize-reconciled-hopchain-data}/summary.json
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    rows_per_file: 100
+    sample_count: 1000
+    sample_seed: 42
+    image_max_dimension: 1024
+    title: HopChain LLM Judge Reconciliation Review
+    time_min: ${cpu_time_min}
+    dependencies:
+      - reconcile_llm_judges

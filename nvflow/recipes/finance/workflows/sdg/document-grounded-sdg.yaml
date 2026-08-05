@@ -11,14 +11,74 @@ cluster: my_cluster
 base_data_dir: /workspace/outputs/finance/demo/workflow-3-document-grounded-sdg
 filings_dir: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download
 
+# ---------------------------------------------------------------------------
+# NeMo-Gym shared config (used by all generation stages)
+# ---------------------------------------------------------------------------
+# SDG-side rollout uses upstream NeMo-Gym environments:
+#   - format_verification (regex over assistant response)  -> passthrough &
+#     parse-response reward modes (per-record `verifier` injected via
+#     `extra_record_fields`).
+#   - equivalence_llm_judge (LLM-as-judge)                -> judge reward mode
+#     (per-record `expected_answer` injected via `extra_record_field_mappers`).
+# Both are referenced via thin overlay YAMLs that ship with nvflow.
+# ---------------------------------------------------------------------------
+# Gym-only container (dockerfiles/Dockerfile.nemo-gym, key `nemo-gym`): CPU-only, with
+# Gym source at /opt/Gym and per-component venvs baked under /opt/gym-venvs, so
+# SDG no longer needs the heavy nemo-rl image or a runtime `uv sync`.
+gym_path: &gym_path "/opt/Gym"
+gym_uv_venv_dir: &gym_uv_venv_dir "/opt/gym-venvs"
+gym_container: &gym_container "nemo-gym"
+
+# format_verification overlay: shared by passthrough + parse-response modes
+gym_config_paths_format_verification: &gym_config_paths_format_verification
+  - /nemo_run/code/nvflow/lib/sdg/document_grounded/gym_configs/sdg_format_verification.yaml
+
+gym_agent_format_verification: &gym_agent_format_verification "sdg_format_verification_simple_agent"
+
+# Per-record `verifier` payloads for format_verification:
+verifier_passthrough: &verifier_passthrough
+  verifier:
+    type: regex
+    verify_regex: [".*"]
+    verify_min_matches: 0
+
+# Yes/No vote — reward=1.0 if any line in the model output contains "yes"
+# (case-insensitive); 0.0 otherwise.
+verifier_parse_vote: &verifier_parse_vote
+  verifier:
+    type: regex
+    verify_regex: ["[Yy][Ee][Ss]"]
+    verify_min_matches: 1
+# ---------------------------------------------------------------------------
+# Per-stage JSONL trim: domain-specific fields to KEEP at every stage boundary
+# ---------------------------------------------------------------------------
+# Generic DG-SDG stages drop everything outside the union of
+# `STAGE_KEEP[stage]` (in nvflow/generic_stage/sdg/document_grounded/_schemas.py) and the
+# list below. Finance ships the union of SEC 10-K/10-Q metadata variants
+# (1-company, 2-company, optional 3rd section). `content0/1/2` are
+# intentionally NOT in this list: the Q-prep callback folds them into
+# `context`, after which the raw HTML/markdown is redundant.
+finance_domain_keep_fields: &finance_domain_keep_fields
+  - company_name
+  - company_name0
+  - company_name1
+  - year
+  - item_section0
+  - item_section1
+  - item_section2
+  - file_path0
+  - file_path1
+  - file_path2
+  - file_type
+
 pipeline_stages:
-  - dg_sdg_preprocess            # Preprocess: sec filing -> chunk data -> JSONL data
-  - generate_verified_qa         # Combined: Q(prep+gen+prep+verify) + A(prep+gen)
-  - genselect_answers
+  - dg_sdg_preprocess              # Preprocess: sec filing -> chunk data -> JSONL data
+  - generate_verified_questions    # Q-side: prep + Q-gen + verify-prep + Q-verify
+  - generate_answers               # A-side: a-prep (threshold filter) + A-gen
+  - gym_genselect_answers          # GenSelect via NeMo-Gym (replaces genselect_answers for DG-SDG)
   - evaluate_answers
-  - aggregate_answers          # Aggregate 5 evaluation results
-  - difficulty_estimation      # Estimate difficulty using small model
-  - dgsdg_post_process      # Post process document grounded sdg data
+  - aggregate_answers              # Aggregate evaluation results across seeds
+  - dgsdg_post_process             # Clean + rename fields, emit final_result.jsonl
 
 stages:
   # SEC Filing Preprocessing: Convert raw HTML to structured JSONL
@@ -28,7 +88,9 @@ stages:
     # Output: Preprocessed data directory
     output_dir: ${base_data_dir}/step-0-preprocess
     # Distribution files for sampling (contains 10k/10q distribution CSVs, we have distribution files follow secque benchmark analysis in the repo)
-    distribution_dir: /workspace/nvflow/recipes/finance/workflows/sdg/dg_sdg_distribution
+    distribution_dir: nvflow/recipes/finance/workflows/sdg/dg_sdg_distribution
+    # Domain CLI module used by shared generic DG-SDG preprocess stage.
+    preprocess_module: nvflow.recipes.finance.utils.sdg.dg_sdg_data_preprocess
     dependencies: []
 
     # Chunking settings
@@ -41,131 +103,138 @@ stages:
     seed: 42
 
 
-  # Combined question and answer generation stage (renamed for clarity)
-  generate_verified_qa:
+  # Q-side: prep + Q-gen + verify-prep + Q-verify
+  generate_verified_questions:
     input_folder: ${base_data_dir}/step-0-preprocess/jsonl
-    output_dir: ${base_data_dir}/step-1-qa-pipeline
+    output_dir: ${base_data_dir}/step-1-questions
     dependencies: [dg_sdg_preprocess]
+    domain_keep_fields: *finance_domain_keep_fields
 
-
-    # Question generation settings
+    # NeMo-Gym shared config (defaults for both Q sub-steps; each can override)
+    gym_path: *gym_path
+    gym_uv_venv_dir: *gym_uv_venv_dir
+    # Domain wrapper script used by shared generic DG-SDG stage.
+    question_prep_script: nvflow/recipes/finance/utils/sdg/sec_question_prep.py
+    gym_config_paths: *gym_config_paths_format_verification
+    gym_agent_name: *gym_agent_format_verification
+    container: *gym_container
+    # Question generation: passthrough (1:N output, can't verify inline)
     question_generation_kwargs:
       args:
-        model: /hf_models/openai/gpt-oss-120b # Update your model path
-        server_type: vllm
-        server_gpus: 8
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
         server_nodes: 1
         num_random_seeds: 1
         num_chunks: 1
-        skip_filled: True
       ctx_args: >-
         ++prompt_config=nvflow/recipes/finance/prompts/document_grounded_generate_questions.yaml
         ++inference.temperature=0.9
         ++inference.top_p=0.9
-        ++chat_template_kwargs.reasoning_effort=high
+    question_generation_extra_record_fields: *verifier_passthrough
 
-    # Question verification settings
+    # Question verification: parse-response Yes/No vote
     question_verify_kwargs:
       args:
-        model: /hf_models/Qwen/Qwen3-235B-A22B-Instruct-2507 # Update your model path
-        server_type: vllm
-        server_gpus: 8
+        model: /hf_models/Qwen/Qwen3-235B-A22B-Instruct-2507
+        num_gpus: 8
         server_nodes: 1
         num_random_seeds: 5
         num_chunks: 1
-        skip_filled: True
       ctx_args: >-
         ++prompt_config=nvflow/recipes/finance/prompts/document_grounded_verify_questions.yaml
         ++inference.temperature=0.1
         ++inference.top_p=0.1
+    question_verify_extra_record_fields: *verifier_parse_vote
 
-    # Answer Preprocessing settings
+  # A-side: a-prep (threshold filter) + A-gen
+  generate_answers:
+    input_dir: ${base_data_dir}/step-1-questions/verified
+    output_dir: ${base_data_dir}/step-2-answers
+    dependencies: [generate_verified_questions]
+    domain_keep_fields: *finance_domain_keep_fields
+
+    # NeMo-Gym shared config
+    gym_path: *gym_path
+    gym_uv_venv_dir: *gym_uv_venv_dir
+    gym_config_paths: *gym_config_paths_format_verification
+    gym_agent_name: *gym_agent_format_verification
+    container: *gym_container
+    # Answer Preprocessing settings (threshold filter on Q-verify pass rate)
     answer_preprocess_kwargs:
       threshold: 1
 
-    # Answer generation settings
+    # Answer generation: passthrough (just generate, evaluate later)
     answer_generation_kwargs:
       args:
         model: /hf_models/openai/gpt-oss-120b
-        server_type: vllm
-        server_gpus: 8
+        num_gpus: 8
         server_nodes: 1
         num_chunks: 1
         num_random_seeds: 5
       ctx_args: >-
         ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
-        ++chat_template_kwargs.reasoning_effort=high
+    answer_generation_extra_record_fields: *verifier_passthrough
 
-  genselect_answers:
-    input_dir: ${base_data_dir}/step-1-qa-pipeline/answer_pipeline/generated
-    output_file: ${base_data_dir}/step-2-genselect/selected_answers.jsonl
-    prompt_config: nvflow/recipes/finance/prompts/genselect_answers.yaml
-    inline_args: "++inference.tokens_to_generate=16384"
-    dependencies: [generate_verified_qa]
-    stage_kwargs:
-      model: /hf_models/Qwen/Qwen3-235B-A22B-Instruct-2507
-      server_type: vllm
-      server_gpus: 8
+  gym_genselect_answers:
+    input_dir: ${base_data_dir}/step-2-answers/generated
+    output_file: ${base_data_dir}/step-3-genselect/selected_answers.jsonl
+    prompt_template: nvflow/recipes/finance/prompts/genselect_answers.yaml
+    dependencies: [generate_answers]
+    domain_keep_fields: *finance_domain_keep_fields
+
+    # NeMo-Gym: passthrough (genselect just generates, no verification)
+    gym_path: *gym_path
+    gym_uv_venv_dir: *gym_uv_venv_dir
+    gym_config_paths: *gym_config_paths_format_verification
+    gym_agent_name: *gym_agent_format_verification
+    container: *gym_container
+    extra_record_fields: *verifier_passthrough
+
+    policy_vllm:
+      model_path: /hf_models/Qwen/Qwen3-235B-A22B-Instruct-2507
+      num_gpus: 8
       server_nodes: 1
-      num_chunks: 5
+    num_chunks: 5
+    inference_params:
+      max_output_tokens: 16384
 
   evaluate_answers:
-    input_file: ${base_data_dir}/step-2-genselect/selected_answers.jsonl
-    output_dir: ${base_data_dir}/step-3-evaluate
-    prompt_config: nvflow/recipes/finance/prompts/evaluate_answers.yaml
-    inline_args: "++generation_key=evaluate_generation ++inference.top_p=0.9 ++inference.temperature=0.8"
-    dependencies: [genselect_answers]
-    stage_kwargs:
-      model: /hf_models/Qwen/Qwen3-235B-A22B-Instruct-2507
-      server_type: vllm
-      server_gpus: 8
+    input_file: ${base_data_dir}/step-3-genselect/selected_answers.jsonl
+    output_dir: ${base_data_dir}/step-4-evaluate
+    prompt_template: nvflow/recipes/finance/prompts/evaluate_answers.yaml
+    generation_key: evaluate_generation
+    dependencies: [gym_genselect_answers]
+    domain_keep_fields: *finance_domain_keep_fields
+
+    # NeMo-Gym: passthrough (generate evaluation text, parse/filter in postprocess)
+    gym_path: *gym_path
+    gym_uv_venv_dir: *gym_uv_venv_dir
+    gym_config_paths: *gym_config_paths_format_verification
+    gym_agent_name: *gym_agent_format_verification
+    container: *gym_container
+    extra_record_fields: *verifier_passthrough
+
+    policy_vllm:
+      model_path: /hf_models/Qwen/Qwen3-235B-A22B-Instruct-2507
+      num_gpus: 8
       server_nodes: 1
-      num_chunks: 1
-      num_random_seeds: 5
+    num_chunks: 1
+    num_random_seeds: 5
+    inference_params:
+      top_p: 0.9
+      temperature: 0.8
 
   aggregate_answers:
-    input_dir: ${base_data_dir}/step-3-evaluate
-    output_file: ${base_data_dir}/step-4-aggregate/aggregated_answers.jsonl
+    input_dir: ${base_data_dir}/step-4-evaluate
+    output_file: ${base_data_dir}/step-5-aggregate/aggregated_answers.jsonl
     dependencies: [evaluate_answers]
-
-
-  difficulty_estimation:
-    input_file: ${base_data_dir}/step-4-aggregate/aggregated_answers.jsonl
-    output_file: ${base_data_dir}/step-5-difficulty/answers_with_difficulty.jsonl
-    work_dir: ${base_data_dir}/step-5-difficulty
-    num_random_seeds: 5
-    dependencies: [aggregate_answers]
-
-
-    # Small model for answering (Qwen3-4B)
-    answer_model_kwargs:
-      args:
-        model: /hf_models/Qwen/Qwen3-4B-Instruct-2507
-        server_type: vllm
-        server_gpus: 8
-        server_nodes: 1
-        num_chunks: 5
-      ctx_args: >-
-        ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
-        ++inference.temperature=0.7
-
-    answer_prompt_config: nvflow/recipes/finance/prompts/secque_template.yaml
-
-    # Large model for judging (GPT-OSS120)
-    judge_model_kwargs:
-      args:
-        model: /hf_models/openai/gpt-oss-120b
-        server_type: vllm
-        server_gpus: 8
-        server_nodes: 1
-        num_chunks: 1
-      ctx_args: >-
-        ++inference.temperature=0.1
-
-    judge_prompt_config: nvflow/recipes/finance/prompts/judge_difficulty.yaml
+    domain_keep_fields: *finance_domain_keep_fields
 
   dgsdg_post_process:
-    input_file: ${base_data_dir}/step-5-difficulty/answers_with_difficulty.jsonl
+    input_file: ${base_data_dir}/step-5-aggregate/aggregated_answers.jsonl
     output_dir: ${base_data_dir}/step-6-post-process
+    # Domain wrapper script used by shared generic DG-SDG stage.
+    postprocess_script: nvflow/recipes/finance/utils/sdg/sec_postprocess.py
     seed: 42
-    dependencies: [difficulty_estimation]
+    dependencies: [aggregate_answers]
+    domain_keep_fields: *finance_domain_keep_fields

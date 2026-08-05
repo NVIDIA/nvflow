@@ -5,11 +5,14 @@ Comprehensive troubleshooting guide for common issues across all finance recipe 
 ## Quick Navigation
 
 - [Cluster & Infrastructure](#cluster--infrastructure)
-- [Offline Runtime](#self-sufficient-runtime)
+- [Offline Runtime](#offline-runtime)
 - [Resource Issues](#resource-issues)
 - [Data Issues](#data-issues)
 - [Training Issues](#training-issues)
 - [Workflow-Specific Issues](#workflow-specific-issues)
+- [Resuming Interrupted Workflows](#resuming-interrupted-workflows)
+- [Frequently Asked Questions](#frequently-asked-questions)
+- [Getting Additional Help](#getting-additional-help)
 
 ---
 
@@ -92,39 +95,15 @@ scontrol show config | grep SLURM_VERSION
 # Confirmed: SLURM 25.11.2 needs this fix, SLURM 24.x works without it
 ```
 
-**Additional notes:**
-- If Ray cluster hangs during initialization, apply this fix
-- The fix changes how containers are executed (uses `enroot exec` instead of `--container-name`)
-- Test on your cluster - symptom is Ray cluster initialization hang
+This changes how containers are launched, using `enroot exec` instead of `--container-name`.
 
 ---
 
 ## Offline Runtime
 
-The default NVFlow images (`nvflow-nemo-rl`, `nvflow-nemo-skills`, `nvflow-vllm`, `nvflow-vllm-grpo`) are built to run with **no outbound network access** at job time. Most "weird" runtime errors on a freshly-deployed cluster trace back to a missing offline asset, a stale overlay mount, or an env var that was cleared.
+The NVFlow images (`nvflow-nemo-skills`, `nvflow-vllm` at both tags, `nvflow-nemo-gym`, `nvflow-nemo-rl`) run with **no outbound network access** at job time, including the `training` stage: `nvflow-nemo-rl` bakes the Gym venvs at build time, so nothing needs resolving over the network. `UV_OFFLINE` is nonetheless left **unset**, which preserves dev mode: mount local Gym source and `uv` resolves it. Most "weird" runtime errors on a freshly-deployed cluster trace back to a missing offline asset, a stale overlay mount, or an env var that was cleared.
 
 For the full build / deploy / verify flow, see [INSTALL.md](../../../INSTALL.md) and [`dockerfiles/docker_instructions.md`](../../../dockerfiles/docker_instructions.md).
-
-### GRPO `installation_command` fails with `No such file or directory`
-
-**Problem:** A GRPO stage (`prepare_data`, `collect_rollouts`, `compute_rewards`, or `training`) fails immediately after `source /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate` with:
-
-```
-bash: /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate: No such file or directory
-```
-
-**Cause:** You bind-mounted a host clone of NeMo-RL or NeMo-Gym at `/opt/NeMo-RL` (or `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym`), which shadows the baked `.venv` inside the `nvflow-nemo-rl` image.
-
-**Solution:** Remove the overlay mounts from `cluster_configs/my_cluster.yaml`. The self-sufficient image already contains everything GRPO needs:
-
-```yaml
-mounts:
-  # COMMENT THESE OUT (or delete) for normal production runs:
-  # - <PATH_TO_NEMO_RL_CLONE>:/opt/NeMo-RL
-  # - <PATH_TO_GYM_CLONE>:/opt/NeMo-RL/3rdparty/Gym-workspace/Gym
-```
-
-See [INSTALL.md → Setup NeMo-RL & NeMo-Gym Sources](../../../INSTALL.md#setup-nemo-rl--nemo-gym-sources-for-grpo) for when (rarely) the overlay is correct.
 
 ### `huggingface_hub.errors.OfflineModeIsEnabled` / `LocalEntryNotFoundError`
 
@@ -134,17 +113,44 @@ See [INSTALL.md → Setup NeMo-RL & NeMo-Gym Sources](../../../INSTALL.md#setup-
 
 **Solution:**
 - **Models:** Pre-download to your mounted `hf_models` directory with `hf download` -- see [INSTALL.md → Download Models](../../../INSTALL.md#download-models).
-- **Datasets / SEC filings:** Some stages (`download_sec_filings`, `create_seed_data`, eval `prepare_data`, GRPO `prepare_data` with `should_download: true`) need internet on first run. Run them on a connected node with the three `HF_*_OFFLINE` flags **temporarily commented out** in `my_cluster.yaml`; keep `UV_OFFLINE=true` set. The artifacts persist under `/workspace` and are reused by every subsequent run.
+- **Datasets / SEC filings:** Some stages (`download_sec_filings`, `create_seed_data`, eval `prepare_data`, GRPO `prepare_data` with `should_download: true`) need internet on first run. Run them on a connected node with the three `HF_*_OFFLINE` flags **temporarily commented out** in `my_cluster.yaml`. The artifacts persist under `/workspace` and are reused by every subsequent run.
 
-### `uv` errors with "package not installed" or tries to resolve from PyPI
+### GRPO `training` fails: `uv` tries to resolve, or `ng_run` / `nemo_gym` not found
 
-**Problem:** A Ray worker or stage script fails because `uv` is trying to download a package.
+**Problem:** The `training` stage fails soon after start with `uv` trying to download packages, a hung resolution, or a missing Gym module.
 
-**Cause (usual):** Someone enabled `NRL_FORCE_REBUILD_VENVS=true` in offline mode. That flag forces Ray workers to re-resolve packages via `uv`, which requires internet.
+**Cause:** Nothing should resolve at runtime — `nvflow-nemo-rl` bakes one Gym venv per component. A resolve attempt means those baked venvs aren't the ones in use, which has two usual causes: a host clone bind-mounted over `/opt/nemo-rl/3rdparty/Gym-workspace/Gym`, shadowing the baked source and venvs; or the job running the stock upstream `nemo-rl` base, which ships the RL environment but leaves the Gym venvs unbuilt.
 
-**Solution:** Comment out `NRL_FORCE_REBUILD_VENVS` in `my_cluster.yaml`. It's only safe to enable on a connected node when you've bind-mounted a host NeMo-RL source overlay and changed the source tree -- see [`docs/cluster-configuration.md`](../../cluster-configuration.md#nemo-rl--grpo-variables-dev-mode-only).
+**Solution:**
+1. Confirm `containers.nemo-rl` in your cluster config points at the image built from [`dockerfiles/Dockerfile.nemo-rl`](../../../dockerfiles/Dockerfile.nemo-rl), not the stock base.
+2. Remove any Gym or NeMo-RL source mount from the `mounts:` block.
+3. Only if you are deliberately running dev mode against mounted source: leave `UV_OFFLINE` unset and confirm the compute nodes can reach a pypi mirror. See [`docs/development/nemo-rl-gym.md`](../../development/nemo-rl-gym.md).
 
-**Cause (rare):** A baked venv is genuinely missing a dependency. Rebuild the image with the missing package added to the Dockerfile and re-run the sanity checks from [`dockerfiles/docker_instructions.md` §2](../../../dockerfiles/docker_instructions.md#2-sanity-checks-blockers).
+The Gym-only stages (`collect_rollouts`, `compute_rewards`, `prefetch_cache`, `prepare_data`) instead run on the self-contained `nvflow-nemo-gym` image (baked venvs, no build); if one of those reports `ng_run: command not found`, the image is missing its baked venvs -- re-check the nemo-gym build in [`docs/maintainers/containers.md`](../../maintainers/containers.md).
+
+### `omegaconf.errors.InterpolationKeyError: Interpolation key '<name>' not found` after mounting a Gym branch
+
+**Problem:** A `training` or `ng_run`-driven job fails at NeMo-Gym config-load time with, e.g.:
+
+```
+omegaconf.errors.InterpolationKeyError: Interpolation key 'tavily_api_key' not found
+    full_key: tavily_api_key
+    object_type=dict
+```
+
+**Cause:** The Gym source introduced a new `${<name>}` interpolation in a resource-server YAML that the overlays under `nvflow/recipes/finance/workflows/grpo/overlays/` don't yet define. This is drift between the Gym source and the overlays, not a runtime requirement — the runtime treats the value as optional (an empty `tavily_api_key` disables Tavily web_search gracefully).
+
+**Solution (clean, no upstream change):** Add a placeholder for the missing key in the relevant overlay under `nvflow/recipes/finance/workflows/grpo/overlays/`. For `tavily_api_key` specifically, that's `finance_sec_search_env.yaml`:
+
+```yaml
+# Required since upstream Gym introduced ${tavily_api_key} in finance_sec_search.yaml.
+# Empty string disables tavily gracefully -- finance_sec_search uses SEC tools only.
+tavily_api_key: ""
+```
+
+Restart the job; OmegaConf will resolve the interpolation against the overlay value and the resource server will log `No tavily_api_key configured — web_search will be unavailable` and continue.
+
+If this happens for a key other than `tavily_api_key`, the same recipe applies: identify which Gym resource-server YAML references the new `${<name>}`, and add the corresponding overlay placeholder under `nvflow/recipes/finance/workflows/grpo/overlays/`.
 
 ### `tiktoken` / `openai_harmony` fails to load offline
 
@@ -163,7 +169,7 @@ env_vars:
 
 Verify the cache exists inside the image:
 ```bash
-docker run --rm nvflow-nemo-skills:0229040 ls /opt/tiktoken_cache
+docker run --rm nvflow-nemo-skills:v1.1.2 ls /opt/tiktoken_cache
 # Expect: cl100k_base.tiktoken (and o200k_base.tiktoken in vllm images)
 ```
 
@@ -175,7 +181,7 @@ docker run --rm nvflow-nemo-skills:0229040 ls /opt/tiktoken_cache
 
 **Solution:** Already fixed in `Dockerfile.nemo-skills` (apt `tzdata`). If you see this in a custom-built image, confirm `tzdata` is installed:
 ```bash
-docker run --rm nvflow-nemo-skills:0229040 bash -c \
+docker run --rm nvflow-nemo-skills:v1.1.2 bash -c \
   'python3 -c "import pyarrow as pa; pa.array([], type=pa.timestamp(\"ns\", tz=\"UTC\")); print(\"OK\")"'
 ```
 

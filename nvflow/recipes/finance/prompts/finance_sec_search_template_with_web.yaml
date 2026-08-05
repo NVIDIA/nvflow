@@ -15,6 +15,26 @@
 # Usage: Point prompt_template to this file in base.yaml or model config
 #        when the environment has tavily_api_key configured.
 #        This file is NOT referenced by default -- use it explicitly.
+#
+# DO NOT "fix" the following wording, even though they look like typos --
+# they match vals-ai/finance-agent eval (prompt.py L8, tools.py L23-24,
+# L58, L62) verbatim to keep train and eval surface identical:
+#   - "to apply answer questions"             (user prompt L27)
+#   - "any necessary reasoning"               (submit_final_result desc L164)
+#   - "search range for in the format ..."    (web_search start_date L195)
+#   - "end date to search range in the ..."   (web_search end_date L198)
+# Cross-referenced against https://github.com/vals-ai/finance-agent main
+# branch, finance_agent/{prompt.py,tools.py}.  If you correct these here
+# you will diverge the policy's observed surface from the harness it is
+# scored against -- file an upstream PR with vals-ai instead.
+#
+# DELIBERATE divergence (do NOT add to web_search start_date/end_date):
+#   - The "If the value is later than 2025-04-07, it will be set to ..."
+#     MAX_END_DATE clamp text from eval (tools.py L62, L157, L162) is
+#     skipped here because our training uses per-record jittered dates
+#     that legitimately fall after 2025-04-07; including the clamp would
+#     contradict the policy's intended action space.  Revisit once we
+#     also pin current_date to the same 2025-04-07 anchor as eval.
 # ============================================================================
 
 user: |
@@ -192,10 +212,10 @@ tools:
           description: "The query to search for"
         start_date:
           type: string
-          description: "(optional) The start date for the search range in the format YYYY-MM-DD"
+          description: "(optional) The start date for the search range for in the format YYYY-MM-DD"
         end_date:
           type: string
-          description: "(optional) The end date for the search range in the format YYYY-MM-DD"
+          description: "(optional) The end date to search range in the format YYYY-MM-DD"
         number_of_results:
           type: integer
           description: "(optional) The number of search results to return."

@@ -47,6 +47,7 @@ Shell / script templates:
 
 import hashlib
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -101,10 +102,138 @@ def check_launcher_cwd() -> None:
         )
 
 
+def launcher_is_remote(cluster_config: dict) -> bool:
+    """True when launching off-cluster via an ``ssh_tunnel`` cluster config.
+
+    In that mode the launch host has no local Lustre mount, so resume/status
+    filesystem checks must run on the cluster over SSH (see :class:`LauncherFS`).
+    When ``ssh_tunnel`` is absent, ``nemo_run``/``nemo_skills`` assume the
+    launcher already runs on the cluster, and local ``Path`` ops are used --
+    identical to the historical behaviour.
+    """
+    return "ssh_tunnel" in (cluster_config or {})
+
+
+class LauncherFS:
+    """Filesystem probes for the launcher that work both on- and off-cluster.
+
+    - Within the cluster (no ``ssh_tunnel``): uses local :class:`pathlib.Path`
+      operations via :func:`resolve_host_path` -- byte-for-byte the historical
+      behaviour, so there is no regression for the common case.
+    - Off-cluster (``ssh_tunnel`` set): runs ``test``/``rm``/``ls`` on the
+      cluster over the tunnel (``get_tunnel`` + ``get_unmounted_path``), the
+      same mechanism ``nemo_skills.get_remaining_jobs`` uses, so the launcher
+      needs no local Lustre mount.
+
+    All paths passed in are *container* paths (e.g. ``/workspace/...``); the
+    remote backend maps them to the real cluster path automatically.
+    """
+
+    def __init__(self, cluster_config: dict):
+        self.cluster_config = cluster_config
+        self.remote = launcher_is_remote(cluster_config)
+
+    # -- remote helpers -----------------------------------------------------
+    def _tunnel(self):
+        from nemo_skills.pipeline.utils.cluster import get_tunnel
+
+        return get_tunnel(self.cluster_config)
+
+    def _unmounted(self, container_path: str) -> str:
+        from nemo_skills.pipeline.utils import get_unmounted_path
+
+        return str(get_unmounted_path(self.cluster_config, str(container_path)))
+
+    # -- public API (container paths in) -----------------------------------
+    def exists(self, container_path: str) -> bool:
+        if not self.remote:
+            return resolve_host_path(str(container_path)).exists()
+        return self.batch_exists([str(container_path)]).get(str(container_path), False)
+
+    def batch_exists(self, container_paths: list[str]) -> dict[str, bool]:
+        paths = [str(p) for p in container_paths]
+        if not paths:
+            return {}
+        if not self.remote:
+            return {p: resolve_host_path(p).exists() for p in paths}
+        result: dict[str, bool] = {}
+        tunnel = self._tunnel()
+        batch = 40
+        for i in range(0, len(paths), batch):
+            group = paths[i : i + batch]
+            lines = []
+            for idx, cp in enumerate(group):
+                hp = shlex.quote(self._unmounted(cp))
+                lines.append(f'if [ -e {hp} ]; then echo "{idx}:Y"; else echo "{idx}:N"; fi')
+            out = tunnel.run("; ".join(lines), hide=True, warn=True).stdout
+            parsed: dict[int, bool] = {}
+            for line in out.splitlines():
+                line = line.strip()
+                key, sep, val = line.partition(":")
+                if sep and key.isdigit():
+                    parsed[int(key)] = val.strip().endswith("Y")
+            for idx, cp in enumerate(group):
+                result[cp] = parsed.get(idx, False)
+        return result
+
+    def rm(self, container_paths: list[str]) -> None:
+        paths = [str(p) for p in container_paths]
+        if not paths:
+            return
+        if not self.remote:
+            for p in paths:
+                resolve_host_path(p).unlink(missing_ok=True)
+            return
+        tunnel = self._tunnel()
+        batch = 40
+        for i in range(0, len(paths), batch):
+            group = paths[i : i + batch]
+            quoted = " ".join(shlex.quote(self._unmounted(p)) for p in group)
+            tunnel.run(f"rm -f {quoted}", hide=True, warn=True)
+
+    def ls(self, container_dir: str, pattern: str) -> list[str]:
+        """Return sorted basenames matching ``pattern`` directly under ``container_dir``."""
+        if not self.remote:
+            d = resolve_host_path(str(container_dir))
+            return sorted(p.name for p in d.glob(pattern)) if d.exists() else []
+        hp = shlex.quote(self._unmounted(str(container_dir)))
+        # pattern is a controlled literal glob (e.g. output-rs*.jsonl); leave it
+        # unquoted so the remote shell expands it.
+        out = (
+            self._tunnel()
+            .run(
+                f"cd {hp} 2>/dev/null && ls -1 {pattern} 2>/dev/null || true", hide=True, warn=True
+            )
+            .stdout
+        )
+        return sorted(ln.strip() for ln in out.splitlines() if ln.strip())
+
+    def count_lines(self, container_path: str) -> int:
+        """Line count of a file (local only; callers skip this when remote)."""
+        hp = resolve_host_path(str(container_path))
+        if not hp.exists():
+            return 0
+        with open(hp) as f:
+            return sum(1 for _ in f)
+
+
 VLLM_MODEL = "responses_api_models/vllm_model/configs/vllm_model.yaml"
 VLLM_MODEL_FOR_TRAINING = "responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
-SERVER_CONTAINER = "vllm"
-"""Container name for vLLM server jobs (matches cluster_configs key)."""
+VLLM_CONTAINER = "vllm-grpo"
+"""Default container key for GRPO vLLM server jobs (matches cluster_configs key).
+
+This is only a fallback default: the value is configurable per stage via the
+``vllm_container`` key in the workflow YAML (see base.yaml
+``collect_rollouts`` / ``compute_rewards``), read in :func:`rollout._parse_rollout_config`
+and :func:`verify` as ``config.get("vllm_container", VLLM_CONTAINER)``.
+
+Defaults to ``vllm-grpo`` (vLLM v0.20.0) rather than ``vllm`` (v0.22.0) so the
+rollout-collection and reward (judge) servers run the SAME vLLM version the GRPO
+training stage generates with -- keeping tokenization, sampling, and
+tool/reasoning-parser behavior consistent between rollout data and training.
+The ``vllm`` (v0.22.0) container remains for SDG / eval. Both are built from
+dockerfiles/Dockerfile.vllm; ``VLLM_VERSION`` selects the base tag.
+"""
 
 
 def resolve_environments(config: dict[str, Any]) -> dict[str, Any]:
@@ -191,6 +320,8 @@ NON_VLLM_KEYS = frozenset(
         "trust_remote_code",
         "hf_config_overrides",
         "server_entrypoint",
+        "num_samples_in_parallel",
+        "dependent_jobs",
     }
 )
 """Keys in vLLM config dicts that are NOT ``vllm serve`` CLI flags.
@@ -391,6 +522,84 @@ def build_judge_ng_run_overrides(
 
     # policy_as_judge: no judge overrides needed
     return ""
+
+
+def build_ng_run_invocation(
+    *,
+    step_label: str,
+    policy_base_url: str,
+    policy_model: str,
+    judge_ng_run_overrides: str = "",
+    include_port_range: bool = False,
+) -> str:
+    """Render the shared ``ng_run`` invocation block (rollout + verify).
+
+    Common to ``collect_rollouts`` (``rollout.py``) and ``compute_rewards``
+    (``verify.py``).  Emits the step-header echo, launches ``gym env start`` in
+    the background with policy-model + head-server overrides, captures
+    ``NG_RUN_PID`` for trap-on-cleanup, and probes the head server via
+    ``wait_for_server``.
+
+    The caller is responsible for everything *outside* the invocation
+    block:
+      - ``HEAD_SERVER_PORT=$(find_free_port)`` (rollout allocates this
+        just before ng_run to minimise the TOCTOU window; verify
+        allocates earlier in setup so the port is also visible to the
+        port-read preamble).
+      - ``cd "$GYM_PATH"`` (the Gym CLI is provided by the stage's
+        ``installation_command`` -- on PATH -- not sourced here).
+      - ``SHELL_WAIT_FOR_SERVER`` definition (must be in scope before
+        this block runs; both call sites already include it in their
+        setup segment).
+
+    Args:
+        step_label: Step header text, e.g. ``"[Step 2/3]"`` (rollout has
+            three steps: ng_run, collect, finalize) or ``"[Step 1/2]"``
+            (verify has two: ng_run, re-judge).
+        policy_base_url: Bash literal or shell variable used for
+            ``vllm_model.base_url``.  Rollout uses ``"$VLLM_URL"``
+            (the live policy server); verify uses
+            ``"http://localhost:0/v1"`` (a stub -- re-judge does not
+            invoke the policy).
+        policy_model: Bash literal or shell variable used for
+            ``vllm_model.model``.  Rollout uses ``"$MODEL_PATH"``;
+            verify uses ``"unused"``.
+        judge_ng_run_overrides: Pre-formatted overrides string from
+            :func:`build_judge_ng_run_overrides`.  Empty string for
+            policy-as-judge mode.
+        include_port_range: When ``True``, emits the
+            ``+port_range_low=1024 +port_range_high=8999`` workaround
+            for the NeMo-Gym ephemeral-port collision issue.  Required
+            for rollout (where local vLLM lives on the same node and
+            collides with NeMo-Gym's default port range).  Not needed
+            for re-judge where no policy vLLM runs.
+    """
+    port_range_block = (
+        '    "+port_range_low=1024" \\\n    "+port_range_high=8999" \\\n'
+        if include_port_range
+        else ""
+    )
+    return (
+        'echo ""\n'
+        f'echo "{step_label} Starting NeMo-Gym servers ..."\n'
+        'gym env start "+config_paths=[$CONFIG_PATHS]" \\\n'
+        f'    "+policy_model.responses_api_models.vllm_model.base_url={policy_base_url}" \\\n'
+        '    "+policy_model.responses_api_models.vllm_model.api_key=EMPTY" \\\n'
+        f'    "+policy_model.responses_api_models.vllm_model.model={policy_model}" \\\n'
+        '    "+head_server.host=127.0.0.1" \\\n'
+        '    "+head_server.port=$HEAD_SERVER_PORT" \\\n'
+        f"{port_range_block}"
+        '    "+skip_venv_if_present=true" \\\n'
+        # Reuse the baked per-component venvs. UV_VENV_DIR is set by the caller's
+        # variables segment: /opt/gym-venvs for the nemo-gym image, else $GYM_PATH
+        # (== Gym's default PARENT_DIR), which is behavior-preserving.
+        '    "+uv_venv_dir=$UV_VENV_DIR" \\\n'
+        f"{judge_ng_run_overrides}"
+        '    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &\n'
+        "NG_RUN_PID=$!\n"
+        "\n"
+        'wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" $NG_RUN_PID 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log"\n'
+    )
 
 
 def build_judge_nemo_gym_config(

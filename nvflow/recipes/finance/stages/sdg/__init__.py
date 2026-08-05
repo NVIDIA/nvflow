@@ -12,13 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Auto-discover SDG stages."""
+"""Register finance SDG stages."""
 
-import importlib
-from pathlib import Path
+from nvflow.generic_stage.sdg.document_grounded import register_for_recipe
 
-_current_dir = Path(__file__).parent
-for file in _current_dir.glob("*.py"):
-    if file.name.startswith(".") or file.stem.startswith("_"):
-        continue
-    importlib.import_module(f".{file.stem}", package=__package__)
+# Import the remaining template-based SDG stages for registration side effects.
+from . import (  # noqa: F401
+    create_seed_data,
+    filter_answers,
+    generate_answers,
+    generate_questions,
+    genselect_answers,
+    map_questions_to_context,
+)
+
+# Register shared document-grounded SDG stages for this recipe.
+register_for_recipe("finance")

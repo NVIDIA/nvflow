@@ -108,6 +108,8 @@ uv run pre-commit install
 
 > ⚠️ **Developers:** Always run `uv run pre-commit install` after cloning. This enables automatic code quality checks on every commit.
 
+> 🔌 **Air-gapped / no internet on the install host?** Skip the local install and drive `nflow` from the prebuilt `nvflow-client` container (CLI + venv baked in, no `uv sync`). See [docs/remote-launch.md](docs/remote-launch.md).
+
 ### Activating the Virtual Environment (Optional)
 
 By default, use `uv run <command>` to run commands in the project's virtual environment. If you prefer to activate the environment directly:
@@ -123,11 +125,13 @@ pytest
 
 ## 🔧 Cluster Setup
 
-To run workflows on a Slurm cluster you need to: (1) build the four NVFlow
-container images from the Dockerfiles in [`dockerfiles/`](dockerfiles/),
-(2) convert them to `.sqsh` for Slurm, and (3) write a cluster config
-(`cluster_configs/my_cluster.yaml`). The containers are self-sufficient —
-all dependencies are pre-installed, so no runtime downloads are needed.
+To run workflows on a Slurm cluster you need to: (1) build the NVFlow
+container images from the Dockerfiles in [`dockerfiles/`](dockerfiles/)
+(`nemo-rl`, `nemo-gym`, `nemo-skills`, `vllm`, `vllm-grpo`; only `sglang` is
+pulled as-is), (2) convert them to `.sqsh` for Slurm, and (3) write a cluster
+config (`cluster_configs/my_cluster.yaml`). Every image bakes the packages and
+virtual environments its stages need, so no stage resolves dependencies at job
+runtime (see [INSTALL.md](INSTALL.md)).
 
 > **See [INSTALL.md](INSTALL.md)** for the complete setup guide
 > (build, sanity-check, `.sqsh` conversion, model staging, cluster
@@ -141,6 +145,9 @@ Once cluster setup is complete, set the config directory:
 ```bash
 export NEMO_SKILLS_CONFIG_DIR=/path/to/nvflow/cluster_configs
 ```
+
+> **Airgapped / no local install?** Drive `nflow` from the `nvflow-client`
+> container (no `uv sync` needed) over an SSH tunnel — see [docs/remote-launch.md](docs/remote-launch.md).
 
 ## 🚀 Quick Start
 
@@ -200,16 +207,14 @@ nvflow/
     │   ├── stages/sdg/        # Example SDG stage
     │   ├── prompts/           # Prompt templates
     │   └── workflows/         # Example workflows
-    └── finance/               # Finance reasoning recipe
-        ├── stages/            # Stage implementations
-        │   ├── download/      # SEC filing download
-        │   ├── evaluation/    # Evaluation stages
-        │   ├── rl/            # GRPO RL training stages
-        │   ├── sdg/           # SDG stages
-        │   ├── sft/           # SFT training stages
-        │   └── shared/        # Shared stages (data_transformation, train_validation_split)
-        ├── prompts/           # Prompt templates
-        └── workflows/         # Workflow configs
+    ├── finance/               # Finance reasoning recipe
+    │   ├── stages/            # Stage implementations
+    │   ├── prompts/           # Prompt templates
+    │   └── workflows/         # Workflow configs
+    └── multimodal/            # Multimodal HopChain recipe
+        ├── stages/            # Image filtering and SDG stages
+        ├── prompts/           # Vision-language prompt templates
+        └── workflows/         # HopChain workflow configs
 ```
 
 ## 📝 Creating a Stage
@@ -261,7 +266,7 @@ End-to-end pipeline for generating synthetic financial Q&A data from SEC filings
 **Quick Links:**
 - [Quick Start (~3 hour demo)](docs/recipes/finance/quick-start.md) - Get started quickly with 7 companies
 - [Workflow Guides](docs/recipes/finance/workflows/) - Detailed guides for all 6 workflows
-- [Stage Reference](docs/recipes/finance/stages/) - Technical specifications for 42 stages
+- [Stage Reference](docs/recipes/finance/stages/) - Technical specifications for all 37 stages
 
 **Pipeline:**
 ```
@@ -269,11 +274,30 @@ download-sec → template-sdg / document-sdg → sft → eval → grpo
 ```
 
 **Features:**
-- 42 stages across 6 workflows
+- 37 stages across 6 workflows (1 + 6 + 7 + 6 + 7 + 10)
 - Two SDG approaches (template-based & document-grounded)
 - Multiple model support (GPT-OSS-120B, Qwen3, Nemotron)
-- Produces 80K+ synthetic Q&A pairs
+- Produces 300K+ synthetic Q&A pairs
 - Complete training and evaluation pipeline
+
+### Multimodal HopChain Recipe
+
+**📚 [Complete Multimodal Recipe Documentation →](docs/recipes/multimodal/README.md)**
+
+HopChain-inspired multimodal synthetic data generation for multi-hop
+vision-language reasoning.
+
+**Pipeline:**
+```
+image-filter → identify-categories → localize-instances → sample-combinations
+  → generate-queries → verify → judge/reconcile → difficulty-filter → sft-traces
+```
+
+**Features:**
+- Two workflows: image filtering and SDG
+- SAM-backed instance localization
+- Structural verification and optional external LLM judges
+- Optional SFT reasoning-trace generation and filtering
 
 ## 📚 CLI Commands
 
@@ -314,5 +338,5 @@ Apache-2.0
 ## 🙏 Acknowledgments
 
 Built on:
-- [NeMo-Skills](https://github.com/NVIDIA/NeMo-Skills)
+- [NeMo-Skills](https://github.com/NVIDIA-NeMo/Skills)
 - [NeMo-RL](https://github.com/NVIDIA-NeMo/RL)

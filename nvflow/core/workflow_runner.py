@@ -275,8 +275,9 @@ class WorkflowRunner:
             self._run_stage(stage_name, environment=environment, stages_to_run=stages_to_run)
             completed_stages.append(stage_name)
 
-        header("✅ Workflow Complete!")
-        success(f"Completed {len(completed_stages)} stage(s): {', '.join(completed_stages)}")
+        header("✅ Workflow Submitted")
+        success(f"Submitted {len(completed_stages)} stage(s): {', '.join(completed_stages)}")
+        detail("Note", "Stages run as Slurm jobs -- track them with squeue")
 
     def _preflight_pipeline_health(
         self,

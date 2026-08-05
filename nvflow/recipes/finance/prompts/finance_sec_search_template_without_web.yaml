@@ -11,6 +11,16 @@
 #
 # Note: This template intentionally omits {context}. The agent discovers
 #       SEC filings via tools rather than receiving pre-loaded context.
+#
+# DO NOT "fix" the following wording, even though they look like typos --
+# they match vals-ai/finance-agent eval (prompt.py L8, tools.py L23-24)
+# verbatim to keep train and eval surface identical:
+#   - "to apply answer questions"           (user prompt, this file L23)
+#   - "any necessary reasoning"             (submit_final_result desc L160)
+# Cross-referenced against https://github.com/vals-ai/finance-agent main
+# branch, finance_agent/{prompt.py,tools.py}.  If you correct these here
+# you will diverge the policy's observed surface from the harness it is
+# scored against -- file an upstream PR with vals-ai instead.
 # ============================================================================
 
 user: |
@@ -20,7 +30,7 @@ user: |
   You should answer all questions as if the current date is {current_date}.
 
   You will have access to a data storage system. You can use this system to store parsed contents of HTML pages retrieved from the web.
-  You can then use the retrieve_information tool to answer questions or gather information from the stored documents using LLM-based prompts.
+  You can then use the retrieve_information tool to apply answer questions or gather information from the stored documents using LLM-based prompts.
   This data storage system is designed to help you avoid context window issues.
 
   When you have the final answer, you should call the `submit_final_result` tool with it. Your submission will not be processed unless you call this tool.
@@ -157,8 +167,8 @@ tools:
     name: submit_final_result
     description: >-
       Submits the final answer to the user. You should include your final
-      answer, as well as any reasoning, justification, calculations, and
-      explanation. Finally, you should provide any sources used to answer
+      answer, as well as any necessary reasoning, justification, calculations,
+      and explanation. Finally, you should provide any sources used to answer
       the question. You MUST use this tool to submit your final result.
       The user will not see your response if you do not use this tool to
       submit. You will not be able to continue working after this tool is

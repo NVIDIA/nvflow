@@ -19,7 +19,7 @@ pipeline_stages:
 stages:
   generate_answer:
     # run_name: "v1"  # Optional: add to distinguish multiple experiment runs
-    input_file: /workspace/nvflow/recipes/example/data/input/data.jsonl
+    input_file: nvflow/recipes/example/data/input/data.jsonl
     output_dir: ${base_data_dir}/step-1-generate-answer
     prompt_config: nvflow/recipes/example/prompts/generate_answer.yaml
     inline_args: "++inference.temperature=0.7 ++inference.top_p=0.9"

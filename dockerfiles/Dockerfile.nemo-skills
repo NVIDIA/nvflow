@@ -1,49 +1,75 @@
 # =============================================================================
 # NVFlow NeMo-Skills Container
-# =============================================================================
-# Self-contained Dockerfile that builds the NeMo-Skills evaluation container
-# with all required packages pre-installed.
 #
-# Build:
-#   docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:latest .
+# 1. UPSTREAM (NeMo-Skills' Dockerfile at a pinned commit, kept diffable),
+# 2. NVFLOW (packages the workflow steps import), 3. CVE (scan-driven only --
+# delete it for a stock image). Upstream:
+# https://github.com/NVIDIA-NeMo/Skills/blob/main/dockerfiles/Dockerfile.nemo-skills
 #
-# Upstream source:
-#   https://github.com/NVIDIA-NeMo/Skills/blob/main/dockerfiles/Dockerfile.nemo-skills
+# Build (single-arch, host platform; see docker_instructions.md for multi-arch):
+#   docker build --no-cache \
+#     -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:v1.1.2 .
 # =============================================================================
 
+# Section 3 item; Docker needs builder stages first, so delete it with the COPY in
+# section 3. wandb 0.28.1 (newest release) bundles wandb-core built with Go 1.26.4,
+# grpc-go v1.82.0 and x/text v0.38.0; commit e118409 is the unreleased fix.
+# Cross-compiled from BUILDPLATFORM to skip arm64 emulation.
+ARG WANDB_CORE_COMMIT=e1184091520c9b44aa1096fdb27b2f4bf52f26d7
+FROM --platform=$BUILDPLATFORM golang:1.26.5 AS wandb-core-builder
+ARG WANDB_CORE_COMMIT
+ARG TARGETARCH
+RUN git init /src/wandb && cd /src/wandb && \
+    git remote add origin https://github.com/wandb/wandb.git && \
+    git sparse-checkout init --cone && git sparse-checkout set core && \
+    git fetch --depth 1 origin "${WANDB_CORE_COMMIT}" && git checkout --detach FETCH_HEAD
+RUN cd /src/wandb/core && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
+        -tags "disable_grpc_modules parquet_read_only" \
+        -ldflags "-s -w -X main.commit=${WANDB_CORE_COMMIT}" -mod=vendor \
+        -o /wandb-core ./cmd/wandb-core && \
+    go version -m /wandb-core | grep -F "go1.26.5" && \
+    go version -m /wandb-core | grep -E "google\.golang\.org/grpc[[:space:]]+v1\.82\.1([[:space:]]|$)" && \
+    go version -m /wandb-core | grep -E "golang\.org/x/text[[:space:]]+v0\.40\.0([[:space:]]|$)"
 
-# Clone NeMo-Skills at a pinned commit (replaces build-context COPY commands)
+# NeMo-Skills at a pinned commit, replacing upstream's build-context COPYs.
 FROM scratch AS nemo-skills-src
-ARG NEMO_SKILLS_COMMIT=022904023ad7a83a87662a313cf72e7df5891d55
+ARG NEMO_SKILLS_COMMIT=e06c9b900177be3f60d6a3f99135bb5de9af9bed
 ADD --keep-git-dir=true https://github.com/NVIDIA-NeMo/Skills.git#${NEMO_SKILLS_COMMIT} /
 
 
 # ===========================================================================
-# BEGIN UPSTREAM (adapted from NeMo-Skills Dockerfile.nemo-skills)
-# Source: https://github.com/NVIDIA-NeMo/Skills/blob/0229040/dockerfiles/Dockerfile.nemo-skills
-# Modifications:
-#   - COPY commands changed to COPY --from=nemo-skills-src
-#   - Added `tzdata` to apt packages (required by pyarrow/pandas; populates
-#     /usr/share/zoneinfo so libc tz lookups resolve, e.g. "UTC")
+# 1. BEGIN UPSTREAM -- github.com/NVIDIA-NeMo/Skills @ e06c9b90
+# Deviations, so a diff after re-syncing shows only these:
+#   - COPY -> COPY --from=nemo-skills-src (pinned SHA instead of build context)
+#   - google-research not cloned (unused here; carries Criticals)
+#   - `cd /tmp` before the nltk download (upstream defect; see below)
+#   - ARG WANDB_CORE_COMMIT redeclared, for the CVE section's COPY
+# Do not add --no-install-recommends below: it drops gpg-agent, which
+# add-apt-repository needs for the apptainer PPA key.
 # ===========================================================================
 
+# using ubuntu instead of debian for easier apptainer installation on arm64
 FROM ubuntu:22.04
+ARG WANDB_CORE_COMMIT
 
+# Install Python and other dependencies
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    apt-get install -y \
     python3.10 \
     python3-pip \
     curl \
     wget \
     git \
     git-lfs \
-    ffmpeg \
-    tzdata && \
+    ffmpeg && \
     ln -s /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip setuptools uv
+RUN pip install --upgrade pip setuptools "uv>=0.11.10"
 
+# Update package lists and install apptainer for arm64
+# https://apptainer.org/docs/admin/1.1/installation.html
 RUN apt update && \
     apt install -y software-properties-common && \
     add-apt-repository -y ppa:apptainer/ppa && \
@@ -52,8 +78,18 @@ RUN apt update && \
     apt update && apt install -y apptainer-suid && \
     rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 
+# Apply security patches for PackageKit, pulled in transitively by software-properties-common.
+# Ubuntu 22.04 has published 1.2.5-2ubuntu3.1 with the fix for the local privilege escalation CVE.
+RUN apt-get update && \
+    apt-get install --only-upgrade -y \
+        packagekit \
+        packagekit-tools \
+        libpackagekit-glib2-18 \
+        gir1.2-packagekitglib-1.0 && \
+    rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
+
+# for ifeval benchmark -- google-research clone skipped (see deviations)
 RUN mkdir /opt/benchmarks
-RUN git clone https://github.com/google-research/google-research.git /opt/benchmarks/google-research --depth=1
 
 RUN git clone https://github.com/ShishirPatil/gorilla.git /opt/gorilla
 RUN cd /opt/gorilla && git checkout 86d0374d0db52623c5092a73f82c22b87b7e9a25
@@ -61,6 +97,7 @@ RUN cd /opt/gorilla/berkeley-function-call-leaderboard && pip install --no-cache
 
 RUN apt remove -y python3-blinker
 
+# ifbench
 ARG IFBENCH_COMMIT=c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c
 ARG IFBENCH_REPO=https://github.com/allenai/IFBench.git
 ARG IFBENCH_DIR=/opt/benchmarks/IFBench
@@ -68,24 +105,32 @@ RUN git init "$IFBENCH_DIR" && cd "$IFBENCH_DIR" && git remote add origin "$IFBE
     git fetch --depth 1 origin "${IFBENCH_COMMIT}" && git reset --hard FETCH_HEAD
 RUN cd ${IFBENCH_DIR} && pip install -r requirements.txt
 
+# removing on-the-fly installation in ifbench to avoid conflicts from parallel jobs
 COPY --from=nemo-skills-src /dockerfiles/ifbench.patch /opt/benchmarks/IFBench/ifbench.patch
 RUN cd /opt/benchmarks/IFBench && git apply ifbench.patch
 
+# nltk >=3.10.1 blocks imports resolving inside the CWD; at CWD=/ that matches
+# every stdlib path, so `import nltk` needs the `cd`. Downloads use fixed paths.
 RUN pip install langdetect absl-py immutabledict nltk ipython && \
-    python -c "import nltk; from spacy.cli import download; nltk.download('punkt'); nltk.download('punkt_tab'); \
+    cd /tmp && python -c "import nltk; from spacy.cli import download; nltk.download('punkt'); nltk.download('punkt_tab'); \
     nltk.download('stopwords'); nltk.download('averaged_perceptron_tagger_eng'); download('en_core_web_sm')"
 
+# we aren't copying main nemo_skills folder as it will always be mounted from host
+# but we do want to install all requirements in the container directly
 RUN mkdir -p /opt/NeMo-Skills/requirements /opt/NeMo-Skills/core
 COPY --from=nemo-skills-src /pyproject.toml /opt/NeMo-Skills/pyproject.toml
 COPY --from=nemo-skills-src /README.md /opt/NeMo-Skills/README.md
 COPY --from=nemo-skills-src /requirements/ /opt/NeMo-Skills/requirements/
 COPY --from=nemo-skills-src /core/requirements.txt /opt/NeMo-Skills/core/requirements.txt
+# installing sdp in container only
 RUN pip install git+https://github.com/NVIDIA/NeMo-speech-data-processor@29b9b1ec0ceaf3ffa441c1d01297371b3f8e11d2
 ARG CACHEBUST=4
-RUN echo "httpx>=0.28.1" > /tmp/overrides.txt && \
-    uv pip install --system --no-cache --override /tmp/overrides.txt \
-      -r /opt/NeMo-Skills/core/requirements.txt \
-      -r /opt/NeMo-Skills/requirements/pipeline.txt
+# Install via `uv pip` from the project directory so [tool.uv].override-dependencies
+# in pyproject.toml (which relaxes leptonai's httpx==0.27.2 pin so litellm 1.83.x
+# can be installed) is picked up. Plain pip ignores [tool.uv] and the resolver fails.
+RUN cd /opt/NeMo-Skills && uv pip install --system --no-cache-dir \
+    -r core/requirements.txt -r requirements/pipeline.txt
+# Fix http mismatch between lepton and dggs by manually downloading dggs here
 RUN pip install ddgs
 
 # ===========================================================================
@@ -94,11 +139,13 @@ RUN pip install ddgs
 
 
 # ===========================================================================
-# NVFlow Additional Packages
+# 2. NVFLOW -- imported by workflow steps; baked so no job downloads at launch.
 # ===========================================================================
-# Pre-install packages used by NVFlow workflow steps so they are available
-# at runtime without needing to download anything.
-# ===========================================================================
+
+# tzdata populates /usr/share/zoneinfo for pyarrow/pandas libc tz lookups.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata && \
+    rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir --ignore-requires-python \
     jsonlines \
@@ -110,15 +157,12 @@ RUN pip install --no-cache-dir --ignore-requires-python \
     "model-library==0.1.8" \
     "compute-eval @ git+https://github.com/NVIDIA/compute-eval.git@2d14770"
 
-# Pre-cache tiktoken encodings so no downloads are needed at runtime.
 # cl100k_base is used by question_context_utils.py for token counting.
 ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
 RUN mkdir -p /opt/tiktoken_cache && \
     python3 -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 
-# SEC data-prep dependencies for workflow-2 (download_sec_filings) and
-# workflow-3 step-0 (create_seed_data). Baked in so the recipe-level
-# installation_command can stay empty -- no PyPI fetch at job-launch time.
+# SEC data prep: workflow-2 download_sec_filings, workflow-3 create_seed_data.
 RUN pip install --no-cache-dir --ignore-requires-python \
         edgartools==5.20.2 \
         sec-parser \
@@ -130,9 +174,98 @@ RUN pip install --no-cache-dir --ignore-requires-python \
         requests \
         beautifulsoup4
 
-# Fail-fast smoke check so the image won't ship missing a needed dep.
 RUN python -c "from edgar import set_identity; \
                import sec_parser, pandas, pyarrow, httpx, tzdata, requests; \
-               from bs4 import BeautifulSoup; \
-               from datasets import load_dataset; \
-               print('SEC-prep + create_seed_data deps OK')"
+               from bs4 import BeautifulSoup; from datasets import load_dataset; \
+               print('NVFlow deps OK')"
+
+
+# ===========================================================================
+# 3. CVE -- scan findings only, not functionality; drop each once upstream ships
+# the fix. Floors upstream already satisfies are asserted, never re-pinned --
+# re-pinning core packages is what silently broke tokenizers once.
+# ===========================================================================
+
+# libssl3 -> High CVE-2026-45447. linux-libc-dev's ~176 header findings are inert
+# but fix-available; nothing compiles at runtime.
+RUN apt-get update && apt-get install -y --only-upgrade --no-install-recommends libssl3 && \
+    apt-get purge -y linux-libc-dev && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# cssutils imports more_itertools at module level, and pip earlier resolved that
+# against an apt copy which autoremove above then took away. Own it with pip.
+RUN pip install --no-cache-dir --ignore-installed more-itertools
+
+# starlette and lxml have no satisfiable version: the fixes (GHSA-86qp-5c8j-p5mr,
+# -x746-7m8f-x49c, -wqp7-x3pw-xc5r, -jp82-jpqv-5vv3, -82w8-qh3p-5jfq; and
+# GHSA-vfmq-68hx-4jfw) landed in 1.x and 6.1.0, above the caps in leptonai's
+# instrumentator pin and in sec-parser. Forced, and allowlisted in the pip check.
+# GitPython and datamodel-code-generator are not in upstream's graph, so they are
+# requested here. Full requirement set, no --upgrade: no ceiling missed, nothing
+# else moves.
+RUN printf '%s\n' 'starlette>=1.3.1' 'lxml>=6.1.0' > /tmp/cve-overrides.txt && \
+    cd /opt/NeMo-Skills && uv pip install --system --no-cache-dir \
+        --override /tmp/cve-overrides.txt \
+        -r core/requirements.txt -r requirements/pipeline.txt \
+        'GitPython>=3.1.55' 'datamodel-code-generator>=0.64.0'
+
+# Pairs with the wandb-core-builder stage; the commit is injected at link time.
+COPY --from=wandb-core-builder /wandb-core /usr/local/lib/python3.10/dist-packages/wandb/bin/wandb-core
+RUN /usr/local/lib/python3.10/dist-packages/wandb/bin/wandb-core --help 2>&1 | \
+    grep -F "Commit SHA: ${WANDB_CORE_COMMIT}"
+
+# Benchmark trees finance never runs, and Ray's Java jar (jackson-databind
+# findings; Ray is used only through Python). bfcl_eval was installed editable, so
+# uninstall it rather than leave a dangling dist-info.
+RUN uv pip uninstall --system bfcl_eval || true && \
+    rm -rf /opt/gorilla /opt/benchmarks/IFBench /usr/local/lib/python3*/dist-packages/ray/jars && \
+    ! python -c "import bfcl_eval" 2>/dev/null && \
+    [ -z "$(find /usr/local/lib/python3*/dist-packages -maxdepth 1 -name '*bfcl*')" ] && \
+    ! find /usr/local /opt -name 'ray_dist.jar' -type f 2>/dev/null | grep -q . && \
+    python -c "import ray; print('bfcl/IFBench removed, ray OK:', ray.__version__)"
+
+# Asserted, not pinned, so a regression fails the build rather than being papered
+# over. wandb is exact: the patched core binary must match its Python protocol.
+RUN python -c "from importlib.metadata import version as v; from packaging.requirements import Requirement as R; \
+               floors = ['starlette>=1.3.1', 'GitPython>=3.1.55', 'datamodel-code-generator>=0.64.0', \
+                         'nltk>=3.10.0', 'wandb==0.28.1', 'litellm>=1.84.10', 'lxml>=6.1.0', \
+                         'httpx>=0.28.1', 'urllib3>=2.6.3', 'msgpack>=1.2.1', 'setuptools>=78.1.1', \
+                         'click>=8.2,<9', 'typer>=0.16,<0.27', 'mcp<2.0']; \
+               bad = ['%s %s needs %s' % (r.name, v(r.name), r.specifier) for r in map(R, floors) \
+                      if not r.specifier.contains(v(r.name), prereleases=True)]; \
+               assert not bad, bad; print('CVE floors OK')"
+
+# Gate what the upgrades put at risk, here rather than on the cluster: transformers
+# enforces its tokenizers range at import, and lxml is forced past sec-parser's
+# cap, so parse a document rather than only importing it.
+RUN python -c "from transformers import AutoTokenizer; import transformers, tokenizers, lxml.etree, sec_parser; \
+               import cssutils; from litellm import completion; from fastapi import FastAPI; FastAPI(); \
+               els = sec_parser.Edgar10QParser().parse('<html><body><p style=\"font-weight:bold\">Item 2. Management Discussion</p><p>Revenue rose 12 percent.</p></body></html>'); \
+               assert len(els) >= 2, els; \
+               print('gates OK: transformers', transformers.__version__, 'tokenizers', tokenizers.__version__, \
+                     'lxml', lxml.etree.__version__, '/', len(els), 'sec elements')"
+
+RUN WANDB_MODE=offline WANDB_SILENT=true WANDB_DIR=/tmp/wandb-smoke \
+    python -c "import wandb; run = wandb.init(project='nvflow-security-smoke', name='offline'); \
+               run.log({'metric': 1.0}); run.finish(); print('wandb offline smoke OK')" && \
+    rm -rf /tmp/wandb-smoke
+
+# Whole-environment check, last so nothing can invalidate it. Matched on the exact
+# pair, so a new break fails even in a listed package. The first three are
+# upstream's own (its pyproject overrides, and sdp's numpy pin).
+RUN printf '%s\n' \
+        'leptonai .* requirement httpx' \
+        'torchx .* requirement urllib3' \
+        'sdp .* requirement numpy' \
+        'prometheus-fastapi-instrumentator .* requirement starlette' \
+        'sec-parser .* requirement lxml' \
+        'No broken requirements found' \
+        > /tmp/pipcheck-allow.txt; \
+    pip check > /tmp/pipcheck.txt 2>&1 || true; \
+    if grep -vEf /tmp/pipcheck-allow.txt /tmp/pipcheck.txt | grep -q '[^[:space:]]'; then \
+        echo "ERROR: unexpected dependency inconsistency:"; cat /tmp/pipcheck.txt; exit 1; \
+    fi; \
+    cat /tmp/pipcheck.txt
+
+# uv's sdist cache leaves Git metadata that nSpect's global policy flags.
+RUN rm -rf /root/.cache/uv /tmp/cve-overrides.txt /tmp/pipcheck.txt /tmp/pipcheck-allow.txt

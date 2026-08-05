@@ -1,0 +1,102 @@
+# =============================================================================
+# NVFlow NeMo-Gym container (CPU-only). For Gym-only stages (prepare_data /
+# prefetch_cache), the eval rollout client, and SDG rollouts. GRPO/training
+# uses Dockerfile.nemo-rl.
+#
+# Bakes one venv per component (`gym env start ... +dry_run=true`) for
+# equivalence_llm_judge, finance_sec_search and format_verification, reused
+# offline at runtime. They live in /opt/gym-venvs, outside /opt/Gym, so a dev
+# source mount overlays source only. Non-baked components fall back to an
+# on-demand `uv` build, which needs a writable venv dir and network.
+#
+# Build (GYM_REF is a pinned SHA, so a cached clone layer cannot go stale).
+# Single-arch, host platform; see docker_instructions.md for multi-arch:
+#   docker build -f dockerfiles/Dockerfile.nemo-gym -t nvflow-nemo-gym:0.4.0 .
+# =============================================================================
+ARG PYTHON_VERSION=3.12
+ARG GYM_VENV_DIR=/opt/gym-venvs
+ARG GYM_CLI_VENV=/opt/gym-cli-venv
+
+# --- builder -----------------------------------------------------------------
+FROM python:${PYTHON_VERSION}-slim AS builder
+ARG PYTHON_VERSION
+ARG GYM_VENV_DIR
+ARG GYM_CLI_VENV
+ENV UV_INSTALL_DIR=/usr/local/bin UV_PYTHON_PREFERENCE=only-system
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl ca-certificates build-essential && rm -rf /var/lib/apt/lists/*
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Upstream Gym main; the finance fork is retired (its fixes landed via PR #2055).
+ARG GYM_REPO_URL=https://github.com/NVIDIA-NeMo/Gym.git
+ARG GYM_REF=33ef60369f76557e6a6dd828c0bd5f5529624a92
+RUN git clone "${GYM_REPO_URL}" /opt/Gym && cd /opt/Gym && git checkout --detach "${GYM_REF}" && \
+    test "$(git rev-parse HEAD)" = "${GYM_REF}" && \
+    echo "Gym baked at ${GYM_REF}"
+
+# CLI venv outside /opt/Gym so a source mount can't shadow it. The `gym` wrapper
+# calls the venv python directly: uv's editable entry-point script is unreliable
+# under podman/enroot.
+RUN uv venv "${GYM_CLI_VENV}" --python "$(command -v python${PYTHON_VERSION})" && \
+    cd /opt/Gym && uv pip install --python "${GYM_CLI_VENV}/bin/python" -e "."
+RUN printf '#!/bin/sh\nexec "%s/bin/python" -c "from nemo_gym.cli.main import main; main()" "$@"\n' \
+        "${GYM_CLI_VENV}" > /usr/local/bin/gym && chmod +x /usr/local/bin/gym
+
+# Bake per-component venvs. Inline values only satisfy config resolution during
+# the dry-run; the recipe sets real values at runtime.
+RUN cd /opt/Gym && \
+    gym env start --resources-server equivalence_llm_judge --model-type vllm_model \
+      +dry_run=true +uv_venv_dir="${GYM_VENV_DIR}" +skip_venv_if_present=false \
+      +policy_base_url=http://unset/v1 +policy_api_key=unset +policy_model_name=unset && \
+    gym env start --resources-server finance_sec_search --model-type vllm_model \
+      +dry_run=true +uv_venv_dir="${GYM_VENV_DIR}" +skip_venv_if_present=false \
+      +policy_base_url=http://unset/v1 +policy_api_key=unset +policy_model_name=unset \
+      +search_judge_model_base_url=https://api.openai.com/v1 \
+      +search_judge_model_api_key=unset +search_judge_model_name=gpt-5-mini +tavily_api_key=null && \
+    gym env start --resources-server format_verification/freeform_formatting --model-type vllm_model \
+      +dry_run=true +uv_venv_dir="${GYM_VENV_DIR}" +skip_venv_if_present=false \
+      +policy_base_url=http://unset/v1 +policy_api_key=unset +policy_model_name=unset
+
+# Gym calls uvicorn.run(timeout_worker_healthcheck=) (uvicorn>=0.37) but declares
+# no floor; assert so a resolver regression fails here, not at the first rollout.
+RUN "${GYM_VENV_DIR}/resources_servers/finance_sec_search/.venv/bin/python" -c \
+    "import inspect, uvicorn; \
+assert 'timeout_worker_healthcheck' in inspect.signature(uvicorn.run).parameters, uvicorn.__version__; \
+print('uvicorn', uvicorn.__version__, 'OK')"
+
+# Record the ref before dropping history, so a running container can still report
+# which Gym it carries.
+RUN echo "${GYM_REF}" > /opt/gym-commit && rm -rf /opt/Gym/.git
+
+# --- final -------------------------------------------------------------------
+FROM python:${PYTHON_VERSION}-slim
+ARG GYM_VENV_DIR
+ARG GYM_CLI_VENV
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates procps curl && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/gym-commit  /opt/gym-commit
+COPY --from=builder /opt/Gym         /opt/Gym
+COPY --from=builder ${GYM_CLI_VENV}  ${GYM_CLI_VENV}
+COPY --from=builder ${GYM_VENV_DIR}  ${GYM_VENV_DIR}
+COPY --from=builder /usr/local/bin/gym /usr/local/bin/gym
+
+# Let a non-root runtime create new component venvs: open the top + category
+# dirs; baked component dirs and venv files stay untouched.
+RUN chmod a+rwX ${GYM_VENV_DIR} ${GYM_VENV_DIR}/*/
+
+# uv: on-demand venv build for non-baked components (baked ones never use it).
+COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
+
+# DG-SDG helper deps in the base interpreter for nvflow `python3 -m ...` jobs.
+RUN pip install --no-cache-dir orjson pyyaml
+
+WORKDIR /
+
+# ===========================================================================
+# Security hardening (Trivy/NSPECT scans, 2026-07-08)
+# ===========================================================================
+# rm all ray_dist.jar copies (shipped 3x): jackson-databind RCE CVE-2026-54512/CVE-2026-54513 (Ray-Java unused); fail build if one survives
+RUN find /opt /usr/local -name 'ray_dist.jar' -type f -delete 2>/dev/null; \
+    ! find /opt /usr/local -name 'ray_dist.jar' -type f 2>/dev/null | grep -q .

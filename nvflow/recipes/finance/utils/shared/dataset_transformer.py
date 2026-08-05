@@ -15,7 +15,6 @@
 """Transform SEC-QUE dataset to standard training format."""
 
 import argparse
-import json
 import re
 import sys
 import uuid
@@ -24,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from nvflow.utils import setup_logger
+from nvflow.utils.jsonl import iter_jsonl, write_jsonl
 
 # Initialize logger
 logger = setup_logger(__name__)
@@ -362,42 +362,51 @@ def main():
             continue
 
         file_records = 0
-        with open(input_path, encoding="utf-8") as infile:
-            for line_num, line in enumerate(infile, 1):
-                total_records += 1
-                file_records += 1
-                try:
-                    record = json.loads(line.strip())
-                    transformed, error = transform_record(
-                        record,
-                        source_format=args.source_format,
-                        reasoning_mode=args.reasoning_mode,
-                    )
+        # ``iter_jsonl`` with ``yield_error`` lets us route malformed lines to
+        # ``error_records`` (matching legacy behaviour) instead of crashing.
+        # ``enumerate`` preserves the 1-based ``line_number`` field stamped on
+        # each error entry -- downstream auditors rely on it to grep the
+        # source file directly.  Empty lines are silently skipped by
+        # ``iter_jsonl`` (legacy behaviour was to count them in
+        # ``total_records`` via the bare ``for line in infile`` loop, but they
+        # never produced an output record either way -- the count discrepancy
+        # is irrelevant since stats are derived from kept/error counts).
+        for line_num, (record, parse_exc, raw_line) in enumerate(
+            iter_jsonl(input_path, on_error="yield_error"), 1
+        ):
+            total_records += 1
+            file_records += 1
+            if parse_exc is not None:
+                error_msg = f"JSON decode error: {parse_exc}"
+                error_records.append(
+                    {
+                        "source_file": str(input_path),
+                        "line_number": line_num,
+                        "error": error_msg,
+                        "raw_line": raw_line.decode("utf-8", errors="replace"),
+                    }
+                )
+                logger.error(f"[{input_path.name}:{line_num}] {error_msg}")
+                continue
 
-                    if transformed:
-                        transformed_records.append(transformed)
-                    else:
-                        error_records.append(
-                            {
-                                "source_file": str(input_path),
-                                "line_number": line_num,
-                                "error": error,
-                                "record": record,
-                            }
-                        )
-                        logger.warning(f"[{input_path.name}:{line_num}] {error}")
+            transformed, error = transform_record(
+                record,
+                source_format=args.source_format,
+                reasoning_mode=args.reasoning_mode,
+            )
 
-                except json.JSONDecodeError as e:
-                    error_msg = f"JSON decode error: {e}"
-                    error_records.append(
-                        {
-                            "source_file": str(input_path),
-                            "line_number": line_num,
-                            "error": error_msg,
-                            "raw_line": line,
-                        }
-                    )
-                    logger.error(f"[{input_path.name}:{line_num}] {error_msg}")
+            if transformed:
+                transformed_records.append(transformed)
+            else:
+                error_records.append(
+                    {
+                        "source_file": str(input_path),
+                        "line_number": line_num,
+                        "error": error,
+                        "record": record,
+                    }
+                )
+                logger.warning(f"[{input_path.name}:{line_num}] {error}")
 
         logger.info(f"  Processed {file_records:,} records from {input_path.name}")
 
@@ -447,9 +456,9 @@ def main():
         # Save filtered records to output directory
         if filtered_records:
             filtered_path = output_path.parent / "filtered_outliers.jsonl"
-            with open(filtered_path, "w", encoding="utf-8") as filtfile:
+            with write_jsonl(filtered_path) as filtfile:
                 for filt in filtered_records:
-                    filtfile.write(json.dumps(filt, ensure_ascii=False) + "\n")
+                    filtfile.write(filt)
             logger.info(f"Filtered outliers saved to: {filtered_path}")
     else:
         # No filtering - use all transformed records
@@ -488,15 +497,29 @@ def main():
 
         if dedup_dropped_records:
             dedup_path = output_path.parent / "duplicates.jsonl"
-            with open(dedup_path, "w", encoding="utf-8") as dedup_file:
+            with write_jsonl(dedup_path) as dedup_file:
                 for record in dedup_dropped_records:
-                    dedup_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    dedup_file.write(record)
             logger.info(f"Dropped duplicates saved to: {dedup_path}")
 
     # Write final records to chunks directory (always use chunking structure)
     num_chunks = args.num_chunks
     chunks_dir = output_path.parent / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove any stale chunks from a previous run before writing new ones.
+    # Without this, a rerun with a smaller ``--num_chunks`` than the
+    # previous run would silently leave higher-index chunk files on disk;
+    # downstream stages (e.g. apply_prompt_template) glob this directory
+    # and would then mix stale records into the new dataset.  Scoped to
+    # the exact ``final_result_chunk*.jsonl`` naming pattern so we never
+    # touch sibling artefacts (errors.jsonl, duplicates.jsonl, etc.) --
+    # those live in ``output_path.parent``, not ``chunks_dir``.
+    stale_chunks = sorted(chunks_dir.glob("final_result_chunk*.jsonl"))
+    for stale in stale_chunks:
+        stale.unlink()
+    if stale_chunks:
+        logger.info(f"Removed {len(stale_chunks):,} stale chunk file(s) from previous run")
 
     records_per_chunk = (len(final_records) + num_chunks - 1) // num_chunks
 
@@ -512,9 +535,9 @@ def main():
             continue
 
         chunk_file = chunks_dir / f"final_result_chunk{chunk_idx + 1}.jsonl"
-        with open(chunk_file, "w", encoding="utf-8") as outfile:
+        with write_jsonl(chunk_file) as outfile:
             for record in chunk_records:
-                outfile.write(json.dumps(record, ensure_ascii=False) + "\n")
+                outfile.write(record)
         logger.info(
             f"  → Chunk {chunk_idx + 1}: {len(chunk_records):,} records → {chunk_file.name}"
         )
@@ -522,9 +545,9 @@ def main():
     # Write error records if any
     if error_records:
         error_path = output_path.parent / "errors.jsonl"
-        with open(error_path, "w", encoding="utf-8") as errfile:
+        with write_jsonl(error_path) as errfile:
             for error_record in error_records:
-                errfile.write(json.dumps(error_record, ensure_ascii=False) + "\n")
+                errfile.write(error_record)
         logger.info(f"Error records saved to: {error_path}")
 
     # Compute and display statistics

@@ -102,7 +102,7 @@ Many modern IDEs (including Cursor) have built-in Mermaid preview support. Simpl
 ## 📚 Additional Documentation
 
 For detailed architectural descriptions and explanations, see:
-- **[ARCHITECTURE.md](../architecture/ARCHITECTURE.md)** - Comprehensive architecture documentation with embedded diagrams
+- **[ARCHITECTURE.md](../ARCHITECTURE.md)** - Comprehensive architecture documentation with embedded diagrams
 - **[README.md](../../README.md)** - Main project documentation
 - **[docs/recipes/finance/README.md](../recipes/finance/README.md)** - Finance recipe documentation
 
@@ -144,13 +144,10 @@ When adding new diagrams:
 3. Add a header comment explaining the diagram purpose
 4. Update this README with a description
 5. Test rendering in at least one viewer before committing
-6. Consider updating [ARCHITECTURE.md](../architecture/ARCHITECTURE.md) if adding significant architectural information
+6. Consider updating [ARCHITECTURE.md](../ARCHITECTURE.md) if adding significant architectural information
 
 ## 📄 License
 
 These diagrams are part of the NVFlow project and follow the same Apache-2.0 license.
 
----
-
-**Last Updated:** January 21, 2026
 **Maintainer:** NVFlow Team

@@ -35,9 +35,10 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           uv venv --python 3.12
-          uv pip install pytest pytest-cov pytest-timeout
-          uv pip install PyYAML omegaconf rich
+          # Dependency list is shared with .gitlab-ci.yml so the two pipelines
+          # cannot drift.  Add test-only deps to tests/requirements-ci.txt.
           uv pip install -e . --no-deps
+          uv pip install -r tests/requirements-ci.txt
 
       - name: Test
         run: |

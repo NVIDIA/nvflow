@@ -25,7 +25,7 @@ base_output_dir: /workspace/outputs/finance/sap-500/workflow-1-baseline-eval
 .qwen3_inference: &qwen3_inference
   server_type: vllm
   inference_args: >-
-    ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+    ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
     ++inference.temperature=0.6
     ++inference.top_p=0.95
     ++inference.top_k=20
@@ -36,7 +36,7 @@ base_output_dir: /workspace/outputs/finance/sap-500/workflow-1-baseline-eval
 .nemotron_nano_inference: &nemotron_nano_inference
   server_type: vllm
   inference_args: >-
-    ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+    ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
     ++chat_template_kwargs.enable_thinking=true
     ++inference.temperature=1.0
     ++inference.top_p=1.0
@@ -81,7 +81,7 @@ models:
     gpus: 2
     nodes: 1
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.tokens_to_generate=32768
       ++chat_template_kwargs.reasoning_effort=high
     server_args: "--max-model-len 65536 --async-scheduling"
@@ -93,7 +93,7 @@ models:
     gpus: 1
     nodes: 1
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++parse_reasoning=True
       ++inference.tokens_to_generate=32768
       ++inference.temperature=0.6

@@ -18,6 +18,7 @@ Before running this workflow, ensure you have:
   - **Why needed:** Stage 0 downloads the [SecQue dataset](https://huggingface.co/datasets/nvidia/SecQue) (seed questions) from HuggingFace
   - **Public dataset:** No token required for public access, but token avoids rate limits
   - **Login alternative:** Run `huggingface-cli login` if you prefer interactive login
+  - **Offline clusters:** Because Stage 0 reaches the Hub, temporarily clear `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE` and `TRANSFORMERS_OFFLINE` in your cluster config for this run, then restore them. See [Offline runtime](../troubleshooting.md#offline-runtime)
 
 - ✅ **SEC EDGAR identity configured** in workflow YAML:
   ```yaml

@@ -49,10 +49,11 @@ Per-env output layout:
       └── generation-logs/      <- LLM Slurm logs (nemo-skills names this)
 """
 
+from pathlib import Path
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
-from nvflow.lib.vllm_compat import inject_server_entrypoint
+from nvflow.lib.cli_cmd import build_python_cmd
 
 # Internal artefact names (not user-facing -- see module docstring for layout).
 _PHASE1_SUBDIR = "phase1_regex"
@@ -93,10 +94,7 @@ class ValidateQuestionsStage(BaseStage):
         source_filename = config.get("source_filename", "final_result.jsonl")
         final_filename = config.get("final_filename", "final_result.jsonl")
 
-        stage_kwargs = inject_server_entrypoint(
-            config.get("stage_kwargs", {}),
-            config.get("stage_kwargs", {}).get("model", ""),
-        )
+        stage_kwargs = config.get("stage_kwargs", {})
 
         console.status("Validating SDG questions before GRPO data_transformation")
         console.detail("Source data", source_data)
@@ -106,16 +104,16 @@ class ValidateQuestionsStage(BaseStage):
         console.blank()
 
         for env_name in environments:
-            env_output_dir = f"{output_dir}/{env_name}"
-            phase1_dir = f"{env_output_dir}/{_PHASE1_SUBDIR}"
-            phase2_dir = f"{env_output_dir}/{_PHASE2_SUBDIR}"
-            source_file = f"{source_data}/{source_filename}"
-            prefiltered_file = f"{phase1_dir}/{_PREFILTERED}"
-            final_file = f"{env_output_dir}/{final_filename}"
+            env_output_dir = Path(output_dir) / env_name
+            phase1_dir = env_output_dir / _PHASE1_SUBDIR
+            phase2_dir = env_output_dir / _PHASE2_SUBDIR
+            source_file = Path(source_data) / source_filename
+            prefiltered_file = phase1_dir / _PREFILTERED
+            final_file = env_output_dir / final_filename
 
             console.status(f"validate_questions: environment '{env_name}'")
-            console.detail("Input", source_file)
-            console.detail("Final output (VALID)", final_file)
+            console.detail("Input", str(source_file))
+            console.detail("Final output (VALID)", str(final_file))
             console.blank()
 
             # Step A: regex prefilter (CPU) -> phase1_regex/.  Script is
@@ -123,48 +121,48 @@ class ValidateQuestionsStage(BaseStage):
             # a phase 2 crash: prefiltered.jsonl is left untouched so phase
             # 2's ``skip_filled=True`` resume by row index stays
             # consistent).  Pass ``--force`` here to bypass the skip.
-            regex_cmd = (
-                f"python3 -m {_UTILS_MODULE}.regex_prefilter_questions"
-                f" --input_file '{source_file}'"
-                f" --output_kept '{prefiltered_file}'"
-                f" --output_dropped '{phase1_dir}/{_REGEX_DROPPED}'"
-                f" --stats_file '{phase1_dir}/{_PREFILTER_STATS}'"
+            regex_cmd = build_python_cmd(
+                f"{_UTILS_MODULE}.regex_prefilter_questions",
+                input_file=source_file,
+                output_kept=prefiltered_file,
+                output_dropped=phase1_dir / _REGEX_DROPPED,
+                stats_file=phase1_dir / _PREFILTER_STATS,
             )
             run_cmd(
                 ctx=wrap_arguments(regex_cmd),
                 cluster=cluster,
-                log_dir=f"{phase1_dir}/logs",
+                log_dir=str(phase1_dir / "logs"),
                 expname=f"{expname}-{env_name}-phase1-regex",
                 run_after=run_after,
             )
 
-            # Step B: LLM classifier + postprocess chain -> phase2_llm/ and final_result.jsonl.
+            # Step B: LLM classifier + in-process postprocess -> phase2_llm/ and final_result.jsonl.
             # Resume is controlled by ``++skip_filled=True`` in inline_args (see base.yaml):
             # nemo-skills reads output.jsonl-async for already-filled indices and skips them.
-            parse_cmd = (
-                f"python3 -m {_UTILS_MODULE}.parse_validate_responses"
-                f" --input_file '{phase2_dir}/{_LLM_GEN_OUTPUT}'"
-                f" --output_file '{phase2_dir}/{_PARSED}'"
-            )
-            # --raw_sdg_source restores SDG-original reasoning_content per
-            # record (nemo-skills overwrites it with LLM provider reasoning).
-            apply_cmd = (
-                f"python3 -m {_UTILS_MODULE}.apply_validate_filter"
-                f" --input_file '{phase2_dir}/{_PARSED}'"
-                f" --output_kept '{final_file}'"
-                f" --output_dropped '{phase2_dir}/{_LLM_DROPPED}'"
-                f" --stats_file '{phase2_dir}/{_LLM_FILTER_STATS}'"
-                f" --raw_sdg_source '{source_data}'"
-                f" --raw_sdg_filename '{source_filename}'"
+            #
+            # The postprocess orchestrator (``postprocess_validate``) runs parse + apply
+            # in one Python process with sentinel ``PHASE: parse`` / ``PHASE: apply``
+            # log lines so post-mortem analysis stays grep-able.  ``--raw_sdg_source``
+            # is required: it restores the SDG-original reasoning_content per VALID
+            # record (nemo-skills generate() overwrites it with LLM provider reasoning).
+            postprocess_cmd = build_python_cmd(
+                f"{_UTILS_MODULE}.postprocess_validate",
+                llm_output=phase2_dir / _LLM_GEN_OUTPUT,
+                parsed_jsonl=phase2_dir / _PARSED,
+                final_kept=final_file,
+                dropped=phase2_dir / _LLM_DROPPED,
+                stats=phase2_dir / _LLM_FILTER_STATS,
+                raw_sdg_source=source_data,
+                raw_sdg_filename=source_filename,
             )
             generate(
                 ctx=wrap_arguments(f"++prompt_config={prompt_config} {inline_args}".strip()),
                 cluster=cluster,
-                input_file=prefiltered_file,
-                output_dir=phase2_dir,
+                input_file=str(prefiltered_file),
+                output_dir=str(phase2_dir),
                 expname=f"{expname}-{env_name}-phase2-llm",
                 run_after=[f"{expname}-{env_name}-phase1-regex"],
-                postprocess_cmd=f"{parse_cmd} && {apply_cmd}",
+                postprocess_cmd=postprocess_cmd,
                 **stage_kwargs,
             )
 

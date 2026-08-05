@@ -1,0 +1,116 @@
+# ============================================================================
+# Finance DG-SDG Pipeline - Qwen3.5-397B-A17B Demo Configuration
+# ============================================================================
+# Same E2E demo as document-grounded-sdg-demo.yaml, but swaps the GENERATOR
+# ("athlete") stages -- question generation and answer generation -- to
+# Qwen3.5-397B-A17B (MoE, 397B / 17B active). All JUDGE stages (question
+# verify, genselect, evaluate) intentionally stay on gpt-oss-120b (inherited
+# from the base demo) so the judge is never the same model as the generator.
+#
+# Inherits the gpt-oss-120b demo and overrides:
+#   - base_data_dir  (separate output tree)
+#   - q-gen / a-gen vLLM serving block -> Qwen3.5-397B served 2 nodes x 8 GPUs
+#     (= 16 GPUs / server) with ray multi-node backend.
+#
+# Seeds / chunks / temperatures are inherited UNCHANGED from the gpt-oss demo,
+# so q-verify still runs 3 seeds x 4 chunks = 12 parallel 2-node jobs.
+#
+# Requires, in your cluster config:
+#   - a `containers.vllm` image whose vLLM serves Qwen3.5 MoE (see
+#     cluster_configs/containers.yaml for the tested tag)
+#   - a mount exposing the model at /hf_models/Qwen/Qwen3.5-397B-A17B
+#
+# No tool-calling (enable_auto_tool_choice / tool_call_parser intentionally
+# omitted). reasoning_parser=qwen3 strips Qwen3.5 thinking traces so SDG
+# records keep clean content.
+#
+# Usage:
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/sdg/document-grounded-sdg-qwen-demo.yaml
+# ============================================================================
+
+# Inherit the gpt-oss-120b demo (which itself inherits the prod config).
+_base_: document-grounded-sdg-demo.yaml
+
+# Separate output tree for the Qwen run.
+base_data_dir: /workspace/outputs/finance/demo/workflow-2-document-grounded-sdg-qwen-demo
+
+# ============================================================================
+# Shared 397B serving block.
+# Anchored once and merged into every stage's args / policy_vllm so all five
+# model stages serve the model identically (2 nodes x 8 GPUs = 16 GPUs, ray).
+# num_gpus is GPUs-per-node; server_nodes is the node count.
+# ============================================================================
+_qwen397b_serving: &qwen397b_serving
+  num_gpus: 8
+  server_nodes: 2
+  max_model_len: 131072
+  gpu_memory_utilization: 0.85
+  max_num_seqs: 256
+  distributed_executor_backend: ray
+  language_model_only: true
+  reasoning_parser: qwen3
+  # Speed up 397B cold-load so GPUs start computing before Draco's
+  # OccupiedIdleGPUsJobReaper trips (~30min idle). Multithreaded safetensors
+  # load uncorks the ~110MB/s single-stream read; fuse_allreduce_rms off avoids
+  # a slow compile pass. Passed as JSON strings -> vLLM --model-loader-extra-config
+  # / --compilation-config (build_vllm_server_args wraps {...} values in quotes).
+  model_loader_extra_config: '{"enable_multithread_load":true,"num_threads":96}'
+  compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'
+  # Rollout concurrency (NOT a vLLM serve flag -- build_rollout_config routes it
+  # to the rollout config). Default is 4; with 4 reqs the 16-GPU server sat at
+  # 2-3% KV cache (97% idle) and the single q-gen chunk overran the 4h walltime
+  # at 34%. 32 gives ~8x throughput on the same GPUs to finish inside 4h.
+  num_samples_in_parallel: 32
+
+stages:
+
+  generate_verified_questions:
+    question_generation_kwargs:
+      args:
+        <<: *qwen397b_serving
+        model: /hf_models/Qwen/Qwen3.5-397B-A17B
+        # No dependent retry jobs. Keep single-run chunks shorter instead.
+        num_chunks: 8
+    # Verify is a JUDGE role (Yes/No question validation), so keep it OFF the
+    # generator's model (Qwen397B) to avoid self-preference bias on q-gen's own
+    # questions. gpt-oss-120b on a single node x 8 GPUs is plenty for a binary
+    # answerability check and is cheaper / faster to schedule than the 2-node
+    # 397B server -- a big win since q-verify is the largest stage (3 seeds x
+    # 12 chunks). num_chunks / num_random_seeds / ctx_args inherit from base.
+    question_verify_kwargs:
+      args:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        num_random_seeds: 3
+        num_chunks: 12
+        max_model_len: 16384
+        tensor_parallel_size: 8
+
+  generate_answers:
+    answer_generation_kwargs:
+      args:
+        <<: *qwen397b_serving
+        model: /hf_models/Qwen/Qwen3.5-397B-A17B
+
+  # GenSelect + Evaluate keep the gpt-oss-120b serving from the base demo
+  # (NOT *qwen397b_serving): 120B fits a single node x 8 GPUs (TP8), so it
+  # schedules faster and dodges the multi-node ray cold-load / idle-reaper
+  # risk that the 397B block carries. The qwen anchor's reasoning_parser=qwen3,
+  # ray backend and 397B-tuned loader flags are also wrong for gpt-oss, so we
+  # restate a clean gpt-oss-120b block instead of merging the anchor.
+  gym_genselect_answers:
+    policy_vllm:
+      model_path: /hf_models/openai/gpt-oss-120b
+      num_gpus: 8
+      server_nodes: 1
+      max_model_len: 65536
+      tensor_parallel_size: 8
+
+  evaluate_answers:
+    policy_vllm:
+      model_path: /hf_models/openai/gpt-oss-120b
+      num_gpus: 8
+      server_nodes: 1
+      max_model_len: 16384
+      tensor_parallel_size: 8

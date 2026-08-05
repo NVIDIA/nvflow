@@ -94,12 +94,12 @@ stages:
   eval:
     eval_steps: [2600, 5000, 7408]
     checkpoint_path: ${directories.step-4-training}/model-name
-    format: megatron        # Use "fsdp" for GRPO demo, "megatron" for GRPO production
+    format: megatron        # Match the checkpoint's training backend: "fsdp" or "megatron"
     baseline_model: /hf_models/Qwen/Qwen3-14B
     server_type: vllm
     gpus: 1
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.temperature=0.6
     server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"
 ```
@@ -110,7 +110,7 @@ stages:
 |-----------|------|-------------|
 | `eval_steps` | list[int] | Training steps to evaluate |
 | `checkpoint_path` | path | Base path to training checkpoints |
-| `format` | str | `"megatron"` (SFT), `"fsdp"` (GRPO demo), or `"megatron"` (GRPO production) |
+| `format` | str | Must match the checkpoint's training backend: `"megatron"` (SFT, finance_sec_search GRPO, production) or `"fsdp"` (equivalence_llm_judge GRPO demo); `"hf"` for HF checkpoints |
 | `baseline_model` | path | HF model path for baseline comparison |
 | `server_type` | str | Inference server: `"vllm"`, `"openai"` |
 | `gpus` | int | GPUs for model server |

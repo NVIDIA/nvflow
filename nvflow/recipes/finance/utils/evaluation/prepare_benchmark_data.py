@@ -19,11 +19,12 @@ Runs prepare.py scripts for custom finance benchmarks.
 Usage:
     python -m nvflow.recipes.finance.utils.evaluation.prepare_benchmark_data \
         --benchmarks secque finqa tatqa \
-        --output_dir /workspace/finance_data
+        --output_dir /workspace/outputs/finance/eval-datasets
 """
 
 import argparse
 import importlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -71,6 +72,17 @@ def prepare_benchmarks(benchmarks: list[str], output_dir: str) -> None:
             if result.stdout.strip():
                 for line in result.stdout.strip().split("\n"):
                     logger.info(f"  {line}")
+
+            # Copy the descriptor __init__.py next to eval.jsonl so datasets_dir is a
+            # self-contained nemo-skills data_dir (<bench>/{__init__.py, eval.jsonl}).
+            # A benchmark imported as a PEP 420 namespace package has no descriptor,
+            # so it can't be made self-contained: record it as failed and move on.
+            init_src = prepare_script.parent / "__init__.py"
+            if not init_src.exists():
+                logger.error(f"✗ {bench_name} missing descriptor __init__.py at {init_src}\n")
+                failed.append(bench_name)
+                continue
+            shutil.copy2(init_src, benchmark_output_dir / "__init__.py")
 
             logger.info(f"✓ {bench_name} prepared successfully\n")
 

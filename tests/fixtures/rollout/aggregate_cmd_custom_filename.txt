@@ -1,0 +1,7 @@
+set -e
+echo "Cross-Seed Aggregation (pass@k)"
+PYTHONPATH=/nemo_run/code python3 -m nvflow.recipes.finance.utils.rl.aggregate_seeds \
+    "/out/rollout" \
+    "/out/rollout/aggregate" \
+    --output_filename "custom_difficulty.jsonl"
+echo "Done. Results in /out/rollout/aggregate/"

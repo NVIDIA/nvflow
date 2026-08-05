@@ -17,12 +17,19 @@
 
 Joins ``train.jsonl`` (from prepare_data) with ``difficulty.jsonl``
 (from collect_rollouts or compute_rewards aggregate) on ``uuid`` and
-keeps only questions whose reward variance exceeds a minimum threshold.
-Questions with zero reward variance (all seeds got the same reward)
-produce no GRPO gradient and are removed.
+keeps only questions with measured RL signal -- i.e. those that were
+profiled AND have reward variance >= ``min_reward_std``.
 
-Questions not found in ``difficulty.jsonl`` (unprofiled) are kept by
-default -- only explicitly identified zero-signal questions are removed.
+Drops two classes of samples:
+
+* Profiled but zero-signal (``reward_std < min_reward_std``): all seeds
+  got the same reward, so the prompt produces no GRPO gradient.
+* Unprofiled (not present in difficulty.jsonl): no measured signal at
+  all -- typically because ``collect_rollouts.rollout.max_num_samples``
+  is set to a value smaller than ``len(train.jsonl)`` (smoke / sweep
+  configs), or because rollouts crashed for that sample. In production
+  ``max_num_samples`` is unset, every sample is rolled out, and the
+  unprofiled set is empty -- so this only affects smoke / sweep runs.
 
 Standalone script that runs inside the Slurm container with python3.
 
@@ -62,6 +69,10 @@ def filter_training_data(
     report_filename: str = "filter_report.json",
 ) -> dict[str, Any]:
     """Filter training data by reward variance threshold.
+
+    Retains ONLY samples with measured RL signal: profiled in
+    ``difficulty.jsonl`` AND ``reward_std >= min_reward_std``. Both
+    zero-signal profiled samples and unprofiled samples are dropped.
 
     Args:
         train_path: Path to prepare_data train.jsonl.
@@ -111,12 +122,12 @@ def filter_training_data(
                 difficulty[uid] = {k: rec.get(k) for k in profile_fields if k in rec}
 
     logger.info("Loaded %d questions from difficulty.jsonl", len(difficulty))
-    logger.info("Filter: keep reward_std >= %s", min_reward_std)
+    logger.info("Filter: keep reward_std >= %s; drop unprofiled", min_reward_std)
 
     total = 0
     kept = 0
-    kept_no_profile = 0
     removed_no_signal = 0
+    removed_no_profile = 0
     by_type_total: Counter = Counter()
     by_type_kept: Counter = Counter()
 
@@ -134,10 +145,7 @@ def filter_training_data(
             diff_rec = difficulty.get(uid)
 
             if diff_rec is None:
-                kept += 1
-                kept_no_profile += 1
-                by_type_kept[qtype] += 1
-                fout.write(json.dumps(row) + "\n")
+                removed_no_profile += 1
                 continue
 
             rs = diff_rec.get("reward_std", 0.0)
@@ -164,8 +172,8 @@ def filter_training_data(
         "min_reward_std": min_reward_std,
         "total_questions": total,
         "kept": kept,
-        "kept_no_profile": kept_no_profile,
         "removed_no_signal": removed_no_signal,
+        "removed_no_profile": removed_no_profile,
         "kept_pct": kept / total if total > 0 else 0.0,
         "by_question_type": {
             qt: {"total": by_type_total[qt], "kept": by_type_kept[qt]}
@@ -195,9 +203,9 @@ def _print_summary(report: dict) -> None:
         "TRAINING DATA FILTER REPORT",
         "=" * 60,
         f"Total questions:        {total}",
-        f"Kept (total):           {report['kept']} ({report['kept_pct']:.1%})",
-        f"  Kept (no profile):    {report['kept_no_profile']}",
+        f"Kept (RL signal):       {report['kept']} ({report['kept_pct']:.1%})",
         f"Removed (no signal):    {report['removed_no_signal']}",
+        f"Removed (no profile):   {report['removed_no_profile']}",
         "",
     ]
 

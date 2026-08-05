@@ -25,10 +25,10 @@ A record is dropped ONLY when ALL of the following hold:
 2. ``problem`` does NOT mention ``record["company_name"]`` (full name
    substring match, or first-token whole-word fallback).
 3. ``problem`` has NO ticker-like uppercase token (``\\b[A-Z]{1,5}\\b``)
-   outside ``TICKER_DENYLIST`` of common non-ticker acronyms.
+   outside :data:`TICKER_DENYLIST` of common non-ticker acronyms.
 4. ``problem`` has NO mid-sentence proper-noun token outside
-   ``_PROPER_NOUN_STOPWORDS`` (rescues cases like ``company_name="ABNB"``
-   but question text says ``"Airbnb"``).
+   :data:`_PROPER_NOUN_STOPWORDS` (rescues cases like
+   ``company_name="ABNB"`` but question text says ``"Airbnb"``).
 
 If any check (2-4) passes, the record is kept.
 
@@ -41,17 +41,15 @@ Usage:
 """
 
 import argparse
-import os
 import re
 from pathlib import Path
 
 import orjson
 
 from nvflow.utils import setup_logger
+from nvflow.utils.jsonl import iter_jsonl, write_jsonl, write_stats_json
 
 logger = setup_logger(__name__)
-
-WRITE_BUFFER_SIZE = 1000
 
 # Vague company references that indicate a question may not be self-contained.
 # All compared case-insensitively against the ``problem`` text.
@@ -72,64 +70,175 @@ VAGUE_REFS = (
 # aren't tickers in context.
 TICKER_RE = re.compile(r"\b[A-Z]{1,5}\b")
 
-# Tokens that LOOK like tickers but are common sentence-case words or
-# well-known non-ticker acronyms -- used to avoid false "ticker present"
-# matches on generic prose.  Kept conservative so we err on the side of
-# recognising a ticker (and therefore keeping the record).
-TICKER_DENYLIST = frozenset(
+# Single source-of-truth: tokens that are NOT a company-identifier signal.
+# Stored lowercase; both the ticker check and the proper-noun check
+# compare ``token.lower()`` against this set.
+#
+# Why one set instead of two:
+#   The ticker regex (``TICKER_RE``) emits 1-5 char uppercase tokens; the
+#   proper-noun regex (``_PROPER_NOUN_RE``) emits 3+ char tokens that
+#   start with a capital.  Tokens with overlapping length (3-5 chars) can
+#   appear under both regexes, and the prior dual-set design stored each
+#   denied token TWICE -- once uppercase for the ticker check, once
+#   title-case for the proper-noun check.  In practice the two casings
+#   drifted (e.g. ``"INC"`` was ticker-blocked but ``"Inc"`` was NOT
+#   proper-noun-blocked, so a question using the literal word ``"Inc"``
+#   passed the proper-noun rescue and got kept on a vague reference).
+#
+#   With one lowercase set + casefold comparison, both checks agree on
+#   what is/isn't a non-company token regardless of how the source text
+#   capitalises it.  ``test_regex_prefilter_sets.py`` pins this
+#   bidirectional symmetry so future edits can't reintroduce the drift.
+#
+# Length filtering is implicit:
+#   - 1-2 char entries (``"m"``, ``"r"``, ``"ai"``, ``"go"``, etc.) only
+#     ever influence the ticker check -- the proper-noun regex requires
+#     3+ chars.
+#   - 6+ char entries (``"between"``, ``"considering"``, etc.) only ever
+#     influence the proper-noun check -- the ticker regex caps at 5 chars.
+#   - 3-5 char entries influence both.  This is where the drift used to
+#     live and where the bug fix has impact.
+#
+# Tokens with apostrophes (e.g. ``"it's"``) are intentionally absent:
+#   the apostrophe is a regex word boundary so neither regex ever emits
+#   a token containing one.
+_NON_COMPANY_TOKENS = frozenset(
     {
-        "A",
-        "AI",
-        "AM",
-        "AN",
-        "AND",
-        "AS",
-        "AT",
-        "BE",
-        "BY",
-        "CEO",
-        "CFO",
-        "COO",
-        "CTO",
-        "DO",
-        "EPS",
-        "FOR",
-        "GDP",
-        "GO",
-        "IF",
-        "IN",
-        "INC",
-        "IS",
-        "IT",
-        "IT'S",
-        "ITS",
-        "LLC",
-        "LP",
-        "LTD",
-        "M",
-        "MD",
-        "MY",
-        "NO",
-        "NOT",
-        "OF",
-        "ON",
-        "OR",
-        "OUR",
-        "QA",
-        "QB",
-        "QC",
-        "QD",
-        "QE",
-        "R",
-        "SEC",
-        "SO",
-        "THE",
-        "TO",
-        "UP",
-        "US",
-        "USA",
-        "WE",
-        "WHY",
+        # Articles, prepositions, conjunctions, basic verbs, pronouns,
+        # determiners (overlap between both regex shapes -- match either
+        # casing-flavoured check).
+        "a",
+        "am",
+        "an",
+        "and",
+        "as",
+        "at",
+        "be",
+        "by",
+        "do",
+        "for",
+        "if",
+        "in",
+        "is",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "from",
+        "with",
+        "but",
+        "than",
+        "then",
+        "that",
+        "this",
+        "these",
+        "those",
+        "between",
+        "among",
+        "over",
+        "under",
+        "during",
+        "before",
+        "after",
+        # Auxiliary / modal verbs.
+        "are",
+        "was",
+        "were",
+        "been",
+        "does",
+        "did",
+        "has",
+        "have",
+        "had",
+        "can",
+        "could",
+        "should",
+        "would",
+        "will",
+        "shall",
+        "may",
+        "might",
+        "must",
+        # WH / interrogative starters.
+        "how",
+        "what",
+        "why",
+        "where",
+        "when",
+        "who",
+        "which",
+        "whom",
+        "whose",
+        # Imperative question starters.
+        "given",
+        "considering",
+        "assuming",
+        "suppose",
+        "compare",
+        "contrast",
+        "explain",
+        "discuss",
+        "describe",
+        "analyse",
+        "analyze",
+        "evaluate",
+        "identify",
+        "summarise",
+        "summarize",
+        "define",
+        "calculate",
+        "estimate",
+        "find",
+        "list",
+        "name",
+        "provide",
+        "present",
+        "show",
+        "state",
+        "using",
+        # Sentence-context modifiers.
+        "based",
+        "non",  # e.g. "Non-GAAP"
+        # Corporate suffixes (3-5 char, fix Direction-A casing-mirror bug:
+        # previously ticker-blocked but not proper-noun-blocked).
+        "inc",
+        "llc",
+        "lp",
+        "ltd",
+        # Financial / corporate / general acronyms (3-5 char, also
+        # Direction-A bug fix range).
+        "ai",
+        "ceo",
+        "cfo",
+        "coo",
+        "cto",
+        "eps",
+        "gdp",
+        "sec",
+        "go",
+        "it",
+        "its",
+        "my",
+        "no",
+        "not",
+        "our",
+        "so",
+        "up",
+        "us",
+        "usa",
+        "we",
+        # Single-letter / very short ticker-shaped tokens (only the
+        # ticker check sees these; the proper-noun regex requires 3+
+        # chars so they have no effect there).
+        "m",
+        "md",
+        "r",
+        "qa",
+        "qb",
+        "qc",
+        "qd",
+        "qe",
     }
 )
 
@@ -179,120 +288,14 @@ def _has_company_name(text: str, company_name: str) -> bool:
 
 def _has_ticker(text: str) -> bool:
     """True when ``text`` contains at least one ticker-like uppercase token
-    that is not in the deny-list of common non-ticker acronyms."""
+    that is not a known non-company token (acronym, modal, interrogative,
+    grammar word, etc.).  ``token.lower()`` ensures the check agrees with
+    ``_has_proper_noun_mid_sentence`` regardless of source-text casing."""
     for token in TICKER_RE.findall(text):
-        if token not in TICKER_DENYLIST:
+        if token.lower() not in _NON_COMPANY_TOKENS:
             return True
     return False
 
-
-# Mid-sentence capitalised words that are NOT proper-noun signals.  Used to
-# stop ``_has_proper_noun_mid_sentence`` from treating sentence-start
-# interrogatives and common English stopwords as implicit company references.
-#
-# Entries are stored in the exact case the regex will emit (title case, first
-# char upper + rest lower), since the regex ``\b[A-Z][a-zA-Z]{2,}\b`` already
-# requires the first character to be uppercase.  No case normalisation happens
-# at match time -- all-caps tokens like "HOW" are extremely rare in SEC text
-# and would fall through to the "unknown proper noun" branch (i.e. kept).
-_PROPER_NOUN_STOPWORDS = frozenset(
-    {
-        # WH / interrogative starters
-        "How",
-        "What",
-        "Why",
-        "Where",
-        "When",
-        "Who",
-        "Which",
-        "Whom",
-        "Whose",
-        # Imperative question starters
-        "Given",
-        "Considering",
-        "Assuming",
-        "Suppose",
-        "Compare",
-        "Contrast",
-        "Explain",
-        "Discuss",
-        "Describe",
-        "Analyse",
-        "Analyze",
-        "Evaluate",
-        "Identify",
-        "Summarise",
-        "Summarize",
-        "Define",
-        "Calculate",
-        "Estimate",
-        "Find",
-        "List",
-        "Name",
-        "Provide",
-        "Present",
-        "Show",
-        "State",
-        "Using",
-        # Auxiliary / modal verbs capitalised at sentence start
-        "Is",
-        "Are",
-        "Was",
-        "Were",
-        "Am",
-        "Be",
-        "Been",
-        "Does",
-        "Do",
-        "Did",
-        "Has",
-        "Have",
-        "Had",
-        "Can",
-        "Could",
-        "Should",
-        "Would",
-        "Will",
-        "Shall",
-        "May",
-        "Might",
-        "Must",
-        # Prepositions / conjunctions often capitalised after a period
-        "If",
-        "In",
-        "On",
-        "At",
-        "By",
-        "For",
-        "To",
-        "From",
-        "With",
-        "Of",
-        "And",
-        "Or",
-        "But",
-        "As",
-        "Than",
-        "Then",
-        "That",
-        "This",
-        "These",
-        "Those",
-        "Between",
-        "Among",
-        "Over",
-        "Under",
-        "During",
-        "Before",
-        "After",
-        "Based",
-        "Non",  # e.g. "Non-GAAP"
-        # Generic sentence starters we've seen in SDG prompts
-        "The",
-        "A",
-        "An",
-    }
-)
 
 # Matches a capitalised token of 3+ letters (including all-caps like "NVDA"
 # since ``[a-zA-Z]`` matches uppercase too).  Apostrophes terminate the
@@ -302,12 +305,17 @@ _PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-zA-Z]{2,}\b")
 
 def _has_proper_noun_mid_sentence(text: str) -> bool:
     """True when ``text`` has a capitalised proper-noun token not in the
-    sentence-starter stopword set.  Used as a recall-over-precision
-    backstop when ``company_name`` is a ticker (e.g. ``"ABNB"``) but the
+    non-company token set.  Used as a recall-over-precision backstop
+    when ``company_name`` is a ticker (e.g. ``"ABNB"``) but the
     question uses the full company name (e.g. ``"Airbnb"``), so neither
-    ``_has_company_name`` nor ``_has_ticker`` catches the reference."""
+    ``_has_company_name`` nor ``_has_ticker`` catches the reference.
+
+    ``token.lower()`` ensures the check agrees with ``_has_ticker``
+    regardless of source-text casing -- previously ``"Inc"`` slipped
+    through the proper-noun rescue while ``"INC"`` was correctly
+    ticker-blocked, on the same conceptual token."""
     for token in _PROPER_NOUN_RE.findall(text):
-        if token not in _PROPER_NOUN_STOPWORDS:
+        if token.lower() not in _NON_COMPANY_TOKENS:
             return True
     return False
 
@@ -352,38 +360,27 @@ def prefilter(
     num_dropped = 0
     num_empty_problem = 0
 
-    kept_buffer: list[bytes] = []
-    dropped_buffer: list[bytes] = []
-
-    with (
-        open(input_file, "rb") as reader,
-        open(output_kept, "wb") as kept_writer,
-        open(output_dropped, "wb") as dropped_writer,
-    ):
-        for line in reader:
-            line = line.strip()
-            if not line:
-                continue
-
+    with write_jsonl(output_kept) as kept_writer, write_jsonl(output_dropped) as dropped_writer:
+        for row, parse_exc, raw_line in iter_jsonl(input_file, on_error="yield_error"):
             num_total += 1
 
-            try:
-                row = orjson.loads(line)
-            except orjson.JSONDecodeError as exc:
+            if parse_exc is not None:
                 # Malformed input -- conservatively drop with a reason so
-                # downstream can see what happened, but don't crash the job.
-                dropped_buffer.append(
-                    orjson.dumps(
-                        {
-                            "_regex_drop_reason": "malformed_json",
-                            "_regex_drop_error": str(exc),
-                            "_regex_drop_raw": line.decode("utf-8", errors="replace")[:500],
-                        }
-                    )
+                # downstream can see what happened, but don't crash the
+                # job.  We include the truncated source bytes so an
+                # operator inspecting the dropped stream can identify
+                # the offending row without re-reading the input file.
+                dropped_writer.write(
+                    {
+                        "_regex_drop_reason": "malformed_json",
+                        "_regex_drop_error": str(parse_exc),
+                        "_regex_drop_raw": raw_line.decode("utf-8", errors="replace")[:500],
+                    }
                 )
                 num_dropped += 1
                 continue
 
+            assert row is not None  # narrow for type-checkers in yield_error mode
             problem = row.get("problem", "")
             company_name = row.get("company_name", "")
 
@@ -396,22 +393,10 @@ def prefilter(
                 num_dropped += 1
                 dropped_row = dict(row)
                 dropped_row["_regex_drop_reason"] = reason
-                dropped_buffer.append(orjson.dumps(dropped_row))
+                dropped_writer.write(dropped_row)
             else:
                 num_kept += 1
-                kept_buffer.append(orjson.dumps(row))
-
-            if len(kept_buffer) >= WRITE_BUFFER_SIZE:
-                kept_writer.write(b"\n".join(kept_buffer) + b"\n")
-                kept_buffer.clear()
-            if len(dropped_buffer) >= WRITE_BUFFER_SIZE:
-                dropped_writer.write(b"\n".join(dropped_buffer) + b"\n")
-                dropped_buffer.clear()
-
-        if kept_buffer:
-            kept_writer.write(b"\n".join(kept_buffer) + b"\n")
-        if dropped_buffer:
-            dropped_writer.write(b"\n".join(dropped_buffer) + b"\n")
+                kept_writer.write(row)
 
     drop_rate = num_dropped / num_total if num_total else 0.0
     high_drop_warning = drop_rate > high_drop_threshold
@@ -433,11 +418,9 @@ def prefilter(
     # stats_file's existence as "prior run completed", so the file must
     # only be visible when fully written.  A crash mid-write would
     # otherwise leave a truncated stats_file and silently trigger a skip
-    # with stale audit data.
-    tmp_stats_file = f"{stats_file}.tmp"
-    with open(tmp_stats_file, "wb") as stats_writer:
-        stats_writer.write(orjson.dumps(stats, option=orjson.OPT_INDENT_2))
-    os.replace(tmp_stats_file, stats_file)
+    # with stale audit data.  ``write_stats_json`` does the tmp+os.replace
+    # dance under the hood.
+    write_stats_json(stats_file, stats)
 
     logger.info("regex prefilter summary")
     logger.info(f"  total:   {num_total}")

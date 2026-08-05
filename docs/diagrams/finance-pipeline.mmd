@@ -26,14 +26,14 @@ graph TB
         end
 
         subgraph DGS["Document-Grounded SDG (Experimental)"]
-            DGS1["1. Preprocess Filings<br/>Extract sections"]
-            DGS2["2. Generate Q&A<br/>With verification"]
-            DGS3["3. GenSelect<br/>Self-consistency"]
-            DGS4["4. Evaluate Quality<br/>Judge-based scoring"]
-            DGS5["5. Aggregate Results<br/>Combine datasets"]
-            DGS6["6. Difficulty Estimation<br/>Stratify by difficulty"]
-            DGS7["7. Prepare Training Data<br/>Format conversion"]
-            DGS_OUT[("~800K Q&A pairs<br/>Stratified by difficulty<br/>Work in progress")]
+            DGS1["1. Preprocess Filings<br/>Chunk SEC HTML"]
+            DGS2["2. Generate Verified Questions<br/>Q-gen + Yes/No verify"]
+            DGS3["3. Generate Answers<br/>N candidates per question"]
+            DGS4["4. GenSelect Answers<br/>Best-of-N pick"]
+            DGS5["5. Evaluate Answers<br/>Judge (multi-seed)"]
+            DGS6["6. Aggregate Answers<br/>Consensus answerable"]
+            DGS7["7. Post-process<br/>Clean + rename"]
+            DGS_OUT[("~800K Q&A pairs<br/>Single final_result.jsonl<br/>Work in progress")]
 
             DGS1 --> DGS2 --> DGS3 --> DGS4 --> DGS5 --> DGS6 --> DGS7 --> DGS_OUT
         end

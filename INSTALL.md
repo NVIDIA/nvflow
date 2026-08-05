@@ -1,31 +1,54 @@
 # Installation & Setup Guide
 
-Quick setup guide for NVFlow - a lightweight orchestration tool for Slurm clusters. NVFlow's containers are self-sufficient — all dependencies are pre-installed, so no runtime downloads are needed. Once images and models are staged, the pipeline runs fully offline.
+Operator guide for getting NVFlow running on a Slurm cluster: install the client, stage containers and models, configure your cluster, and verify. NVFlow's containers are self-sufficient — all dependencies are pre-installed, so once images and models are staged, the pipeline runs fully offline.
 
-## 📋 Steps
+> This guide sets up the **cluster side**. How you run the `nflow` **client** —
+> local install or the airgapped `nvflow-client` container, and whether it
+> submits directly or over an SSH tunnel — is summarized in
+> [Choose your client setup](#choose-your-client-setup) just below.
 
-1. [Prerequisites](#prerequisites)
-2. [Setup Containers](#setup-containers)
-3. [Download Models](#download-models)
-4. [Setup NeMo-RL & NeMo-Gym Sources (for GRPO)](#setup-nemo-rl--nemo-gym-sources-for-grpo)
-5. [Configure Your Cluster](#configure-your-cluster)
-6. [Verify Installation](#verify-installation)
+> **Building artifacts?** Producing the container images is a maintainer task and
+> lives under [`docs/maintainers/`](docs/maintainers/), not on this page.
+
+## Choose your client setup
+
+`nflow` only submits Slurm jobs — the heavy work runs on the cluster. Two
+independent choices decide how you run it: **how you provision the client**, and
+**how it reaches Slurm**.
+
+| You run `nflow` on… | Provision the client | Reach Slurm | Guide |
+|---|---|---|---|
+| Cluster login/dev node (internet) | `uv sync` | direct | [README](README.md#-installation) |
+| Laptop / dev box (internet) | `uv sync` | SSH tunnel | [remote-launch](docs/remote-launch.md) |
+| Anywhere, airgapped / no install | `nvflow-client` container | direct or SSH tunnel | [remote-launch](docs/remote-launch.md) |
+
+Steps 1–6 below are the **cluster side** (stage images/models, write
+`my_cluster.yaml`, verify) and apply to every row above.
+
+## 📋 What you'll do
+
+Six steps, top to bottom. Each step below opens with a **Goal** and ends with a **✅ Done when** check so you always know where you are.
+
+| Step | What it does | Who needs it |
+|------|--------------|--------------|
+| 1. [Prerequisites](#prerequisites) | Confirm cluster access + required tools | Everyone |
+| 2. [Setup Containers](#setup-containers) | Stage the five `.sqsh` images on the cluster | Everyone |
+| 3. [Download Models](#download-models) | Pre-stage the HF models your workflows use | Everyone |
+| 4. [GRPO Prerequisites](#grpo-prerequisites) | SEC cache prefetch | **GRPO only — else skip** |
+| 5. [Configure Your Cluster](#configure-your-cluster) | Write `cluster_configs/my_cluster.yaml` | Everyone |
+| 6. [Verify Installation](#verify-installation) | Sanity-check the whole setup | Everyone |
+
+> **Shortcut:** if a maintainer already staged the `.sqsh` images and models for you, you only need Steps 1, 5, and 6.
 
 ---
 
 ## Prerequisites
 
-> **Note:** This guide assumes you've already completed the [README.md](README.md) setup (installed `uv`, cloned the repo, ran `uv sync`).
+**Step 1 of 6 · Goal:** confirm you can reach the cluster and have the tools the setup needs.
 
-### Build Host Requirements (for building container images)
-
-The `docker build` step needs **internet access** to pull base layers, source from GitHub, and packages from PyPI / NGC / Docker Hub. The resulting `.sqsh` files then run fully offline on the cluster.
-
-- **Docker Engine** or **Docker Desktop** (any OS - Linux, macOS, Windows/WSL2)
-- **`docker login nvcr.io`** - required once for the NeMo-RL base image
-- **`docker buildx`** - only needed for multi-arch / cross-arch builds (ships with Docker Desktop; on Linux: `docker buildx version`)
-
-> **Note:** If your destination cluster is `linux/amd64` (the common case) and your build host is amd64 Linux / Intel macOS / Windows, the default `docker build` works without `buildx`.
+> **Note:** This guide assumes you've already installed the client (see the [README](README.md#-installation): install `uv`, clone the repo, run `uv sync`).
+>
+> 🔌 **Airgapped / no internet on the install host?** Skip the local install and drive `nflow` from the prebuilt `nvflow-client` container (CLI + venv baked in, no `uv sync`, no client internet) — see **[docs/remote-launch.md](docs/remote-launch.md)**. You still stage the worker images and models on the cluster (Steps 2–3 below); only the install differs.
 
 ### Cluster Setup Requirements
 
@@ -39,7 +62,9 @@ The `docker build` step needs **internet access** to pull base layers, source fr
 
 > **Note:** If you already have `.sqsh` container images staged on the cluster, skip to [Configure Your Cluster](#configure-your-cluster).
 
-**yq (YAML parser):**
+<details>
+<summary><strong>Install yq</strong> (only needed for the parallel conversion script)</summary>
+
 ```bash
 # Check if installed
 yq --version
@@ -59,6 +84,7 @@ chmod +x $HOME/bin/yq
 echo 'export PATH="$HOME/bin:$PATH"' >> $HOME/.bashrc
 source $HOME/.bashrc
 ```
+</details>
 
 **curl & enroot:**
 ```bash
@@ -72,182 +98,30 @@ enroot version     # Run on cluster node
 - Slurm version: `scontrol show config | grep SLURM_VERSION` (25.x needs the enroot Ray template fix - see [Troubleshooting](#troubleshooting))
 - Storage paths for data/models/containers
 
+**✅ Done when:** `enroot version` works on a cluster node and you know your Slurm account, a partition, and your storage paths.
+
 ---
 
 ## Setup Containers
 
-NVFlow uses five containers converted to `.sqsh` format for running on Slurm clusters. **Four are built locally** from self-contained Dockerfiles in [`dockerfiles/`](dockerfiles/); the fifth (`sglang`) is pulled as-is.
+**Step 2 of 6 · Goal:** have the five `.sqsh` container images staged on your cluster, with their paths in hand.
 
-**Required containers (5):**
+NVFlow runs its cluster jobs inside five `.sqsh` container images. As an operator you only need the `.sqsh` files **staged on your cluster** and their paths recorded in your cluster config.
 
-| Container | Source | Tested Version | Action |
-|-----------|--------|----------------|--------|
-| `nvflow-nemo-rl` | [`dockerfiles/Dockerfile.nemo-rl`](dockerfiles/Dockerfile.nemo-rl) | base `nvcr.io/nvidia/nemo-rl:v0.6.0` | **Build** (see Step 1) |
-| `nvflow-nemo-skills` | [`dockerfiles/Dockerfile.nemo-skills`](dockerfiles/Dockerfile.nemo-skills) | NeMo-Skills @ `0229040` | **Build** (see Step 1) |
-| `nvflow-vllm` | [`dockerfiles/Dockerfile.vllm`](dockerfiles/Dockerfile.vllm) | base `vllm/vllm-openai:v0.18.1` | **Build** (SDG/eval) |
-| `nvflow-vllm-grpo` | [`dockerfiles/Dockerfile.vllm-grpo`](dockerfiles/Dockerfile.vllm-grpo) | base `vllm/vllm-openai:v0.17.1` | **Build** (GRPO rollouts/judge) |
-| `sglang` | Docker Hub | `lmsysorg/sglang:v0.5.10.post1` | **Pull** (no custom Dockerfile) |
+- **Already have `.sqsh` files staged** (by a maintainer or a previous setup)? Note their paths and skip to [Configure Your Cluster](#configure-your-cluster).
+- **Need to build / convert them yourself?** See **[docs/maintainers/containers.md](docs/maintainers/containers.md)** — build host requirements, `docker build`, push/save, and `enroot import` to `.sqsh`.
 
-> **Note:** All four custom images are **built**, not pulled. The four Dockerfiles bake in NeMo-Skills source, NeMo-Gym source, pre-built virtual environments, `tiktoken` / `openai_harmony` encoding caches, and `/root/.local → /opt/uv-python` path relocation so the images run cleanly under `enroot`/`pyxis` on Slurm with no outbound network access.
+Your cluster config references the images by fixed keys — `nemo-rl`, `nemo-skills`, `vllm`, `vllm-grpo`, and `sglang`. The build guide's "Update Container Config" step explains how to set them; [Configure Your Cluster](#configure-your-cluster) ties them into your run config.
 
-**Optional containers** (not currently used by any NVFlow recipes):
+> **`nemo-gym` (needed for GRPO & DG-SDG):** the Gym-only stages — GRPO `prepare_data` / `prefetch_cache` and the DG-SDG gym stages — run in a dedicated **CPU-only** `nemo-gym` image ([`dockerfiles/Dockerfile.nemo-gym`](docs/maintainers/containers.md#gym-worker-cpu-only)). Stage this sixth image if you run **GRPO or DG-SDG**; **SFT-only** and **eval-only** runs don't need it.
 
-| Container | Source | Action |
-|-----------|--------|--------|
-| `megatron` | NeMo-Skills Dockerfiles | Build |
-| `sandbox` | NeMo-Skills Dockerfiles | Build |
-| `verl` | NeMo-Skills Dockerfiles | Build |
-| `trtllm` | `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8` | Pull from NGC |
-
-### Step 1: Build Docker Images
-
-NVFlow ships self-contained Dockerfiles in [`dockerfiles/`](dockerfiles/) that pre-install all Python packages, pre-cache tokenizer encodings, and pre-build virtual environments. Run `docker build` on a connected build host:
-
-```bash
-cd /path/to/nvflow
-
-# Build all four custom images (amd64, the common case)
-docker build -f dockerfiles/Dockerfile.nemo-rl     -t nvflow-nemo-rl:v0.6.0      .
-docker build -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:0229040 .
-docker build -f dockerfiles/Dockerfile.vllm        -t nvflow-vllm:v0.18.1        .
-docker build -f dockerfiles/Dockerfile.vllm-grpo   -t nvflow-vllm-grpo:v0.17.1   .
-
-# sglang is pulled as-is, no custom Dockerfile
-docker pull lmsysorg/sglang:v0.5.10.post1
-```
-
-> **Tip:** The Dockerfiles expose `ARG`s for version pins (`NEMO_SKILLS_COMMIT`, `NEMO_GYM_BRANCH`, `VLLM_VERSION`, `BASE_IMAGE`). Defaults are listed in [`dockerfiles/README.md`](dockerfiles/README.md#version-pins). Keep `NEMO_SKILLS_COMMIT` consistent across `Dockerfile.nemo-skills`, `Dockerfile.nemo-rl`, and `pyproject.toml`.
-
-For **cross-arch builds** (e.g. building an `amd64` image on Apple Silicon, or a multi-arch manifest list pushed directly to a registry), see [`dockerfiles/docker_instructions.md`](dockerfiles/docker_instructions.md#1-build). Cross-arch builds use `docker buildx` with QEMU emulation and are significantly slower than native.
-
-For optional containers (`megatron`, `sandbox`, `verl`), build them from the upstream [NeMo-Skills Dockerfiles](https://github.com/NVIDIA-NeMo/Skills/tree/022904023ad7a83a87662a313cf72e7df5891d55/dockerfiles).
-
-### Step 1b: Sanity-Check Images Before Conversion
-
-Before the time-consuming `enroot import` step, run the smoke checks in [`dockerfiles/docker_instructions.md` §2](dockerfiles/docker_instructions.md#2-sanity-checks-blockers). Each check is a **hard blocker** - if it fails locally, the image will not work in production. They verify the offline-critical pieces: `uv` works offline, the 6 Gym `.venv` symlinks are intact, `tiktoken` / `openai_harmony` caches load with `--network=none`, and `tzdata` is populated.
-
-### Step 2: Push Images to a Registry (Option A) or Save as Tarball (Option B)
-
-`enroot` runs on Slurm compute/login nodes (Linux only). There are two paths from a Docker image to a `.sqsh` file - pick whichever fits your offline workflow.
-
-#### Option A: Via a private container registry (recommended)
-
-Push the built images to a registry accessible from your cluster (Docker Hub, NGC, or a private registry):
-
-```bash
-REGISTRY=<your-registry>
-
-docker tag nvflow-nemo-rl:v0.6.0      $REGISTRY/nvflow-nemo-rl:v0.6.0
-docker tag nvflow-nemo-skills:0229040 $REGISTRY/nvflow-nemo-skills:0229040
-docker tag nvflow-vllm:v0.18.1        $REGISTRY/nvflow-vllm:v0.18.1
-docker tag nvflow-vllm-grpo:v0.17.1   $REGISTRY/nvflow-vllm-grpo:v0.17.1
-
-docker push $REGISTRY/nvflow-nemo-rl:v0.6.0
-docker push $REGISTRY/nvflow-nemo-skills:0229040
-docker push $REGISTRY/nvflow-vllm:v0.18.1
-docker push $REGISTRY/nvflow-vllm-grpo:v0.17.1
-
-# sglang can be pulled directly by enroot (no push needed unless your
-# cluster cannot reach Docker Hub).
-```
-
-> **Why push?** Slurm cluster nodes typically don't have Docker installed, so `enroot` needs to pull images from a registry (or load them from a Docker daemon - see Option B).
-
-#### Option B: Via a saved tarball (no registry required)
-
-For offline sites without a private registry, save the Docker image to a tarball, transfer it to a Linux host that has both Docker and `enroot`, load the tarball into the local Docker daemon, then import via `dockerd://`:
-
-```bash
-# On the build host
-docker save nvflow-nemo-rl:v0.6.0      | gzip > nvflow-nemo-rl-v0.6.0.tar.gz
-docker save nvflow-nemo-skills:0229040 | gzip > nvflow-nemo-skills-0229040.tar.gz
-docker save nvflow-vllm:v0.18.1        | gzip > nvflow-vllm-v0.18.1.tar.gz
-docker save nvflow-vllm-grpo:v0.17.1   | gzip > nvflow-vllm-grpo-v0.17.1.tar.gz
-
-# Transfer the .tar.gz files to the cluster (scp / rsync / sneakernet)
-```
-
-`enroot import` natively supports only `docker://` (remote registry), `dockerd://` (local Docker daemon), and `podman://` URIs. If the cluster has neither a private registry nor a Docker daemon, run a transient local registry container, push to it, and import via `docker://localhost:5000/...`.
-
-### Step 3: Update Container Config
-
-Copy the template to a personal file that records the registry / tag references the cluster should pull from:
-
-```bash
-cp cluster_configs/containers.yaml cluster_configs/my_containers.yaml
-```
-
-Edit `cluster_configs/my_containers.yaml` with your registry paths. The YAML **keys** (`nemo-skills`, `nemo-rl`, `vllm`, `vllm-grpo`, `sglang`) match what the workflow code references and must not be renamed; only the registry / tag values change:
-
-```yaml
-containers:
-  nemo-rl:     your-registry/nvflow-nemo-rl:v0.6.0
-  nemo-skills: your-registry/nvflow-nemo-skills:0229040
-  vllm:        your-registry/nvflow-vllm:v0.18.1          # v0.18.1 for SDG/eval
-  vllm-grpo:   your-registry/nvflow-vllm-grpo:v0.17.1     # v0.17.1 for GRPO rollouts/judge
-  sglang:      lmsysorg/sglang:v0.5.10.post1
-```
-
-> **Note:** `my_containers.yaml` is gitignored (`cluster_configs/*.yaml` pattern), so your registry paths stay local and won't be committed.
-
-### Step 4: Convert to .sqsh Format
-
-#### Option A: Automated Setup (Recommended, for Option A registries)
-
-Use the setup script to download from your registry and convert all containers in parallel. Pass your personal config with `--config`:
-
-```bash
-# Run from a cluster login node (sbatch requires Slurm access)
-sbatch --account=YOUR_ACCOUNT scripts/setup_containers.sh --config cluster_configs/my_containers.yaml ./containers
-```
-
-The `--config` flag is required - the script reads image references from the specified YAML file, pulls them via `enroot`, and converts to `.sqsh` format. See [the script](scripts/setup_containers.sh) for additional options (`--platform`, `--force`).
-
-**Check progress:**
-```bash
-tail -f outputs/logs/slurm-containers-<jobid>.out
-```
-
-#### Option B: Manual Conversion
-
-Convert images one at a time using `enroot` on a cluster node. From a registry, use `docker://$REGISTRY/...`; from a loaded tarball, use `dockerd://...` after `docker load`:
-
-```bash
-CONTAINER_DIR=<absolute path on cluster where .sqsh files should live>
-
-enroot import --output $CONTAINER_DIR/nvflow-nemo-rl-v0.6.0.sqsh \
-  "docker://$REGISTRY/nvflow-nemo-rl:v0.6.0"          # from a registry
-# -- or --
-gunzip -c nvflow-nemo-rl-v0.6.0.tar.gz | docker load
-enroot import --output $CONTAINER_DIR/nvflow-nemo-rl-v0.6.0.sqsh \
-  dockerd://nvflow-nemo-rl:v0.6.0                     # from a tarball
-```
-
-Repeat for `nemo-skills`, `vllm`, `vllm-grpo`, and (if needed) `sglang`.
-
-**Two things to watch for:**
-
-- **Registries with a path component need `#` instead of `/`.** `enroot` parses `docker://<host>/<path>` such that everything after the first `/` is image path, which breaks for registries where the host itself contains a path (e.g. `nvcr.io/<org>`). Use `#` to separate host from image path:
-  ```bash
-  enroot import --output nvflow-vllm-v0.18.1.sqsh \
-    "docker://nvcr.io#<org>/nvflow-vllm:v0.18.1"
-  ```
-- **Filename colon.** `enroot` writes the Docker tag separator (`:`) literally into the output filename. Either pass `--output` with a shell-safe name (as above) or rename after import:
-  ```bash
-  mv "nvflow-nemo-rl:v0.6.0.sqsh" nvflow-nemo-rl-v0.6.0.sqsh
-  ```
-
-If the cluster authenticates to your registry, drop credentials into `~/.config/enroot/.credentials`:
-
-```
-machine <your-registry-host> login <user> password <token>
-```
-
-Move the resulting `.sqsh` files to your cluster's container storage path.
+**✅ Done when:** five `.sqsh` files exist on the cluster and you have their absolute paths for the config.
 
 ---
 
 ## Download Models
+
+**Step 3 of 6 · Goal:** pre-download the models your chosen workflows need to the cluster's HF models directory.
 
 > ⚠️ **Important:** Pre-download models to your cluster storage before running workflows. The runtime sets `HF_HUB_OFFLINE=1`, so any model not already on disk will fail at job time.
 >
@@ -314,7 +188,8 @@ stage_kwargs:
   server_type: sglang
 ```
 
-**Models needed per workflow:**
+<details>
+<summary><strong>Which models does each workflow need?</strong></summary>
 
 | Model | Demo SDG | Demo SFT | Demo GRPO | Demo Eval | Production GRPO |
 |-------|:--------:|:--------:|:---------:|:---------:|:---------------:|
@@ -325,6 +200,7 @@ stage_kwargs:
 | `Qwen/Qwen3-30B-A3B` | | | | | ✓ |
 
 **Tip:** Download commonly used models once and reuse across all workflows.
+</details>
 
 ### One-Time Connected-Node Stages (Datasets)
 
@@ -337,46 +213,21 @@ A handful of stages legitimately need internet on **first** run to pull benchmar
 | `workflow-1 step-0 prepare_data` (eval) | HF `secque`, `financebench` | Benchmark data |
 | `workflow-5 step-4 prepare_data` (GRPO) | HF | Only if `should_download: true` |
 
-For these stages, **temporarily clear** the three HF offline flags (`HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, `TRANSFORMERS_OFFLINE`) in your cluster config. Keep `UV_OFFLINE=true` set - `uv` should never need to resolve packages at runtime.
+For these stages, **temporarily clear** the three HF offline flags (`HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, `TRANSFORMERS_OFFLINE`) in your cluster config. `UV_OFFLINE` is unrelated — leave it at its default (unset); none of these stages invoke `uv`.
 
 > **Note:** `huggingface_hub` interprets `TRANSFORMERS_OFFLINE=1` as `HF_HUB_OFFLINE=1`, so all three need to be off (or unset) for HF dataset pulls to succeed.
 
+**✅ Done when:** the models for your workflow are on disk under your mounted `hf_models` directory.
+
 ---
 
-## Setup NeMo-RL & NeMo-Gym Sources (for GRPO)
+## GRPO Prerequisites
 
-> **Skip this section** if you're using the self-sufficient `nvflow-nemo-rl` image as-is (the recommended path). The image already contains the NeMo-RL source, a pinned NeMo-Gym branch, and a pre-built `.venv` symlinked across all 6 Gym components. No host clones or overlay mounts are required for SDG, SFT, GRPO, or eval workflows.
+**Step 4 of 6 · GRPO only — skip this entire step if you're not running GRPO.**
 
-This section is **dev mode only** - read it only if you're actively iterating on NeMo-RL or NeMo-Gym source against the self-sufficient image.
+**There are no sources to clone.** The `nvflow-nemo-rl` trainer image bakes NeMo-RL together with one prebuilt NeMo-Gym venv per component, so GRPO `training` resolves no packages at job runtime and needs no bind-mount. The Gym-only stages (`collect_rollouts`, `compute_rewards`, `prefetch_cache`, `prepare_data`) run on the equally self-contained `nvflow-nemo-gym` image.
 
-### What the self-sufficient image already contains
-
-`nvflow-nemo-rl` is built from [`dockerfiles/Dockerfile.nemo-rl`](dockerfiles/Dockerfile.nemo-rl) on top of `nvcr.io/nvidia/nemo-rl:v0.6.0` and bakes in:
-
-- NeMo-Skills @ `0229040` installed into the frozen `/opt/nemo_rl_venv`
-- NeMo-Gym source at `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym`, checked out at the `ude/finance-sec-search-v2` branch (override via `NEMO_GYM_BRANCH` build arg)
-- A pre-built Gym `.venv` symlinked across all 6 components (`equivalence_llm_judge`, `finance_sec_search`, `simple_agent`, `finance_agent`, `openai_model`, `vllm_model`)
-- `/root/.local/share/uv/python` relocated to `/opt/uv-python` and `/root/.local/bin` to `/opt/uv-bin` so the venvs survive enroot/pyxis mounting `$HOME` over `/root`
-- `tiktoken` / `openai_harmony` encoding caches at `/opt/tiktoken_cache`
-
-GRPO stages call `installation_command: source /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate` and find everything they need inside the image.
-
-### Do NOT overlay-mount source over the image paths
-
-Bind-mounting a host clone at `/opt/NeMo-RL` or `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym` **shadows the baked `.venv`**, and `installation_command` fails with `No such file or directory` - breaking `prepare_data`, `collect_rollouts`, `compute_rewards`, and `training` for GRPO.
-
-The older dev-mode overlay snippets in `template-slurm.yaml` are commented out for exactly this reason:
-
-```yaml
-mounts:
-  # DO NOT use these with the self-sufficient image — they shadow the baked .venv
-  # - <PATH_TO_NEMO_RL_CLONE>:/opt/NeMo-RL
-  # - <PATH_TO_GYM_CLONE>:/opt/NeMo-RL/3rdparty/Gym-workspace/Gym
-```
-
-### Dev mode: iterating on NeMo-RL / NeMo-Gym source
-
-If you really need to iterate on NeMo-RL or NeMo-Gym source against this image, clone the source trees (NeMo-RL at `v0.6.0` with submodules, NeMo-Gym at `ude/finance-sec-search-v2`), uncomment the two overlay mounts in `cluster_configs/my_cluster.yaml`, and set `NRL_FORCE_REBUILD_VENVS=true` in `env_vars` so Ray workers rebuild their venvs against your source. Your host clone must contain a `.venv` ABI-compatible with the image, and `NRL_FORCE_REBUILD_VENVS=true` **requires internet** at job time — only use it on a connected node, never in production.
+> How that image is built, and its internals, are covered in **[docs/development/nemo-rl-gym.md](docs/development/nemo-rl-gym.md)**.
 
 ### Prefetch SEC Filings Cache (for `finance_sec_search`)
 
@@ -384,28 +235,32 @@ If using the `finance_sec_search` NeMo-Gym environment, you must prefetch the SE
 
 The GRPO workflow includes a dedicated `prefetch_cache` stage that runs on a connected node and populates the cache under your `workflow-5-grpo/` output directory. See [`docs/recipes/finance/workflows/06-grpo.md`](docs/recipes/finance/workflows/06-grpo.md) for the full prefetch flow.
 
+**✅ Done when:** (GRPO users) the SEC filings cache is prefetched if you use `finance_sec_search`. Everyone else: nothing to do — move on.
+
 ---
 
 ## Configure Your Cluster
 
-### Step 1: Create Your Cluster Config
+**Step 5 of 6 · Goal:** create and fill in `cluster_configs/my_cluster.yaml`.
+
+### Create Your Cluster Config
 
 ```bash
 # Copy template
 cp cluster_configs/template-slurm.yaml cluster_configs/my_cluster.yaml
 ```
 
-### Step 2: Edit Your Config
+### Edit Your Config
 
 Edit `cluster_configs/my_cluster.yaml` and replace all `<PLACEHOLDER>` values:
 
 1. **SSH settings** - Your cluster login node, username, SSH key path (ONLY for remote job submission from local machine)
 2. **Slurm account/partition** - Run `sacctmgr show associations user=$USER` and `sinfo`
 3. **Container paths** - Copy from `outputs/logs/slurm-containers-<jobid>.out` after running setup_containers.sh
-4. **Mount points** - Map your cluster paths to container paths (at minimum `<hf_models>:/hf_models` and `<workspace>:/workspace`)
+4. **Mount points** - Map your cluster paths to container paths (at minimum `<hf_models>:/hf_models` and a writable data dir `<workspace_data>:/workspace` for outputs + caches). Recipe code and assets ship via the nemo-run packaged snapshot (`/nemo_run/code`), so the repo is not mounted — see [Mount Points](docs/cluster-configuration.md#mounts).
 5. **Environment variables** - Set `HF_HOME` to a path visible inside the container (see [env_vars docs](docs/cluster-configuration.md#environment-variables)) and any API keys
 
-### Step 3: Keep the Air-Gap Enforcement Block
+### Keep the Air-Gap Enforcement Block
 
 `template-slurm.yaml` ships with the offline flags pre-populated - leave them on:
 
@@ -415,16 +270,15 @@ env_vars:
   - HF_HUB_OFFLINE=1
   - HF_DATASETS_OFFLINE=1
   - TRANSFORMERS_OFFLINE=1
-  - UV_OFFLINE=true
+  # UV_OFFLINE: left UNSET (global flag). The images bake every venv they need,
+  # so no stage resolves packages at runtime either way.
+  # - UV_OFFLINE=true
 
   # Pre-baked tiktoken / openai_harmony cache (set as ENV in vllm/vllm-grpo
   # already; setting here applies them uniformly to nemo-skills and nemo-rl)
   - TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
   - TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
   - TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
-
-  # Do NOT set in self-sufficient mode — forces Ray workers to re-resolve via uv
-  # - NRL_FORCE_REBUILD_VENVS=true
 ```
 
 For the one-time connected-node stages listed in [Download Models](#one-time-connected-node-stages-datasets) above, comment out the three `HF_*_OFFLINE` flags just for that submission, then re-enable.
@@ -433,9 +287,13 @@ For the one-time connected-node stages listed in [Download Models](#one-time-con
 >
 > 📖 **For detailed documentation of all configuration fields, see the [Cluster Configuration Guide](docs/cluster-configuration.md)**.
 
+**✅ Done when:** `my_cluster.yaml` has no remaining `<PLACEHOLDER>` values and keeps the air-gap enforcement block.
+
 ---
 
 ## Verify Installation
+
+**Step 6 of 6 · Goal:** confirm the whole setup before running a real workflow.
 
 ```bash
 # 1. Test NeMo-Skills import
@@ -454,6 +312,8 @@ uv run python -c "from omegaconf import OmegaConf; OmegaConf.load('cluster_confi
 uv run nflow list-stages
 ```
 
+**✅ Done when:** all five checks above pass. You're ready to run a workflow — see [Next Steps](#next-steps).
+
 ---
 
 ## Troubleshooting
@@ -471,20 +331,7 @@ uv sync --reinstall
 ```
 
 ### yq not found
-```bash
-# macOS
-brew install yq
-
-# Linux (auto-detects architecture)
-mkdir -p $HOME/bin
-ARCH=$(uname -m); case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; armv7l) ARCH=arm ;; i686) ARCH=386 ;; esac
-wget "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}" -O $HOME/bin/yq
-chmod +x $HOME/bin/yq
-
-# Add to PATH if needed
-echo 'export PATH="$HOME/bin:$PATH"' >> $HOME/.bashrc
-source $HOME/.bashrc
-```
+`yq` is only needed for the parallel `.sqsh` conversion script. Install it per the [Prerequisites → Install yq](#prerequisites) block above.
 
 ### enroot not available
 ```bash
@@ -493,11 +340,8 @@ module load enroot  # if available
 # Or contact your cluster admin
 ```
 
-### Docker build fails on `docker login` for NeMo-RL base image
-The `nvflow-nemo-rl` build pulls from `nvcr.io/nvidia/nemo-rl:v0.6.0` (NGC). Run `docker login nvcr.io` once (username `$oauthtoken`, password = your [NGC API key](https://ngc.nvidia.com/setup/api-key)).
-
-### `enroot import` quirks (filename colon, `#` separator for `nvcr.io`)
-See [Two things to watch for](#step-4-convert-to-sqsh-format) in Step 4.
+### Container build / conversion issues
+Building images, `docker login nvcr.io`, and `enroot import` quirks (filename colon, `#` separator for `nvcr.io`) are covered in **[docs/maintainers/containers.md](docs/maintainers/containers.md)**.
 
 ### SSH connection failed
 ```bash
@@ -521,29 +365,7 @@ For symptoms specific to the self-sufficient runtime - GRPO `installation_comman
 
 ### Ray Cluster Initialization Hangs
 
-**Problem:** Ray cluster hangs during initialization, workers fail to connect
-
-**Symptoms:**
-- Training jobs hang after "Starting Ray cluster"
-- Error: `execve(): bad interpreter: No such file or directory`
-- Ray workers show connection failures in logs
-
-**Cause:** SLURM container reattachment issues (SLURM 25.x may be affected)
-
-**Solution:**
-Add `ray_template` to your cluster config:
-
-```yaml
-# In cluster_configs/my_cluster.yaml
-executor: slurm
-ray_template: "ray_enroot.sub.j2"  # Fixes Ray cluster initialization
-```
-
-**Check your SLURM version:**
-```bash
-scontrol show config | grep SLURM_VERSION
-# Confirmed: SLURM 25.11.2 needs this fix, SLURM 24.x works without it
-```
+If training jobs hang after "Starting Ray cluster" (or you see `execve(): bad interpreter: No such file or directory`), your Slurm likely needs the enroot Ray template: set `ray_template: "ray_enroot.sub.j2"` in `my_cluster.yaml`. Full symptoms, cause, and SLURM-version notes are in [cluster-configuration.md → Ray Cluster Configuration](docs/cluster-configuration.md#ray-cluster-configuration).
 
 ---
 
@@ -563,11 +385,12 @@ Then head back to the [README.md](README.md#-quick-start) Quick Start section to
 
 ## Reference
 
+- **Build the containers**: [`docs/maintainers/containers.md`](docs/maintainers/containers.md)
+- **NeMo-RL / NeMo-Gym trainer image & Gym venvs**: [`docs/development/nemo-rl-gym.md`](docs/development/nemo-rl-gym.md)
 - **NVFlow Dockerfiles**: [`dockerfiles/README.md`](dockerfiles/README.md)
 - **NVFlow Self-Sufficient Build / Deploy Guide**: [`dockerfiles/docker_instructions.md`](dockerfiles/docker_instructions.md)
 - **Cluster Configuration Guide**: [`docs/cluster-configuration.md`](docs/cluster-configuration.md)
 - **NeMo-Skills**: https://github.com/NVIDIA-NeMo/Skills
-- **NeMo-Skills Dockerfiles (upstream reference)**: https://github.com/NVIDIA-NeMo/Skills/tree/022904023ad7a83a87662a313cf72e7df5891d55/dockerfiles
 - **NeMo-RL**: https://github.com/NVIDIA-NeMo/RL
 - **NeMo-Gym**: https://github.com/NVIDIA-NeMo/Gym
 - **Official Container Config (NeMo-Skills)**: https://github.com/NVIDIA-NeMo/Skills/blob/main/cluster_configs/example-slurm.yaml

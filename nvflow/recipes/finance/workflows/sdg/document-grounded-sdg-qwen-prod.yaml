@@ -1,0 +1,127 @@
+# ============================================================================
+# Finance DG-SDG Pipeline - Qwen3.5-397B PRODUCTION (scaled-up qwen demo)
+# ============================================================================
+# Identical model / seed / temperature / threshold config to the qwen DEMO
+# (document-grounded-sdg-qwen-demo.yaml) -- it just inherits that file -- but
+# runs the FULL S&P 500 corpus at production volume.
+#
+#   GENERATOR ("athlete")  : Qwen3.5-397B-A17B  (q-gen, a-gen)   2 nodes x 8 GPU
+#   JUDGE                  : gpt-oss-120b        (q-verify, genselect, evaluate)
+#                            -- judge != generator (no self-preference bias)
+#
+# What changes vs the qwen demo:
+#   1. filings_dir    -> sap-500 SEC download (the FULL S&P 500, NOT the 7-company
+#                        demo set). This tree must be downloaded first; see below.
+#   2. base_data_dir  -> separate prod output tree
+#   3. total_samples  -> 150,000  (300x the demo's 500)
+#   4. max_skip_count -> 20,000   (CUMULATIVE skip ceiling -- see stage 0 note)
+#   5. num_chunks     -> scaled up per stage (q-gen/a-gen/genselect 60, the
+#                        gpt-oss verify/evaluate 20)
+#
+# ---------------------------------------------------------------------------
+# PREREQUISITE: download the S&P 500 filings first (different path & file count
+# than the demo's 7 companies). The demo used 7 tickers; sap-500 is ~500 tickers
+# / 2019-2024 / 10-K+10-Q+8-K. Run ONLY the sap-500 stage of the download wf:
+#
+#   uv run nflow run sap-500 \
+#     --config nvflow/recipes/finance/workflows/download_sec_filings.yaml
+#
+# That produces  outputs/finance/sap-500/workflow-2-download-sec/step-0-download
+# which is exactly what filings_dir below points at.
+# ---------------------------------------------------------------------------
+#
+# CHUNK SIZING (IMPORTANT -- read before scaling total_samples):
+#   Each chunk is ONE Slurm job (its own vLLM cold-load). 150k is 300x the demo
+#   while these chunk counts are only ~5-7x the demo, so EACH chunk is ~40-180x
+#   the demo's per-chunk work. The demo measured ~27 min/chunk, so prod chunks
+#   are well over the 4h wall-time and will TIME OUT mid-chunk.
+#
+#   That is NOT data loss: rollout has per-row resume (resume_filter +
+#   resume_from_cache=true) -- a timed-out chunk saves completed rows and the
+#   next `run-all` regenerates only the remainder. The chunk finishes across
+#   several 4h jobs. BUT with NO dependent_jobs, each 4h timeout needs a manual
+#   `run-all` to continue, and every continuation re-cold-loads the model
+#   (expensive for the 2-node 397B q-gen/a-gen). So these counts trade fewer
+#   concurrent jobs for more resume cycles + cold-load overhead.
+#
+#   If you'd rather each chunk fit in a SINGLE 4h job (fewer resubmits, but many
+#   more concurrent jobs flooding the queue), raise num_chunks a lot (~order 10x
+#   these values for the 397B stages). Current values favor low queue pressure.
+#
+#   After stage-1 (q-gen) check actual per-chunk runtime in the logs and tune.
+#
+# Everything else (Qwen397B serving block w/ num_samples_in_parallel=32, gpt-oss
+# judge blocks, num_random_seeds=3, temperatures, answer threshold=0.5,
+# max_model_len, prompts) is INHERITED UNCHANGED from the qwen demo.
+#
+# Usage (after the sap-500 download above completes):
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/sdg/document-grounded-sdg-qwen-prod.yaml
+# ============================================================================
+
+# Inherit the qwen demo (which inherits the gpt-oss demo, which inherits prod).
+_base_: document-grounded-sdg-qwen-demo.yaml
+
+# Production input: the FULL S&P 500 download (NOT the demo's 7 companies).
+filings_dir: /workspace/outputs/finance/sap-500/workflow-2-download-sec/step-0-download
+
+# Separate output tree for the production run.
+base_data_dir: /workspace/outputs/finance/prod/workflow-2-document-grounded-sdg-qwen-prod
+
+stages:
+
+  # --------------------------------------------------------------------------
+  # Stage 0: Preprocess -- full production sample budget.
+  # --------------------------------------------------------------------------
+  dg_sdg_preprocess:
+    input_dir: ${filings_dir}/data
+    # Process 10-K + 10-Q + 8-K. 8-K is the event-driven short filing (earnings
+    # 2.02, mgmt changes 5.02, material agreements 1.01, etc.); the curated
+    # 8k_*_distribution.csv samples only the high-signal items and deliberately
+    # excludes the boilerplate 9.01 exhibit-list item. NOTE: chunking still walks
+    # ALL 8-K item HTML (incl. 9.01), so adding 8-K roughly triples chunking
+    # volume (~40k extra filings vs ~11.6k for 10-K/10-Q) -- preprocess now has
+    # per-HTML resume, so it continues across multiple 24h cpu jobs.
+    #
+    # `--forms` is SEC-specific to the finance preprocess_module; it rides the
+    # generic stage's domain-agnostic extra_args passthrough.
+    extra_args:
+      forms: "10-K 10-Q 8-K"
+    total_samples: 150000      # 300x the demo (500). Full production volume.
+    # MUST stay high: max_skip_count is a CUMULATIVE skip ceiling -- once total
+    # skipped sampling attempts exceed it, preprocess BREAKS even if total_samples
+    # isn't reached. Non-repeatable sampling collides more as the pool drains, so a
+    # low value stops far short of 150k. 2000 is the base-prod / code-default value
+    # validated for total_samples=150000. (1000 would abort almost immediately.)
+    max_skip_count: 2000
+    # max_tokens / overlap_tokens / seed inherited from the demo (unchanged).
+
+  # --------------------------------------------------------------------------
+  # Stage 1: Q-gen (Qwen397B, 1 seed) + Q-verify (gpt-oss-120b, 3 seeds)
+  # --------------------------------------------------------------------------
+  generate_verified_questions:
+    question_generation_kwargs:
+      args:
+        num_chunks: 120        # demo 8 (Qwen397B 2-node; big chunks to amortize cold-load)
+    question_verify_kwargs:
+      args:
+        num_chunks: 120        # demo 12 (gpt-oss; largest stage: 3 seeds x 120 jobs)
+
+  # --------------------------------------------------------------------------
+  # Stage 2: A-gen (Qwen397B, 3 seeds)
+  # --------------------------------------------------------------------------
+  generate_answers:
+    answer_generation_kwargs:
+      args:
+        num_chunks: 240        # demo 12 (Qwen397B 2-node; 3 seeds x 240 jobs)
+
+  # --------------------------------------------------------------------------
+  # Stage 3: GenSelect (gpt-oss-120b)
+  # --------------------------------------------------------------------------
+  gym_genselect_answers:
+    num_chunks: 240            # demo 8 (gpt-oss)
+
+  # --------------------------------------------------------------------------
+  # Stage 4: Evaluate (gpt-oss-120b, 3 seeds)
+  # --------------------------------------------------------------------------
+  evaluate_answers:
+    num_chunks: 120            # demo 12 (gpt-oss; 3 seeds x 120 jobs)

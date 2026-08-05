@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Prepare data for GRPO training by running NeMo-Gym's ng_prepare_data.
+"""Prepare data for GRPO training via NeMo-Gym's ``gym dataset collate``.
 
-ng_prepare_data stamps each JSONL record with an ``agent_ref`` field that
-tells NeMo-Gym which agent server to route the example to during training.
+``gym dataset collate`` (formerly ``ng_prepare_data``) stamps each JSONL record
+with an ``agent_ref`` field that tells NeMo-Gym which agent server to route the
+example to during training.
 
 This stage derives agent definitions from the top-level ``environments``
 dict, generates an agent-config overlay YAML inside the Slurm job at
@@ -29,6 +30,7 @@ from typing import Any
 import yaml
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.cli_cmd import build_python_cmd
 
 
 @StageRegistry.register(recipe="finance", workflow="grpo", stage="prepare_data")
@@ -218,7 +220,7 @@ class PrepareDataForGRPOStage(BaseStage):
         cmd = (
             f"{overlay_snippet} && "
             f"cd {gym_path} && "
-            f'ng_prepare_data "+config_paths=[{config_paths_str}]" '
+            f'gym dataset collate "+config_paths=[{config_paths_str}]" '
             f"+output_dirpath={env_output_dir} "
             f"+mode={mode} "
             f"+error_on_almost_servers=false"
@@ -238,11 +240,12 @@ class PrepareDataForGRPOStage(BaseStage):
         shuffle = config.get("shuffle", True)
         random_seed = config.get("random_seed", 42)
         if shuffle:
-            cmd += (
-                f" && python -m nvflow.recipes.finance.utils.rl.shuffle_jsonl"
-                f" --input_file {env_output_dir}/train.jsonl"
-                f" --random_seed {random_seed}"
+            shuffle_cmd = build_python_cmd(
+                "nvflow.recipes.finance.utils.rl.shuffle_jsonl",
+                input_file=f"{env_output_dir}/train.jsonl",
+                random_seed=random_seed,
             )
+            cmd += f" && {shuffle_cmd}"
 
         console.status(f"Preparing data for environment: {env_name}")
         console.detail("Mode", mode)

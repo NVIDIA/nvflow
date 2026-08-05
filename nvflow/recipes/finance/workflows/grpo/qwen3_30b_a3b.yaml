@@ -37,7 +37,10 @@ hf_model_path: /hf_models/Qwen/Qwen3-30B-A3B
 
 # Model-specific output directory (stages 5-9: rollouts, compute_rewards,
 # train_validation_split, training, eval write here)
-model_output_dir: ${base_output_dir}/qwen3_30b_a3b
+# SMOKE: redirected to _smoke to keep the eval-parity smoke run separated
+# from production output dirs.  Revert to qwen3_30b_a3b before committing
+# any change in this file.
+model_output_dir: ${base_output_dir}/qwen3_30b_a3b_smoke
 
 # Same pipeline as base.yaml -- listed here because YAML lists fully replace
 # (not merge) when inherited via _base_, so we must re-declare.
@@ -64,6 +67,13 @@ _judge_vllm: &judge_vllm
   max_model_len: 32768
   async_scheduling: true
   uses_reasoning_parser: true
+  # Disable the FlashInfer all-reduce fusion pass (emits --compilation-config).
+  # The pass allocates a fixed-name localhost IPC workspace; when two vLLM
+  # servers co-locate on one node (SLURM packs a policy TP4 + this judge TP2
+  # together), the loser hits `[Errno 98] Address already in use`, leaving TP
+  # ranks inconsistent -> shm_broadcast hang -> ~600s NCCL watchdog kill.
+  # Skipping the pass keeps all ranks consistent regardless of co-location.
+  compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'
 
 # Per-environment sequence length for equiv/mcqa (finance_sec_search uses 131K model default)
 _env_seq_len_32k: 32768
@@ -79,6 +89,18 @@ _training_policy_32k: &training_policy_32k
   sequence_packing:
     train_mb_tokens: ${_env_seq_len_32k}
     logprob_mb_tokens: ${_env_seq_len_32k}
+
+# YaRN rope scaling for 131K context (define once, reuse for vLLM + megatron)
+_rope_scaling_131k: &rope_scaling_131k
+  rope_type: yarn
+  rope_theta: 1000000
+  factor: 3.2                             # 131072 / 40960
+  original_max_position_embeddings: 40960
+  truncate: true
+  beta_fast: 32
+  beta_slow: 1
+  mscale: 1
+  mscale_all_dim: 0
 
 # DG SDG data path (shared across equivalence_llm_judge and finance_sec_search)
 _dg_sdg_data: &dg_sdg_data /workspace/outputs/finance/sap-500/workflow-3-document-grounded-sdg
@@ -110,16 +132,13 @@ environments:
     raw_train_data: ${directories.step-0-validate-questions}/finance_sec_search
     config_paths:
       - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
-      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
-      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_sap500.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_sap500.yaml
     policy_vllm:
       num_gpus: 4
       max_model_len: 131072
       hf_config_overrides:
-        rope_scaling:
-          rope_type: yarn
-          factor: 3.2
-          original_max_position_embeddings: 40960
+        rope_scaling: *rope_scaling_131k
     judge_vllm: *judge_vllm
 
 # ============================================================================
@@ -172,9 +191,15 @@ stages:
   # --------------------------------------------------------------------------
   collect_rollouts:
     rollout:
-      num_random_seeds: 1
-      num_chunks: 8
-      dependent_jobs: 2
+      # SMOKE: 3 seeds x 1 chunk x 1K examples, no dependents = 3 SLURM
+      # het-group submissions (one per seed).  Matches the May 24 .prev
+      # baseline layout (rs0/rs1/rs2, chunk_0 only, 1000 materialized inputs).
+      # Revert to num_random_seeds: 1 / num_chunks: 8 / dependent_jobs: 2 and
+      # delete max_num_samples for the production sweep before committing.
+      num_random_seeds: 3
+      num_chunks: 1
+      dependent_jobs: 0
+      max_num_samples: 1000
       num_samples_in_parallel: 512
       starting_seed: 0
       policy_vllm:
@@ -194,6 +219,14 @@ stages:
         # improve throughput — the bottleneck is client-side orchestration,
         # not GPU inference.
         reasoning_parser: qwen3
+        # Disable the FlashInfer all-reduce fusion pass (emits --compilation-config).
+        # The pass allocates a fixed-name localhost IPC workspace; when this
+        # policy TP4 server co-locates on a node with another seed's judge TP2
+        # server (SLURM packing), the loser hits `[Errno 98] Address already in
+        # use`, leaving TP ranks inconsistent -> shm_broadcast hang -> ~600s NCCL
+        # watchdog kill (observed on rs1/rs2 while a dedicated-node rs0 was fine).
+        # Skipping the pass keeps all ranks consistent regardless of co-location.
+        compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'
 
   # --------------------------------------------------------------------------
   # Train/Validation Split: curriculum ordering for GRPO
@@ -258,16 +291,7 @@ stages:
           name: ${stages.training.hf_checkpoint_path}
         # Qwen3-30B-A3B (MoE) needs YaRN to extend context beyond native 40960
         hf_config_overrides:
-          rope_scaling:
-            rope_type: yarn
-            rope_theta: 1000000
-            factor: 3.2
-            original_max_position_embeddings: 40960
-            truncate: true
-            beta_fast: 32
-            beta_slow: 1
-            mscale: 1
-            mscale_all_dim: 0
+          rope_scaling: *rope_scaling_131k
         # 131K default context (required by finance_sec_search and combined training).
         # Single-env equiv/mcqa override down to 32K via training_policy.
         max_total_sequence_length: 131072
@@ -281,22 +305,22 @@ stages:
         train_global_batch_size: 1024
 
         # Megatron parallelism for MoE:
-        # TP=4, CP=4, PP=1, EP=8
-        # - TP=4: model sharding across 4 GPUs (matches NeMo-RL 40K reference)
-        # - CP=4: 131K / 4 = ~32K tokens/rank (activation ckpt handles memory)
+        # TP=4, CP=8, PP=1, EP=8
+        # - TP=4: model sharding across 4 GPUs
+        # - CP=8: 131K / 8 = ~16K tokens/rank (halves logits memory vs CP=4)
         # - EP=8: 128 experts / 8 = 16 experts per EP rank
-        # - DP = 64 / (TP*CP*PP) = 64/16 = 4 (doubled from CP=8 for throughput)
+        # - DP = 64 / (TP*CP*PP) = 64/32 = 2
+        # Ref: internal grpo-nemotron-nano-16n8g uses TP=8, CP=8 at 131K
         megatron_cfg:
           tensor_model_parallel_size: 4
           pipeline_model_parallel_size: 1
-          context_parallel_size: 4
+          context_parallel_size: 8
           expert_model_parallel_size: 8
           expert_tensor_parallel_size: 1
           sequence_parallel: true
           activation_checkpointing: true
-          empty_unused_memory_level: 1
-          # moe_token_dispatcher_type: uses preset default (allgather).
-          # Consider alltoall for better comm efficiency at EP=8 if throughput-bound.
+          empty_unused_memory_level: 2
+          moe_token_dispatcher_type: alltoall
           env_vars:
             PYTORCH_ALLOC_CONF: "expandable_segments:False"
           # LR for GSPO on 30B MoE (ref: grpo_qwen3_30ba3b_instruct.yaml)
@@ -316,6 +340,7 @@ stages:
           logprob_mb_tokens: 131072
 
         logprob_chunk_size: 2048
+        make_sequence_length_divisible_by: 32  # TP(4) * CP(8)
 
       # Logger
       logger:
@@ -328,6 +353,7 @@ stages:
   eval:
     eval_steps: [20]
     checkpoint_path: ${directories.step-8-training}
+    eval_output_dir: ${directories.step-9-eval}/finance_sec_search
     base_output_dir: ${model_output_dir}
     format: megatron
     base_model: ${hf_model_path}
@@ -339,7 +365,7 @@ stages:
       financebench:
         seeds: 5
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.temperature=0.6
       ++inference.top_p=0.95
       ++inference.top_k=20

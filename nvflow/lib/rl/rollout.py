@@ -24,33 +24,33 @@ nemo-skills' ``GenerationClientScript`` so that ``hostname_ref()``
 resolves correctly after the Pipeline assigns het-group indices.
 """
 
+import shlex
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from nemo_skills.pipeline.utils.scripts import BaseJobScript, ServerScript
 
 from nvflow.core import console
-from nvflow.lib.vllm_compat import get_server_entrypoint
 
 from .helpers import (
     CONTAINER_CODE_DIR,
     NON_VLLM_KEYS,
-    SERVER_CONTAINER,
     SHELL_FIND_FREE_PORT,
     SHELL_READ_PORT_FILE,
     SHELL_WAIT_FOR_SERVER,
+    VLLM_CONTAINER,
+    LauncherFS,
     _build_overlay_setup_cmd,
     _overlay_path,
     build_config_paths_str,
     build_judge_ng_run_overrides,
+    build_ng_run_invocation,
     build_vllm_server_args,
     check_launcher_cwd,
     compute_num_gpus,
     determine_judge_mode,
     get_env_from_environments,
     log_judge_details,
-    resolve_host_path,
 )
 
 
@@ -92,6 +92,7 @@ class RolloutClientScript(BaseJobScript):
 
     output_dir: str = ""
     gym_path: str = ""
+    uv_venv_dir: str = ""
     model_path: str = ""
     agent_name: str = ""
     input_data: str = ""
@@ -127,6 +128,7 @@ class RolloutClientScript(BaseJobScript):
             cmd = _build_client_cmd(
                 output_dir=self.output_dir,
                 gym_path=self.gym_path,
+                uv_venv_dir=self.uv_venv_dir,
                 model_path=self.model_path,
                 agent_name=self.agent_name,
                 input_data=self.input_data,
@@ -252,7 +254,7 @@ def make_server_script(
         num_gpus=vllm_cfg["num_gpus"],
         num_nodes=vllm_cfg.get("server_nodes", 1),
         server_args=build_vllm_server_args(vllm_overrides),
-        server_entrypoint=vllm_cfg.get("server_entrypoint", get_server_entrypoint()),
+        server_entrypoint=vllm_cfg.get("server_entrypoint"),
     )
 
     if overlay:
@@ -293,7 +295,8 @@ def _merged_filename(seed: int) -> str:
 
 
 def _get_remaining_jobs(
-    host_dir: Path,
+    fs: LauncherFS,
+    rollout_dir: str,
     seeds: list[int],
     chunk_ids: list[int],
     rerun_done: bool,
@@ -311,38 +314,55 @@ def _get_remaining_jobs(
     2. **Chunk level** — if a chunk ``.done`` exists but the chunk output
        file is missing (and no successful merge), the marker is stale.
        Delete it and re-schedule the chunk.
+
+    Filesystem access goes through :class:`LauncherFS`, so this resume scan
+    works both within the cluster (local ``Path`` ops -- unchanged behaviour)
+    and off-cluster (existence/rm run on the cluster over the ssh tunnel).
     """
     if rerun_done:
+        rm_paths: list[str] = []
         for s in seeds:
             for c in chunk_ids:
-                fname = _output_filename(s, c)
-                (host_dir / f"{fname}.done").unlink(missing_ok=True)
-                (host_dir / f"{fname}-async").unlink(missing_ok=True)
-                (host_dir / f"{fname}-async.prev").unlink(missing_ok=True)
-                (host_dir / fname).unlink(missing_ok=True)
+                base = f"{rollout_dir}/{_output_filename(s, c)}"
+                rm_paths += [f"{base}.done", f"{base}-async", f"{base}-async.prev", base]
+        fs.rm(rm_paths)
         return [(s, c) for s in seeds for c in chunk_ids]
 
-    remaining: list[tuple[int, int]] = []
+    # Batch all existence checks (a single round-trip group when remote).
+    probe: list[str] = []
     for s in seeds:
         mf = _merged_filename(s)
-        merge_done = host_dir / f"{mf}.done"
-        merge_file = host_dir / mf
+        probe += [f"{rollout_dir}/{mf}.done", f"{rollout_dir}/{mf}"]
+        for c in chunk_ids:
+            base = f"{rollout_dir}/{_output_filename(s, c)}"
+            probe += [f"{base}.done", base]
+    ex = fs.batch_exists(probe)
 
-        if merge_done.exists():
-            if merge_file.exists():
+    remaining: list[tuple[int, int]] = []
+    stale: list[str] = []
+    for s in seeds:
+        mf = _merged_filename(s)
+        merge_done = f"{rollout_dir}/{mf}.done"
+        merge_file = f"{rollout_dir}/{mf}"
+
+        if ex.get(merge_done):
+            if ex.get(merge_file):
                 continue
             console.warning(f"Merged .done exists but {mf} is missing — resetting merge marker")
-            merge_done.unlink()
+            stale.append(merge_done)
 
         for c in chunk_ids:
-            fname = _output_filename(s, c)
-            done = host_dir / f"{fname}.done"
-            output = host_dir / fname
-            if done.exists() and not output.exists():
-                console.warning(f"Stale .done for {fname} — re-scheduling")
-                done.unlink()
-            if not done.exists():
+            base = f"{rollout_dir}/{_output_filename(s, c)}"
+            done = f"{base}.done"
+            if ex.get(done) and not ex.get(base):
+                console.warning(f"Stale .done for {_output_filename(s, c)} — re-scheduling")
+                stale.append(done)
                 remaining.append((s, c))
+            elif not ex.get(done):
+                remaining.append((s, c))
+
+    if stale:
+        fs.rm(stale)
 
     return remaining
 
@@ -367,10 +387,51 @@ def _build_vllm_wait_snippet(policy_url: str, judge_url: str = "") -> str:
     return snippet
 
 
-def _build_client_cmd(
+# ---------------------------------------------------------------------------
+# Per-segment helpers for _build_client_cmd
+# ---------------------------------------------------------------------------
+# Each helper renders one labeled section of the rollout client bash script.
+# Composed by _build_client_cmd in the documented order; do NOT change order.
+#
+# Conventions:
+#   - Constant segments take no arguments.
+#   - Parameterized segments take only the values they interpolate.
+#   - Output is concatenated by ``+`` -- each helper is responsible for its
+#     own leading/trailing newlines.  The snapshot tests in tests/test_rollout
+#     pin the byte-exact concatenation, so any whitespace change here will
+#     surface as a fixture diff.
+
+
+def _bash_dq(value: str) -> str:
+    """Emit *value* as a bash double-quoted literal.
+
+    Unlike :func:`shlex.quote` (which uses single quotes when special
+    characters are present and thereby suppresses bash variable
+    expansion), this helper emits a double-quoted string so embedded
+    bash variables (``$VAR`` and ``${VAR:-default}``) and command
+    substitution (``$(cmd)``, ``` `cmd` ```) are evaluated at
+    assignment time.
+
+    Use ONLY for fields whose values legitimately contain bash
+    parameter expansions that must be resolved at runtime -- e.g., URL
+    templates built from :meth:`ServerScript.hostname_ref` and dynamic
+    port variables (``${SLURM_MASTER_NODE_HET_GROUP_0:-localhost}``,
+    ``$POLICY_PORT``).  For paths and arbitrary user-supplied strings,
+    keep using :func:`shlex.quote`.
+
+    Escapes backslash, double-quote, and backtick to preserve them as
+    literals; ``$`` is NOT escaped (so expansions still apply -- that
+    is the entire point of this helper).
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`")
+    return f'"{escaped}"'
+
+
+def _build_variables_segment(
     *,
     output_dir: str,
     gym_path: str,
+    uv_venv_dir: str = "",
     model_path: str,
     agent_name: str,
     input_data: str,
@@ -380,45 +441,64 @@ def _build_client_cmd(
     num_parallel: int,
     job_label: str,
     policy_vllm_url: str,
-    judge_vllm_url: str = "",
-    judge_ng_run_overrides: str,
-    max_num_samples: int = 0,
-    chunk_id: int = 0,
-    num_chunks: int = 1,
-    responses_create_params: dict | None = None,
+    judge_vllm_url: str,
+    chunk_id: int,
+    num_chunks: int,
 ) -> str:
-    """Build the rollout collection bash script.
+    """Render shell variable declarations consumed by every later segment.
 
-    Generated script structure:
-      1.  Wait for vLLM servers (policy + optional judge)
-      1a. (If chunked) Extract this job's slice via head/tail
-      1b. Self-heal: recover orphaned .prev / partial finalize from prior crash
-      1c. Resume-filter: skip already-completed rows from prior partial run
-      2.  Start NeMo-Gym servers via ``ng_run`` (background)
-      3.  Collect rollouts via ``ng_collect_rollouts``
-      Finalize: merge partials, cp→output, touch .done, cleanup temps
+    Every path-typed value flows through ``shlex.quote`` so a path or
+    label containing whitespace, ``$``, ``"``, or backticks cannot break
+    the rendered script.  Integer fields are emitted bare since
+    ``shlex.quote`` would add unnecessary quotes around their string form.
+
+    URL fields (``VLLM_URL`` and ``JUDGE_URL``) flow through
+    :func:`_bash_dq` instead of :func:`shlex.quote` because their values
+    are URL templates assembled from
+    :meth:`ServerScript.hostname_ref` and dynamic port shell variables
+    -- e.g.
+    ``http://${SLURM_MASTER_NODE_HET_GROUP_0:-localhost}:$POLICY_PORT/v1``.
+    ``shlex.quote`` would single-quote the string and freeze the
+    bash variables as literal characters, which then leak through
+    ``$VLLM_URL`` into the ng_run CLI.  OmegaConf parses the leaked
+    ``${SLURM_MASTER_NODE_HET_GROUP_0:-localhost}`` as an interpolation
+    and raises ``UnsupportedInterpolationType`` (silent rollout
+    failure).  Double-quoting preserves bash expansion at assignment
+    time; the resolved URL flows correctly into both ``wait_for_server``
+    and the ``ng_run +policy_model.responses_api_models.vllm_model.base_url``
+    override.
     """
-    # -- Shell variables & shared functions --------------------------------
-    variables = (
+    return (
         "set -e\n"
         "\n"
-        f'OUTPUT_DIR="{output_dir}"\n'
-        f'GYM_PATH="{gym_path}"\n'
-        f'MODEL_PATH="{model_path}"\n'
-        f'AGENT_NAME="{agent_name}"\n'
-        f'INPUT_DATA="{input_data}"\n'
-        f'OUTPUT_FILE="{output_file}"\n'
-        f'DONE_FILE="{done_file}"\n'
-        f'CONFIG_PATHS="{config_paths}"\n'
-        f'NUM_PARALLEL="{num_parallel}"\n'
-        f'JOB_LABEL="{job_label}"\n'
-        f'VLLM_URL="{policy_vllm_url}"\n'
-        f'JUDGE_URL="{judge_vllm_url}"\n'
+        f"OUTPUT_DIR={shlex.quote(output_dir)}\n"
+        f"GYM_PATH={shlex.quote(gym_path)}\n"
+        # Where ng_run looks for per-component venvs (consumed by build_ng_run_invocation).
+        # Defaults to GYM_PATH (== Gym's PARENT_DIR default); the CPU nemo-gym image
+        # overrides it to /opt/gym-venvs to reuse the baked venvs.
+        f"UV_VENV_DIR={shlex.quote(uv_venv_dir or gym_path)}\n"
+        f"MODEL_PATH={shlex.quote(model_path)}\n"
+        f"AGENT_NAME={shlex.quote(agent_name)}\n"
+        f"INPUT_DATA={shlex.quote(input_data)}\n"
+        f"OUTPUT_FILE={shlex.quote(output_file)}\n"
+        f"DONE_FILE={shlex.quote(done_file)}\n"
+        f"CONFIG_PATHS={shlex.quote(config_paths)}\n"
+        f"NUM_PARALLEL={num_parallel}\n"
+        f"JOB_LABEL={shlex.quote(job_label)}\n"
+        f"VLLM_URL={_bash_dq(policy_vllm_url)}\n"
+        f"JUDGE_URL={_bash_dq(judge_vllm_url)}\n"
         f"CHUNK_ID={chunk_id}\n"
         f"NUM_CHUNKS={num_chunks}\n"
     )
 
-    setup = (
+
+def _build_setup_segment() -> str:
+    """Render mkdir, port-finder definition, cleanup trap, and wait_for_server.
+
+    The cleanup trap is the load-bearing crash-safety hook; see the
+    self-heal segment for the matching recovery side.
+    """
+    return (
         "\n"
         'mkdir -p "$OUTPUT_DIR/logs"\n'
         "\n" + SHELL_FIND_FREE_PORT + "\n"
@@ -428,7 +508,14 @@ def _build_client_cmd(
         "    local _nvflow_exit=$?\n"
         '    echo ""\n'
         '    echo "[Cleanup] Shutting down NeMo-Gym servers ..."\n'
-        '    [ -n "$NG_RUN_PID" ] && kill $NG_RUN_PID 2>/dev/null && wait $NG_RUN_PID 2>/dev/null || true\n'
+        "    # Suppress stderr via ``2>&-`` (close fd) instead of\n"
+        "    # ``2>/dev/null`` so the cleanup trap stays quiet even if\n"
+        "    # the container's /dev/null disappeared mid-script -- which\n"
+        "    # is exactly what happened in the Nemotron-Nano smoke run\n"
+        "    # where pyxis tore down the container while bash was still\n"
+        "    # in the cleanup path, producing ``/dev/null: No such file\n"
+        "    # or directory`` noise on top of the original failure.\n"
+        '    [ -n "$NG_RUN_PID" ] && kill $NG_RUN_PID 2>&- && wait $NG_RUN_PID 2>&- || true\n'
         "    # Best-effort merge of .prev into -async.  On success, finalize already\n"
         "    # merged and removed .prev so this block is a no-op.  On failure/kill,\n"
         "    # this is a first attempt; the self-heal at next startup is the guarantee.\n"
@@ -443,14 +530,17 @@ def _build_client_cmd(
         "    fi\n"
         "    if [ $_nvflow_exit -ne 0 ]; then\n"
         '        echo "[nvflow] Client exited with code $_nvflow_exit — cancelling job ${SLURM_JOB_ID}"\n'
-        '        scancel "${SLURM_JOB_ID}" 2>/dev/null || kill 0 2>/dev/null || true\n'
+        '        scancel "${SLURM_JOB_ID}" 2>&- || kill 0 2>&- || true\n'
         "    fi\n"
         "}\n"
         "trap cleanup EXIT\n"
         "\n" + SHELL_WAIT_FOR_SERVER + "\n"
     )
 
-    banner = (
+
+def _build_banner_segment() -> str:
+    """Render the human-readable header echoed at job start."""
+    return (
         'echo "============================================================"\n'
         'echo "Rollout Collection  [$JOB_LABEL]"\n'
         'echo "============================================================"\n'
@@ -463,17 +553,35 @@ def _build_client_cmd(
         'echo "============================================================"\n'
     )
 
-    # -- Step 1: Wait for vLLM servers ------------------------------------
-    wait_for_vllm = _build_vllm_wait_snippet(policy_vllm_url, judge_vllm_url)
-    step1_wait = (
-        '\necho ""\necho "[Step 1/3] Waiting for vLLM servers ..."\n' + wait_for_vllm + "\n"
+
+def _build_done_check_segment() -> str:
+    """Render the early-exit guard for jobs whose chunk already completed.
+
+    When ``dependent_jobs > 0`` Slurm pre-submits a chain; later runs in
+    the chain hit this guard and exit 0 without redoing work.
+    """
+    return (
+        'if [ -f "$DONE_FILE" ]; then\n'
+        '    echo "Chunk already complete (.done exists) — skipping."\n'
+        "    exit 0\n"
+        "fi\n"
     )
 
-    # -- Step 1a: Logical chunking (extract this job's slice) --------------
-    # When num_chunks > 1, each Slurm job extracts its portion of the full
-    # input at runtime via head|tail.  No physical pre-splitting on the
-    # login node — keeps the launcher lightweight and filesystem-agnostic.
-    chunk_slice = (
+
+def _build_step1_wait_segment(policy_vllm_url: str, judge_vllm_url: str) -> str:
+    """Render the "[Step 1/3]" banner + ``wait_for_server`` invocations."""
+    wait_for_vllm = _build_vllm_wait_snippet(policy_vllm_url, judge_vllm_url)
+    return '\necho ""\necho "[Step 1/3] Waiting for vLLM servers ..."\n' + wait_for_vllm + "\n"
+
+
+def _build_chunk_slice_segment(max_num_samples: int) -> str:
+    """Render the runtime head|tail slice that gives this job its chunk.
+
+    No physical pre-splitting on the launcher — keeps the launcher
+    lightweight and filesystem-agnostic.  The ``if [ $NUM_CHUNKS -gt 1 ]``
+    runtime guard suppresses slicing in the single-chunk case.
+    """
+    return (
         'CHUNK_INPUT=""\n'
         "if [ $NUM_CHUNKS -gt 1 ]; then\n"
         '    echo ""\n'
@@ -495,35 +603,19 @@ def _build_client_cmd(
         "fi\n"
     )
 
-    # -- Early exit if already done ----------------------------------------
-    # When dependent_jobs > 0, Slurm pre-submits a chain of jobs.  If an
-    # earlier job in the chain already completed this chunk, the remaining
-    # dependent jobs should exit immediately instead of re-doing the work.
-    done_check = (
-        'if [ -f "$DONE_FILE" ]; then\n'
-        '    echo "Chunk already complete (.done exists) — skipping."\n'
-        "    exit 0\n"
-        "fi\n"
-    )
 
-    # -- Step 1b: Self-heal ------------------------------------------------
-    # Recover from any interrupted prior run so the resume filter sees the
-    # full set of completed samples.  Three recovery cases:
-    #
-    #   A. Partial finalize: output file exists but .done was never written
-    #      (kill between mv -async→output and touch .done).
-    #      Fix: move output back to -async.
-    #
-    #   B. Orphaned .prev: cleanup trap was killed (SIGKILL / OOM / node
-    #      failure) before merging .prev back into -async.
-    #      Fix: merge .prev into -async.
-    #
-    #   C. Orphaned temp files (.healed, .restored, .merged) from partial
-    #      cleanup/finalize.  Harmless but noisy — clean them up.
-    #
-    # Wrapped in a subshell so failures don't abort the job under set -e.
-    # If self-heal fails, the job continues (re-does some work, but runs).
-    selfheal = (
+def _build_selfheal_segment() -> str:
+    """Render the three crash-recovery cases run before resume.
+
+    Cases (see body for detail):
+      A. Output file present but ``.done`` missing → restore to ``-async``.
+      B. Orphaned ``.prev`` → merge into ``-async``.
+      C. Orphaned ``.healed`` / ``.restored`` / ``.merged`` temp files → rm.
+
+    The whole block is wrapped in a subshell so a recovery failure under
+    ``set -e`` does not abort the job; the worst case is some redone work.
+    """
+    return (
         'ASYNC_FILE="$OUTPUT_FILE-async"\n'
         "(\n"
         "  # Case A: output exists without .done → restore to -async\n"
@@ -550,10 +642,27 @@ def _build_client_cmd(
         ') || echo "[Self-heal] WARNING: recovery failed — continuing with available data"\n'
     )
 
-    # -- Step 1c: Resume filter (skip completed rows) ---------------------
-    # When chunked, truncation is handled by the slice above, so pass 0.
+
+def _build_resume_segment(num_chunks: int, max_num_samples: int) -> str:
+    """Render the resume-filter step that skips already-completed rows.
+
+    When chunked, the head|tail slice already truncated; pass 0 to
+    resume_filter to avoid double-truncation.
+
+    The early-exit branch (when all rows are already complete in
+    ``-async``) explicitly cleans the orphan ``.prev`` and signals the
+    cleanup trap via ``PREV_MERGED=1`` so the trap does NOT recreate
+    ``-async`` from a stale ``.prev`` after the chunk is already
+    finalized.  Without this hardening, a narrow race -- where
+    self-heal Case B partially failed and left ``.prev`` on disk while
+    ``-async`` still had all rows -- would have the trap re-materialise
+    a stale ``-async`` orphan after ``.done`` was touched.  The
+    ``.done`` marker still wins on the next run's done-check, so this
+    was disk hygiene rather than a correctness bug, but defensive
+    cleanup avoids the surprise.
+    """
     resume_max = 0 if num_chunks > 1 else max_num_samples
-    resume = (
+    return (
         'REMAINING_INPUT="$OUTPUT_DIR/remaining_input_chunk$CHUNK_ID.jsonl"\n'
         "\n"
         f'if ! PYTHONPATH={CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.resume_filter "$ASYNC_FILE" "$INPUT_DATA" "$REMAINING_INPUT" {resume_max}; then\n'
@@ -565,47 +674,51 @@ def _build_client_cmd(
         '    echo "All rows already completed in -async -- finalizing."\n'
         '    cp -f "$ASYNC_FILE" "$OUTPUT_FILE"\n'
         '    touch "$DONE_FILE"\n'
-        '    rm -f "$ASYNC_FILE"\n'
+        "    PREV_MERGED=1\n"
+        '    rm -f "$ASYNC_FILE" "$ASYNC_FILE.prev"\n'
         '    echo "Done [$JOB_LABEL]."\n'
         "    exit 0\n"
         "fi\n"
     )
 
-    # -- Step 2: Start NeMo-Gym servers -----------------------------------
-    # WORKAROUND(port-toctou): allocate port here (not in setup) to minimise
-    # the window between find_free_port() and ng_run binding to it.
-    # WORKAROUND(gym-port-range): keep NeMo-Gym internal ports in 1024-8999,
-    # below the cluster ephemeral range (9000-65000 on ARM, 32768-60999 on x86).
-    step2_ng_run = (
-        "\n"
-        "HEAD_SERVER_PORT=$(find_free_port)\n"
-        "\n"
-        'cd "$GYM_PATH"\n'
-        "\n"
-        'echo ""\n'
-        'echo "[Step 2/3] Starting NeMo-Gym servers ..."\n'
-        'ng_run "+config_paths=[$CONFIG_PATHS]" \\\n'
-        '    "+policy_model.responses_api_models.vllm_model.base_url=$VLLM_URL" \\\n'
-        '    "+policy_model.responses_api_models.vllm_model.api_key=EMPTY" \\\n'
-        '    "+policy_model.responses_api_models.vllm_model.model=$MODEL_PATH" \\\n'
-        '    "+head_server.host=127.0.0.1" \\\n'
-        '    "+head_server.port=$HEAD_SERVER_PORT" \\\n'
-        '    "+port_range_low=1024" \\\n'
-        '    "+port_range_high=8999" \\\n'
-        '    "+skip_venv_if_present=true" \\\n'
-        f"{judge_ng_run_overrides}"
-        '    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &\n'
-        "NG_RUN_PID=$!\n"
-        "\n"
-        'wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" $NG_RUN_PID 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log"\n'
+
+def _build_ng_run_segment(judge_ng_run_overrides: str) -> str:
+    """Render "[Step 2/3]": background ng_run + wait_for_server probe.
+
+    WORKAROUND(port-toctou): allocate the head-server port here (not in
+    setup) to minimise the window between ``find_free_port()`` and ng_run
+    binding to it.
+
+    The shared invocation block is delegated to
+    :func:`build_ng_run_invocation` so any future change to the ng_run
+    arg shape applies to both ``collect_rollouts`` and
+    ``compute_rewards`` atomically.
+    """
+    return '\nHEAD_SERVER_PORT=$(find_free_port)\n\ncd "$GYM_PATH"\n\n' + build_ng_run_invocation(
+        step_label="[Step 2/3]",
+        policy_base_url="$VLLM_URL",
+        policy_model="$MODEL_PATH",
+        judge_ng_run_overrides=judge_ng_run_overrides,
+        include_port_range=True,
     )
 
-    # -- Step 3: Collect rollouts -----------------------------------------
-    step3_collect = (
+
+def _build_collect_segment(responses_create_params: dict | None) -> str:
+    """Render "[Step 3/3]": `gym eval run --no-serve` retry loop.
+
+    Retries cushion the vLLM tokenizer race condition ("Already borrowed")
+    that crashes the client on the initial request burst; ``resume_from_cache``
+    ensures retries skip already-completed samples.
+    """
+    rcp_extras = "".join(
+        f" \\\n        +responses_create_params.{k}={v}"
+        for k, v in (responses_create_params or {}).items()
+    )
+    return (
         "\n"
         'echo ""\n'
         'echo "[Step 3/3] Collecting rollouts ..."\n'
-        "# Back up previous partial results before ng_collect_rollouts clears the file.\n"
+        "# Back up previous partial results before `gym eval run` clears the file.\n"
         'ASYNC_BACKUP=""\n'
         "PREV_MERGED=0\n"
         'if [ -s "$ASYNC_FILE" ]; then\n'
@@ -636,7 +749,7 @@ def _build_client_cmd(
         "        fi\n"
         "    fi\n"
         "    set +e\n"
-        "    ng_collect_rollouts \\\n"
+        "    gym eval run --no-serve \\\n"
         "        ${AGENT_NAME:++agent_name=$AGENT_NAME} \\\n"
         "        +input_jsonl_fpath=$REMAINING_INPUT \\\n"
         "        +output_jsonl_fpath=$ASYNC_FILE \\\n"
@@ -644,17 +757,34 @@ def _build_client_cmd(
         "        +resume_from_cache=true \\\n"
         "        +num_samples_in_parallel=$NUM_PARALLEL \\\n"
         "        +head_server.host=127.0.0.1 \\\n"
-        "        +head_server.port=$HEAD_SERVER_PORT"
-        + "".join(
-            f" \\\n        +responses_create_params.{k}={v}"
-            for k, v in (responses_create_params or {}).items()
-        )
-        + "\n"
+        "        +head_server.port=$HEAD_SERVER_PORT" + rcp_extras + "\n"
         "    _NVFLOW_EXIT=$?\n"
         "    set -e\n"
         "    [ $_NVFLOW_EXIT -eq 0 ] && break\n"
+        "    # F6: `gym eval run` can exit non-zero AFTER all rollouts\n"
+        "    # have already been written to ASYNC_FILE -- the gym's\n"
+        "    # post-collection aggregate_metrics call returned 500 in the\n"
+        "    # Nemotron-Nano smoke run, killing the process at 99% even\n"
+        "    # though all 1000 rollouts were on disk.  Retrying in that\n"
+        "    # state is wasteful (re-runs everything) and dangerous if the\n"
+        "    # container FS is being torn down (we hit\n"
+        "    # ``/usr/bin/sleep: No such file or directory`` then).  If\n"
+        "    # ASYNC_FILE has at least as many rows as REMAINING_INPUT, we\n"
+        "    # already have what we need; declare success and let finalize\n"
+        "    # do its job.\n"
+        '    if [ -f "$ASYNC_FILE" ] && [ -s "$ASYNC_FILE" ]; then\n'
+        '        _async_rows=$(wc -l < "$ASYNC_FILE" 2>&- || echo 0)\n'
+        '        _input_rows=$(wc -l < "$REMAINING_INPUT" 2>&- || echo 0)\n'
+        '        if [ "$_input_rows" -gt 0 ] && [ "$_async_rows" -ge "$_input_rows" ]; then\n'
+        '            echo "[nvflow] gym eval run exited $_NVFLOW_EXIT but '
+        "$ASYNC_FILE has $_async_rows/$_input_rows rows -- treating as complete "
+        '(post-collection error in gym, rollouts intact)."\n'
+        "            _NVFLOW_EXIT=0\n"
+        "            break\n"
+        "        fi\n"
+        "    fi\n"
         "    if [ $_attempt -lt $_NVFLOW_MAX_RETRIES ]; then\n"
-        '        echo "[nvflow] ng_collect_rollouts exited $_NVFLOW_EXIT'
+        '        echo "[nvflow] gym eval run exited $_NVFLOW_EXIT'
         " (attempt $_attempt/$_NVFLOW_MAX_RETRIES)."
         ' Retrying in ${_NVFLOW_RETRY_DELAY}s ..."\n'
         "        sleep $_NVFLOW_RETRY_DELAY\n"
@@ -662,23 +792,26 @@ def _build_client_cmd(
         "    fi\n"
         "done\n"
         "if [ $_NVFLOW_EXIT -ne 0 ]; then\n"
-        '    echo "[nvflow] ng_collect_rollouts failed after'
+        '    echo "[nvflow] gym eval run failed after'
         ' $_NVFLOW_MAX_RETRIES attempts."\n'
         "    exit $_NVFLOW_EXIT\n"
         "fi\n"
     )
 
-    # -- Finalize: merge partials, write output, mark done ----------------
-    # Order matters for crash safety:
-    #   1. Merge .prev + -async into -async  (all results in one file)
-    #   2. Copy -async → output              (cp, not mv — keeps -async as backup)
-    #   3. Touch .done                        (marks completion)
-    #   4. Clean up -async, .prev, temps      (safe — .done exists)
-    # If killed at any point, self-heal on next start recovers:
-    #   after 1: -async has everything, resume finds all done
-    #   after 2: output exists w/o .done → self-heal Case A restores to -async
-    #   after 3: .done exists → _get_remaining_jobs skips this chunk entirely
-    finalize = (
+
+def _build_finalize_segment() -> str:
+    """Render the crash-safe finalize sequence.
+
+    Order is load-bearing for crash safety:
+      1. Merge ``.prev`` + ``-async`` into ``-async``  (all results in one file)
+      2. ``cp -async → output``  (cp, not mv -- keeps ``-async`` as backup)
+      3. ``touch .done``  (marks completion)
+      4. Cleanup ``-async``, ``.prev``, temps  (safe -- ``.done`` exists)
+
+    Reordering breaks self-heal Case A (output without .done) and the
+    resume-filter precondition that ``-async`` is the source of truth.
+    """
+    return (
         "\n"
         "# Merge previous partial results with new results.\n"
         'if [ -n "$ASYNC_BACKUP" ] && [ -f "$ASYNC_BACKUP" ]; then\n'
@@ -695,18 +828,73 @@ def _build_client_cmd(
         'echo "Done [$JOB_LABEL]. Cleanup via trap."\n'
     )
 
+
+def _build_client_cmd(
+    *,
+    output_dir: str,
+    gym_path: str,
+    uv_venv_dir: str = "",
+    model_path: str,
+    agent_name: str,
+    input_data: str,
+    output_file: str,
+    done_file: str,
+    config_paths: str,
+    num_parallel: int,
+    job_label: str,
+    policy_vllm_url: str,
+    judge_vllm_url: str = "",
+    judge_ng_run_overrides: str,
+    max_num_samples: int = 0,
+    chunk_id: int = 0,
+    num_chunks: int = 1,
+    responses_create_params: dict | None = None,
+) -> str:
+    """Build the rollout collection bash script.
+
+    Generated script structure (concatenation order is load-bearing):
+      1.  Variables, setup (cleanup trap), banner
+      2.  Done-check early exit
+      3.  Step 1: wait for vLLM servers
+      4.  Step 1a: chunk slice (runtime head|tail)
+      5.  Step 1b: self-heal (recover .prev / partial finalize from prior crash)
+      6.  Step 1c: resume filter (skip already-completed rows)
+      7.  Step 2: start NeMo-Gym servers via ``gym env start``
+      8.  Step 3: collect rollouts via ``gym eval run --no-serve``
+      9.  Finalize: merge partials, cp→output, touch .done, cleanup temps
+
+    Each step is rendered by a dedicated ``_build_*_segment`` helper.
+    Snapshot tests in ``tests/test_rollout.py`` pin the byte-exact output
+    of this composition; do not reorder segments without refreshing them.
+    """
     return (
-        variables
-        + setup
-        + banner
-        + done_check
-        + step1_wait
-        + chunk_slice
-        + selfheal
-        + resume
-        + step2_ng_run
-        + step3_collect
-        + finalize
+        _build_variables_segment(
+            output_dir=output_dir,
+            gym_path=gym_path,
+            uv_venv_dir=uv_venv_dir,
+            model_path=model_path,
+            agent_name=agent_name,
+            input_data=input_data,
+            output_file=output_file,
+            done_file=done_file,
+            config_paths=config_paths,
+            num_parallel=num_parallel,
+            job_label=job_label,
+            policy_vllm_url=policy_vllm_url,
+            judge_vllm_url=judge_vllm_url,
+            chunk_id=chunk_id,
+            num_chunks=num_chunks,
+        )
+        + _build_setup_segment()
+        + _build_banner_segment()
+        + _build_done_check_segment()
+        + _build_step1_wait_segment(policy_vllm_url, judge_vllm_url)
+        + _build_chunk_slice_segment(max_num_samples)
+        + _build_selfheal_segment()
+        + _build_resume_segment(num_chunks, max_num_samples)
+        + _build_ng_run_segment(judge_ng_run_overrides)
+        + _build_collect_segment(responses_create_params)
+        + _build_finalize_segment()
     )
 
 
@@ -722,6 +910,7 @@ def _build_merge_cmd(
     analyze_module: str,
     enrich_module: str,
     input_data: str,
+    keep_chunk_files: bool = False,
 ) -> str:
     """Build the chunk-merge + enrich + analyze bash script.
 
@@ -729,16 +918,22 @@ def _build_merge_cmd(
       1. Concatenate per-chunk rollout files into a single merged file
       2. Enrich merged rollouts with input metadata
       3. Analyze rollouts (accuracy, token stats, etc.)
+
+    Every literal path or label is shlex-quoted so values containing
+    whitespace, ``$``, or shell metacharacters cannot break the rendered
+    script.  ``chunk_file_pattern`` is an exception: it carries a literal
+    ``$i`` that bash must expand inside the for-loop, so quoting it
+    would defeat the substitution.
     """
     # -- Shell variables --------------------------------------------------
     variables = (
         "set -e\n"
         "\n"
-        f'MERGED_FILE="{merged_file}"\n'
-        f'ANALYSIS_DIR="{analysis_dir}"\n'
-        f'SEED_LABEL="{seed_label}"\n'
+        f"MERGED_FILE={shlex.quote(merged_file)}\n"
+        f"ANALYSIS_DIR={shlex.quote(analysis_dir)}\n"
+        f"SEED_LABEL={shlex.quote(seed_label)}\n"
         f"NUM_CHUNKS={num_chunks}\n"
-        f'INPUT_DATA="{input_data}"\n'
+        f"INPUT_DATA={shlex.quote(input_data)}\n"
     )
 
     # -- Step 1: Merge chunks (atomic — write to .tmp, then mv) ------------
@@ -752,12 +947,18 @@ def _build_merge_cmd(
         "# Clean up stale temp file from a prior crashed merge\n"
         'rm -f "$MERGED_FILE.tmp"\n'
         "\n"
-        "# Precondition: ALL chunk .done markers must exist\n"
+        "# Precondition: ALL chunk .done markers must exist.  A missing\n"
+        "# .done means upstream rollout never finalised (job failed before\n"
+        "# the cp/touch finalize step, or output was deleted).  Fail loudly\n"
+        "# so Slurm marks the merge job FAILED and an operator notices --\n"
+        "# silently exit-0'ing here is what produced the silent-success\n"
+        "# cascade where aggregate runs on N-1 seeds and the pipeline\n"
+        "# reports COMPLETED 0:0 despite missing training data.\n"
         "for i in $(seq 0 $((NUM_CHUNKS - 1))); do\n"
         f'    CHUNK_DONE="{chunk_done_pattern}"\n'
         '    if [ ! -f "$CHUNK_DONE" ]; then\n'
-        '        echo "Chunk $i not complete (.done missing) — skipping merge."\n'
-        "        exit 0\n"
+        '        echo "ERROR: chunk $i .done missing for [$SEED_LABEL] -- upstream rollout failed before finalize. Aborting merge."\n'
+        "        exit 1\n"
         "    fi\n"
         "done\n"
         "\n"
@@ -792,7 +993,7 @@ def _build_merge_cmd(
         "\n"
         'echo ""\n'
         'echo "[Step 2/3] Enriching rollouts with input metadata ..."\n'
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {enrich_module} \\\n"
+        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {shlex.quote(enrich_module)} \\\n"
         '    "$INPUT_DATA" \\\n'
         '    "$MERGED_FILE"\n'
     )
@@ -802,7 +1003,7 @@ def _build_merge_cmd(
         "\n"
         'echo ""\n'
         'echo "[Step 3/3] Analyzing rollouts ..."\n'
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {analyze_module} \\\n"
+        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {shlex.quote(analyze_module)} \\\n"
         '    "$MERGED_FILE" \\\n'
         f'    "$ANALYSIS_DIR"\n'
     )
@@ -811,20 +1012,27 @@ def _build_merge_cmd(
     # Order: touch .done FIRST, then delete chunk data.  This guarantees the
     # merged file is the verified complete copy before any source data is
     # removed.  Keep chunk .done markers — _get_remaining_jobs relies on them.
-    cleanup = (
-        "\n"
-        f'touch "{merged_done_file}"\n'
-        "\n"
+    chunk_cleanup = (
         "# Safe cleanup: delete chunk data files only (keep .done markers).\n"
         "for i in $(seq 0 $((NUM_CHUNKS - 1))); do\n"
         f'    CHUNK_FILE="{chunk_file_pattern}"\n'
         '    rm -f "$CHUNK_FILE"\n'
         "done\n"
-        'echo "Done [$SEED_LABEL]."\n'
+        if not keep_chunk_files
+        else (
+            "# keep_chunk_files=true: retaining per-chunk raw files so a later\n"
+            "# re-merge over a larger num_chunks (in-place cumulative growth)\n"
+            "# can reconstruct the full merged output. Disk grows accordingly.\n"
+            'echo "[merge] keep_chunk_files=true -- retaining per-chunk raw files."\n'
+        )
+    )
+    cleanup = (
+        "\n"
+        f"touch {shlex.quote(merged_done_file)}\n"
+        "\n" + chunk_cleanup + 'echo "Done [$SEED_LABEL]."\n'
         'echo ""\n'
-        'echo "To browse rollouts interactively (requires Gym venv):"\n'
-        f'echo "  cd {gym_path} && source .venv/bin/activate"\n'
-        'echo "  ng_viewer +jsonl_fpath=$MERGED_FILE"\n'
+        'echo "To browse rollouts interactively (in the nemo-gym container):"\n'
+        'echo "  export PATH=/opt/gym-cli-venv/bin:$PATH && ng_viewer +jsonl_fpath=$MERGED_FILE"\n'
     )
 
     return variables + step1_merge + step2_enrich + step3_analyze + cleanup
@@ -835,14 +1043,29 @@ def build_aggregate_cmd(
     rollout_dir: str,
     aggregate_module: str,
     difficulty_filename: str = "difficulty.jsonl",
+    expected_seeds: int | None = None,
 ) -> str:
+    """Build the bash command for the cross-seed aggregation job.
+
+    When ``expected_seeds`` is provided, the underlying CLI validates
+    that exactly that many ``output-rs*.jsonl`` files are present and
+    raises ``RuntimeError`` otherwise.  This is the second line of
+    defense against the silent-success cascade: the cluster's default
+    Slurm dep type is ``afterany`` (see
+    ``cluster_configs/template-slurm.yaml``), so a FAILED upstream
+    merge does NOT stop aggregate from running.  Pass
+    ``num_random_seeds`` from the rollout caller to surface missing
+    seeds as a loud failure instead of silently shrinking
+    ``num_seeds`` in ``metrics.json``.
+    """
+    expected_arg = f" --expected-seeds {expected_seeds}" if expected_seeds is not None else ""
     return (
         "set -e\n"
         'echo "Cross-Seed Aggregation (pass@k)"\n'
         f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {aggregate_module} \\\n"
         f'    "{rollout_dir}" \\\n'
         f'    "{rollout_dir}/aggregate" \\\n'
-        f'    --output_filename "{difficulty_filename}"\n'
+        f'    --output_filename "{difficulty_filename}"{expected_arg}\n'
         f'echo "Done. Results in {rollout_dir}/aggregate/"\n'
     )
 
@@ -896,9 +1119,10 @@ class _RolloutParams:
 
     output_dir: str
     gym_path: str
+    uv_venv_dir: str
     client_container: str
-    post_container: str
-    server_container: str
+    postprocess_container: str
+    vllm_container: str
     installation_command: str | None
     input_data: str
     num_gpus: int
@@ -909,6 +1133,7 @@ class _RolloutParams:
     rerun_done: bool
     dependent_jobs: int
     max_num_samples: int
+    keep_chunk_files: bool
     responses_create_params: dict
     pcfg: dict
     jcfg: dict
@@ -928,9 +1153,12 @@ def _parse_rollout_config(config: dict[str, Any]) -> _RolloutParams:
     """Unpack and validate rollout configuration."""
     output_dir = config["output_dir"]
     gym_path = config["gym_path"]
+    # Per-component venv root passed to ng_run. Empty -> defaults to gym_path
+    # (Gym's PARENT_DIR default); the CPU nemo-gym stages set /opt/gym-venvs.
+    uv_venv_dir = config.get("gym_uv_venv_dir", "")
     client_container = config["container"]
-    post_container = config.get("post_container", client_container)
-    server_container = SERVER_CONTAINER
+    postprocess_container = config.get("postprocess_container", client_container)
+    vllm_container = config.get("vllm_container", VLLM_CONTAINER)
     installation_command = config.get("installation_command")
 
     rcfg = config["rollout"]
@@ -943,6 +1171,11 @@ def _parse_rollout_config(config: dict[str, Any]) -> _RolloutParams:
     rerun_done = rcfg.get("rerun_done", False)
     dependent_jobs = rcfg.get("dependent_jobs", 0)
     max_num_samples = rcfg.get("max_num_samples") or 0
+    # When true, the merge step keeps per-chunk raw files instead of deleting
+    # them. Required for in-place cumulative growth (re-merge over a larger
+    # num_chunks needs the original chunks). Default false preserves the
+    # disk-saving delete behavior for recipes that don't grow in place.
+    keep_chunk_files = rcfg.get("keep_chunk_files", False)
     responses_create_params = rcfg.get("responses_create_params") or {}
 
     pcfg = rcfg.get("policy_vllm") or {}
@@ -966,9 +1199,10 @@ def _parse_rollout_config(config: dict[str, Any]) -> _RolloutParams:
     return _RolloutParams(
         output_dir=output_dir,
         gym_path=gym_path,
+        uv_venv_dir=uv_venv_dir,
         client_container=client_container,
-        post_container=post_container,
-        server_container=server_container,
+        postprocess_container=postprocess_container,
+        vllm_container=vllm_container,
         installation_command=installation_command,
         input_data=input_data,
         num_gpus=num_gpus,
@@ -979,6 +1213,7 @@ def _parse_rollout_config(config: dict[str, Any]) -> _RolloutParams:
         rerun_done=rerun_done,
         dependent_jobs=dependent_jobs,
         max_num_samples=max_num_samples,
+        keep_chunk_files=keep_chunk_files,
         responses_create_params=responses_create_params,
         pcfg=pcfg,
         jcfg=jcfg,
@@ -1001,17 +1236,25 @@ def _parse_rollout_config(config: dict[str, Any]) -> _RolloutParams:
 
 
 def _estimate_progress(
-    host_rollout_dir: Path,
+    fs: LauncherFS,
+    rollout_dir: str,
     seeds: list[int],
     chunk_ids: list[int],
     input_data: str,
     max_num_samples: int,
     num_chunks: int,
 ) -> str:
-    """Return progress string like '~42% (15,000/35,000 rows)', or '' on failure."""
+    """Return progress string like '~42% (15,000/35,000 rows)', or '' on failure.
+
+    Best-effort and cosmetic: any exception is swallowed so a missing/unreadable
+    file cannot break the launcher's status print.  Skipped entirely when
+    launching off-cluster (``fs.remote``) -- counting rows in multi-GB -async
+    files over an ssh tunnel is not worth the latency.
+    """
+    if fs.remote:
+        return ""
     try:
-        host_input = resolve_host_path(input_data)
-        input_lines = sum(1 for _ in open(host_input)) if host_input.exists() else 0
+        input_lines = fs.count_lines(input_data)
         effective = min(input_lines, max_num_samples) if max_num_samples else input_lines
         if effective <= 0:
             return ""
@@ -1022,13 +1265,13 @@ def _estimate_progress(
             expected = max(0, min(chunk_size, effective - chunk_id * chunk_size))
             total_rows += expected
             fname = _output_filename(seed, chunk_id)
-            if (host_rollout_dir / f"{fname}.done").exists():
+            if fs.exists(f"{rollout_dir}/{fname}.done"):
                 completed_rows += expected
             else:
                 for suffix in ["-async", "-async.prev"]:
-                    async_path = host_rollout_dir / f"{fname}{suffix}"
-                    if async_path.exists():
-                        completed_rows += sum(1 for _ in open(async_path))
+                    async_path = f"{rollout_dir}/{fname}{suffix}"
+                    if fs.exists(async_path):
+                        completed_rows += fs.count_lines(async_path)
         if total_rows > 0:
             pct = completed_rows / total_rows * 100
             return f"~{pct:.0f}% ({completed_rows:,}/{total_rows:,} rows in -async files)"
@@ -1096,6 +1339,7 @@ def _build_collection_jobs(
                 judge_ng_run_overrides=p.judge_ng_run_overrides,
                 output_dir=f"{rollout_dir}/rs{seed}",
                 gym_path=p.gym_path,
+                uv_venv_dir=p.uv_venv_dir,
                 model_path=p.model_path,
                 agent_name=p.agent_name,
                 input_data=p.input_data,
@@ -1123,7 +1367,7 @@ def _build_collection_jobs(
                     commands=[
                         Command(
                             script=policy_script,
-                            container=p.server_container,
+                            container=p.vllm_container,
                             name=f"{job_lbl}_policy",
                         ),
                         Command(script=client_cmd, container=p.client_container, name=job_lbl),
@@ -1140,7 +1384,7 @@ def _build_collection_jobs(
                     commands=[
                         Command(
                             script=judge_script,
-                            container=p.server_container,
+                            container=p.vllm_container,
                             name=f"{job_lbl}_judge",
                         ),
                     ],
@@ -1164,7 +1408,7 @@ def _build_collection_jobs(
                     components.append(
                         Command(
                             script=policy_script,
-                            container=p.server_container,
+                            container=p.vllm_container,
                             name=f"{job_lbl}_policy",
                         )
                     )
@@ -1173,7 +1417,7 @@ def _build_collection_jobs(
                     components.append(
                         Command(
                             script=judge_script,
-                            container=p.server_container,
+                            container=p.vllm_container,
                             name=f"{job_lbl}_judge",
                         )
                     )
@@ -1209,7 +1453,7 @@ def _build_merge_jobs(
     p: _RolloutParams,
     seeds: list[int],
     chunk_job_specs: dict[int, list[dict]],
-    host_rollout_dir: Path,
+    fs: LauncherFS,
     rollout_dir: str,
     expname: str,
     *,
@@ -1224,7 +1468,7 @@ def _build_merge_jobs(
         seed_label = f"rs{seed}"
         merged_filename = _merged_filename(seed)
 
-        if (host_rollout_dir / f"{merged_filename}.done").exists() and not p.rerun_done:
+        if fs.exists(f"{rollout_dir}/{merged_filename}.done") and not p.rerun_done:
             continue
 
         chunk_pattern = f"{rollout_dir}/rs{seed}/chunk_$i.jsonl"
@@ -1240,11 +1484,12 @@ def _build_merge_jobs(
             analyze_module=analyze_module,
             enrich_module=enrich_module,
             input_data=p.input_data,
+            keep_chunk_files=p.keep_chunk_files,
         )
 
         merge_cmd = Command(
             script=make_bash_script(merge_cmd_str),
-            container=p.post_container,
+            container=p.postprocess_container,
             name=f"merge-{seed_label}",
         )
         merge_group = CommandGroup(
@@ -1298,11 +1543,11 @@ def rollout(
 
     rollout_dir = f"{p.output_dir}/rollout"
 
-    # Resolve host paths for resume checks only.
-    # No file I/O on the login node — each Slurm job slices its own chunk
-    # at runtime via head/tail (see _build_client_cmd chunk_slice step).
-    host_dir = resolve_host_path(p.output_dir)
-    host_rollout_dir = host_dir / "rollout"
+    # Resume/status checks go through LauncherFS: local Path ops within the
+    # cluster (unchanged behaviour), or over the ssh tunnel when launching
+    # off-cluster.  No data I/O on the launcher — each Slurm job slices its
+    # own chunk at runtime via head/tail (see _build_client_cmd chunk_slice).
+    fs = LauncherFS(cluster_config)
 
     seeds = list(range(p.starting_seed, p.starting_seed + p.num_random_seeds))
     chunk_ids = list(range(p.num_chunks))
@@ -1311,8 +1556,8 @@ def rollout(
         console.detail("Input", f"{p.num_chunks} logical chunks (each job slices at runtime)")
 
     # -- Resume: find remaining (seed, chunk) pairs ---------------------
-    if host_rollout_dir.exists():
-        remaining = _get_remaining_jobs(host_rollout_dir, seeds, chunk_ids, p.rerun_done)
+    if fs.exists(rollout_dir):
+        remaining = _get_remaining_jobs(fs, rollout_dir, seeds, chunk_ids, p.rerun_done)
     else:
         remaining = [(s, c) for s in seeds for c in chunk_ids]
     skipped = len(seeds) * len(chunk_ids) - len(remaining)
@@ -1322,15 +1567,14 @@ def rollout(
     # Never delete the merged data file — it serves as backup until the
     # next merge atomically overwrites it (Fix 2: safe invalidation).
     rerun_seeds = {s for s, _ in remaining}
-    for s in rerun_seeds:
-        mf = _merged_filename(s)
-        (host_rollout_dir / f"{mf}.done").unlink(missing_ok=True)
+    fs.rm([f"{rollout_dir}/{_merged_filename(s)}.done" for s in rerun_seeds])
 
     # -- Progress estimate: count completed rows in partial -async files ---
     progress_msg = ""
-    if remaining and host_rollout_dir.exists():
+    if remaining and fs.exists(rollout_dir):
         progress_msg = _estimate_progress(
-            host_rollout_dir,
+            fs,
+            rollout_dir,
             seeds,
             chunk_ids,
             p.input_data,
@@ -1338,7 +1582,7 @@ def rollout(
             p.num_chunks,
         )
 
-    console.status("Collecting rollouts (ng_collect_rollouts)")
+    console.status("Collecting rollouts (gym eval run --no-serve)")
     console.detail("Model", p.model_path)
     console.detail("Agent", p.agent_name)
     if p.pcfg.get("base_url"):
@@ -1365,7 +1609,22 @@ def rollout(
         console.detail("Progress", progress_msg)
     console.blank()
 
-    if not remaining and not p.filter_cfg:
+    # A prior run may have completed every chunk (.done present, so `remaining`
+    # is empty) yet never produced — or lost — a seed's merged output.  The
+    # merged file `rollout/output-rs<seed>.jsonl` (synced up to
+    # `<output_dir>/output-rs<seed>.jsonl` by analyze) is the sole producer of
+    # the file downstream stages `cp`/parse.  If we return early here we skip
+    # the merge job and leave that file missing, which is exactly what makes a
+    # resumed genselect/evaluate fail with `cp: ... output-rs0.jsonl: No such
+    # file`.  Detect seeds whose merge is incomplete so we still schedule it.
+    if fs.exists(rollout_dir):
+        merges_pending = any(
+            not fs.exists(f"{rollout_dir}/{_merged_filename(s)}.done") for s in seeds
+        )
+    else:
+        merges_pending = True
+
+    if not remaining and not merges_pending and not p.filter_cfg:
         console.success("All rollout jobs already complete (use rerun_done to force).")
         return
 
@@ -1384,7 +1643,7 @@ def rollout(
         p,
         seeds,
         chunk_job_specs,
-        host_rollout_dir,
+        fs,
         rollout_dir,
         expname,
         analyze_module=analyze_module,
@@ -1408,11 +1667,12 @@ def rollout(
             rollout_dir=rollout_dir,
             aggregate_module=aggregate_module,
             difficulty_filename=difficulty_filename,
+            expected_seeds=p.num_random_seeds,
         )
 
         agg_cmd = Command(
             script=make_bash_script(agg_cmd_str),
-            container=p.post_container,
+            container=p.postprocess_container,
             name="aggregate",
         )
         agg_group = CommandGroup(
@@ -1447,7 +1707,7 @@ def rollout(
 
         filter_cmd = Command(
             script=make_bash_script(filter_cmd_str),
-            container=p.post_container,
+            container=p.postprocess_container,
             name="filter",
         )
         filter_group = CommandGroup(

@@ -1,0 +1,40 @@
+# Small, deterministic HopChain SDG run used by the quick start.
+# It consumes the output from hopchain-image-filter-demo.yaml and stops before
+# the optional external API judge and downstream curation stages.
+
+_base_: hopchain-sdg.yaml
+
+execution_id: demo
+image_filter_execution_id: demo
+localize_dataloader_num_workers: 2
+localize_num_chunks: 1
+generate_multihop_queries_num_queries: 1
+generate_multihop_queries_num_chunks: 1
+
+pipeline_stages:
+  - prepare_filtered_image_inputs
+  - preprocess_identify_categories
+  - identify_categories
+  - localize_instances
+  - sample_instance_combinations
+  - preprocess_generate_multihop_queries
+  - generate_multihop_queries
+  - verify_candidate_queries
+  - visualize_candidate_hopchain_data
+
+stages:
+  prepare_filtered_image_inputs:
+    sample_count: 25
+    sample_seed: 42
+
+  identify_categories:
+    num_chunks: 1
+
+  localize_instances:
+    debug_save_annotated_images: false
+
+  sample_instance_combinations:
+    max_combinations_per_image: 2
+
+  visualize_candidate_hopchain_data:
+    sample_count: 32

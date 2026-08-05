@@ -11,7 +11,7 @@
 #   - question: The financial question to answer
 #
 # Usage: Reference this prompt in your workflow config:
-#   ++agent_prompt_config=/workspace/nvflow/recipes/finance/prompts/finance_agent_instructions.yaml
+#   ++agent_prompt_config=nvflow/recipes/finance/prompts/finance_agent_instructions.yaml
 # ============================================================================
 
 user: |

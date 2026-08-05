@@ -8,19 +8,19 @@ End-to-end pipeline for generating synthetic financial Q&A data from SEC filings
 
 **Two Independent SDG Approaches:**
 - **Template-Based SDG:** Adapts seed questions to different companies/years, maps to relevant context, generates and filters answers
-- **Document-Grounded SDG:** Generates questions directly from documents with built-in verification, quality evaluation, and difficulty stratification
+- **Document-Grounded SDG:** Generates questions directly from documents with built-in verification and multi-seed quality evaluation, emitting a single `final_result.jsonl`
 
 **Production-Ready Pipeline:**
 - **Data Generation:** Uses GPT-OSS-120B, Qwen3 (14B-235B) models for synthetic Q&A creation
-- **Scale:** Processes S&P 500 companies (~100GB filings) → generates 1M+ Q&A pairs
+- **Scale:** Processes S&P 500 companies (~100GB filings) → generates 300K+ Q&A pairs
 - **Training:** Full SFT pipeline on 256 GPUs (32 nodes) with Qwen3-14B
 - **Evaluation:** Benchmark trained models on financial reasoning tasks
 
 ## What This Recipe Produces
 
-- **Synthetic Q&A Datasets**: 1M+ high-quality financial question-answer pairs
+- **Synthetic Q&A Datasets**: 300K+ high-quality financial question-answer pairs
   - Template-based SDG: ~300K pairs (used in production SFT)
-  - Document-grounded SDG: ~800K pairs (SFT integration in progress)
+  - Document-grounded SDG: additional pairs (experimental; SFT integration in progress)
 - **Fine-tuned Models**: Financial reasoning models trained via supervised fine-tuning (SFT)
 - **RL-trained Models**: Models further improved via GRPO reinforcement learning with LLM-as-judge rewards
 - **Evaluation Results**: Model performance on financial benchmarks (SFT and GRPO checkpoints)
@@ -78,14 +78,14 @@ End-to-end pipeline for generating synthetic financial Q&A data from SEC filings
 ├──────────────────────┤    ├───────────────────────────┤
 │ • Generate questions │    │ • Preprocess filings      │
 │ • Map to context     │    │ • Generate verified Q&A   │
-│ • Generate answers   │    │ • GenSelect answers       │
-│ • GenSelect answers  │    │ • Evaluate quality        │
-│ • Filter quality     │    │ • Aggregate results       │
-│                      │    │ • Estimate difficulty     │
-│                      │    │ • Prepare training data   │
+│ • Generate answers   │    │ • Generate answers        │
+│ • GenSelect answers  │    │ • GenSelect answers       │
+│ • Filter quality     │    │ • Evaluate quality        │
+│                      │    │ • Aggregate results       │
+│                      │    │ • Post-process → final    │
 ├──────────────────────┤    ├───────────────────────────┤
-│ Output: ~300K Q&A    │    │ Output: ~800K Q&A         │
-│ [Used in SFT]        │    │ Stratified by difficulty  │
+│ Output: ~300K Q&A    │    │ Output: (experimental)    │
+│ [Used in SFT]        │    │ Single final_result.jsonl │
 │                      │    │ [Work in progress]        │
 │                      │    │                           │
 └──────────────────────┘    └───────────────────────────┘
@@ -139,16 +139,6 @@ End-to-end pipeline for generating synthetic financial Q&A data from SEC filings
 
 ## Getting Started
 
-### 🎥 Video Tutorials
-
-> 📹 **Coming Soon:** Video walkthroughs of the complete pipeline
-> - [ ] Quick Start Demo
-> - [ ] Download SEC Filings
-> - [ ] Template-Based SDG Explained
-> - [ ] Document-Grounded SDG Explained
-> - [ ] Model Training & Evaluation
-> - [ ] Production Deployment Guide
-
 ### 🚀 First Time Users
 
 **[Quick Start Guide](quick-start.md)** - Run complete demo with 7 companies
@@ -172,7 +162,7 @@ Detailed technical specifications for each stage:
 - **[Template-Based SDG Stages](stages/template-based-sdg.md)** - 6 stages
 - **[Document-Grounded SDG Stages](stages/document-grounded-sdg.md)** - 7 stages
 - **[SFT Stages](stages/sft.md)** - 6 stages
-- **[Eval Stages](stages/eval.md)** - 9 stages
+- **[Eval Stages](stages/eval.md)** - 7 stages
 - **[GRPO Stages](stages/grpo.md)** - 10 stages
 
 ## Quick Command Reference

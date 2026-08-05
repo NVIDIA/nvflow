@@ -96,10 +96,11 @@ Further improve fine-tuned models using Group Relative Policy Optimization (GRPO
 
 ### Model Configurations
 
-| Config | Model | GPUs | Status |
-|--------|-------|------|--------|
-| `grpo/qwen3_4b.yaml` | Qwen3-4B | 16 (2 nodes) | Demo |
-| `grpo/qwen3_30b_a3b.yaml` | Qwen3-30B-A3B (MoE) | 64 (8 nodes) | Production |
+| Config | Model | Environment | Backend | GPUs | Status |
+|--------|-------|-------------|---------|------|--------|
+| `grpo/qwen3_4b.yaml` | Qwen3-4B | equivalence_llm_judge | FSDP v2 (32K) | 16 (2 nodes) | Demo |
+| `grpo/qwen3_4b_finsec.yaml` | Qwen3-4B | finance_sec_search | Megatron (TP2×CP8, 131K) | 16 (2 nodes) | Demo |
+| `grpo/qwen3_30b_a3b.yaml` | Qwen3-30B-A3B (MoE) | — | Megatron | 64 (8 nodes) | Production |
 
 ## Usage
 
@@ -220,9 +221,12 @@ outputs/finance/demo/workflow-5-grpo/
     │   ├── val.jsonl                    # Validation split
     │   └── logs/
     ├── step-8-training/
-    │   └── grpo-qwen3-4b-2n-tp2-cp4-seq131k/   # Demo (FSDP v2)
-    │       ├── checkpoints/             # GRPO model checkpoints
-    │       └── training-logs/
+    │   ├── equivalence_llm_judge/
+    │   │   └── grpo-qwen3-4b-16g-tp2-cp1-seq32k/    # Demo, FSDP v2
+    │   └── finance_sec_search/
+    │       └── grpo-qwen3-4b-16g-tp2-cp8-seq128k/   # Demo, Megatron (YaRN 131K)
+    │           ├── checkpoints/         # GRPO model checkpoints
+    │           └── training-logs/
     └── step-9-eval/
         └── ...                          # Benchmark evaluation results
 ```
@@ -341,7 +345,7 @@ stages:
 
 ### Training Backends
 
-The demo config (`qwen3_4b.yaml`) uses **FSDP v2** for the dense Qwen3-4B model. The production config (`qwen3_30b_a3b.yaml`) uses **Megatron** for the Qwen3-30B-A3B MoE model at 64 GPUs.
+The demo runs two environments with different backends: `qwen3_4b.yaml` (equivalence_llm_judge) uses **FSDP v2** at 32K, while `qwen3_4b_finsec.yaml` (finance_sec_search) uses **Megatron** (TP2×CP8) for YaRN context extension to 131K. The production config (`qwen3_30b_a3b.yaml`) uses **Megatron** for the Qwen3-30B-A3B MoE model at 64 GPUs.
 
 **Production (Megatron):**
 

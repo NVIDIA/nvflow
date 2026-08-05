@@ -25,14 +25,13 @@ wheels/
 *.egg
 
 # Virtual environments
-.venv/
+.venv
 venv/
 ENV/
 env/
 
 # UV
 .uv/
-
 # IDE
 .vscode/
 .idea/
@@ -45,6 +44,12 @@ env/
 .coverage
 htmlcov/
 .tox/
+
+# HF / tokenizer / debug caches.  Created by ad-hoc local Python sessions
+# (e.g. AutoConfig.from_pretrained(..., trust_remote_code=True)) when
+# HF_HOME defaults to $cwd/cache.  Pipeline runs use the Lustre HF cache,
+# never this directory -- keep it out of git to avoid accidental commits.
+/cache/
 
 # Data and outputs (customize based on your needs)
 /data
@@ -82,6 +87,7 @@ nvflow/recipes/finance/datasets/finance_agent/*.json
 
 # Backup files
 *.bak
+*.bak-*
 
 # OS
 .DS_Store

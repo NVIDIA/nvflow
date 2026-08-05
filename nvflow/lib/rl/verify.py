@@ -42,17 +42,18 @@ from nvflow.core import console
 
 from .helpers import (
     CONTAINER_CODE_DIR,
-    SERVER_CONTAINER,
     SHELL_FIND_FREE_PORT,
     SHELL_WAIT_FOR_SERVER,
+    VLLM_CONTAINER,
+    LauncherFS,
     build_config_paths_str,
     build_judge_ng_run_overrides,
+    build_ng_run_invocation,
     check_launcher_cwd,
     compute_num_gpus,
     determine_judge_mode,
     get_env_from_environments,
     log_judge_details,
-    resolve_host_path,
 )
 from .rollout import (
     _build_port_read_preamble,
@@ -71,6 +72,7 @@ def _build_verify_cmd(
     *,
     output_dir: str,
     gym_path: str,
+    uv_venv_dir: str = "",
     input_file: str,
     output_file: str,
     done_file: str,
@@ -84,7 +86,7 @@ def _build_verify_cmd(
     """Build the re-judge (verify) bash script.
 
     Generated script structure:
-      1. Start NeMo-Gym servers via ``ng_run`` (judge only, no policy)
+      1. Start NeMo-Gym servers via ``gym env start`` (judge only, no policy)
       2. Re-judge rollouts via ``verify_worker``
     """
     # -- Shell variables & shared functions --------------------------------
@@ -93,6 +95,9 @@ def _build_verify_cmd(
         "\n"
         f'OUTPUT_DIR="{output_dir}"\n'
         f'GYM_PATH="{gym_path}"\n'
+        # ng_run per-component venv root; defaults to GYM_PATH (Gym's PARENT_DIR
+        # default), overridden to /opt/gym-venvs on the CPU nemo-gym image.
+        f'UV_VENV_DIR="{uv_venv_dir or gym_path}"\n'
         f'INPUT_FILE="{input_file}"\n'
         f'OUTPUT_FILE="{output_file}"\n'
         f'DONE_FILE="{done_file}"\n'
@@ -131,25 +136,18 @@ def _build_verify_cmd(
     )
 
     # -- Step 1: Start NeMo-Gym servers (judge only) ----------------------
-    step1_ng_run = (
-        "\n"
-        'cd "$GYM_PATH"\n'
-        "source .venv/bin/activate\n"
-        "\n"
-        'echo ""\n'
-        'echo "[Step 1/2] Starting NeMo-Gym servers ..."\n'
-        'ng_run "+config_paths=[$CONFIG_PATHS]" \\\n'
-        '    "+policy_model.responses_api_models.vllm_model.base_url=http://localhost:0/v1" \\\n'
-        '    "+policy_model.responses_api_models.vllm_model.api_key=EMPTY" \\\n'
-        '    "+policy_model.responses_api_models.vllm_model.model=unused" \\\n'
-        '    "+head_server.host=127.0.0.1" \\\n'
-        '    "+head_server.port=$HEAD_SERVER_PORT" \\\n'
-        '    "+skip_venv_if_present=true" \\\n'
-        f"{judge_ng_run_overrides}"
-        '    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &\n'
-        "NG_RUN_PID=$!\n"
-        "\n"
-        'wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" $NG_RUN_PID 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log"\n'
+    # Re-judge has no policy vLLM, so policy_base_url and policy_model are
+    # stub values; the head-server port-range workaround is also unneeded
+    # since no policy server collides with the gym ephemeral range.
+    # No `source .venv/bin/activate`: the CLI is provided by the stage's
+    # installation_command (baked .venv on nemo-rl, or /opt/gym-cli-venv on PATH
+    # for nemo-gym). ng_run resolves component venvs via +uv_venv_dir=$UV_VENV_DIR.
+    step1_ng_run = '\ncd "$GYM_PATH"\n\n' + build_ng_run_invocation(
+        step_label="[Step 1/2]",
+        policy_base_url="http://localhost:0/v1",
+        policy_model="unused",
+        judge_ng_run_overrides=judge_ng_run_overrides,
+        include_port_range=False,
     )
 
     # -- Step 2: Re-judge rollouts ----------------------------------------
@@ -205,9 +203,8 @@ def _build_analysis_cmd(
     parts.append(
         'echo "Done. Analysis complete."\n'
         'echo ""\n'
-        'echo "To browse re-judged rollouts interactively (requires Gym venv):"\n'
-        f'echo "  cd {gym_path} && source .venv/bin/activate"\n'
-        f'echo "  ng_viewer +jsonl_fpath={first_file}"\n'
+        'echo "To browse re-judged rollouts interactively (in the nemo-gym container):"\n'
+        f'echo "  export PATH=/opt/gym-cli-venv/bin:$PATH && ng_viewer +jsonl_fpath={first_file}"\n'
     )
     return "".join(parts)
 
@@ -258,9 +255,11 @@ def verify(
 
     output_dir = config["output_dir"]
     gym_path = config["gym_path"]
+    # Empty -> defaults to gym_path; CPU nemo-gym sets /opt/gym-venvs to reuse baked venvs.
+    uv_venv_dir = config.get("gym_uv_venv_dir", "")
     client_container = config["container"]
-    post_container = config.get("post_container", client_container)
-    server_container = SERVER_CONTAINER
+    postprocess_container = config.get("postprocess_container", client_container)
+    vllm_container = config.get("vllm_container", VLLM_CONTAINER)
     installation_command = config.get("installation_command")
 
     rcfg = config["rejudge"]
@@ -280,27 +279,32 @@ def verify(
 
     cluster_config = pipeline_utils.get_cluster_config(cluster)
 
-    host_dir = resolve_host_path(output_dir)
+    fs = LauncherFS(cluster_config)
     rejudge_dir = f"{output_dir}/rejudge"
-    host_rejudge_dir = host_dir / "rejudge"
 
     # -- Discover rollout files from input_dir --------------------------
-    host_input_dir = resolve_host_path(input_dir)
-    rollout_files = sorted(host_input_dir.glob("output-rs*.jsonl"))
-    rollout_files = [
-        f for f in rollout_files if "_chunk_" not in f.name and not f.name.endswith("-async")
+    # LauncherFS.ls works within the cluster (local glob) or off-cluster
+    # (remote `ls` over the ssh tunnel).
+    names = [
+        n
+        for n in fs.ls(input_dir, "output-rs*.jsonl")
+        if "_chunk_" not in n and not n.endswith("-async")
     ]
 
-    if not rollout_files:
-        console.warning(f"No rollout files found in {host_input_dir}")
+    if not names:
+        console.warning(f"No rollout files found in {input_dir}")
         return
 
+    # Path() here is used only for .name/.stem downstream (no filesystem access).
+    rollout_files = [Path(n) for n in names]
+
     # -- Resume: find remaining files -----------------------------------
-    remaining: list[Path] = []
-    for rf in rollout_files:
-        done_file = host_rejudge_dir / f"{rf.name}.done"
-        if rerun_done or not done_file.exists():
-            remaining.append(rf)
+    done_exist = fs.batch_exists([f"{rejudge_dir}/{n}.done" for n in names])
+    remaining: list[Path] = [
+        rf
+        for rf in rollout_files
+        if rerun_done or not done_exist.get(f"{rejudge_dir}/{rf.name}.done")
+    ]
 
     skipped = len(rollout_files) - len(remaining)
 
@@ -353,6 +357,7 @@ def verify(
         client_cmd_str = _build_verify_cmd(
             output_dir=output_dir,
             gym_path=gym_path,
+            uv_venv_dir=uv_venv_dir,
             input_file=f"{input_dir}/{rollout_file.name}",
             output_file=f"{rejudge_dir}/{rollout_file.name}",
             done_file=f"{rejudge_dir}/{rollout_file.name}.done",
@@ -371,7 +376,7 @@ def verify(
 
         if judge_script is not None:
             components.append(
-                Command(script=judge_script, container=server_container, name=f"{job_label}_judge")
+                Command(script=judge_script, container=vllm_container, name=f"{job_label}_judge")
             )
             max_nodes = max(max_nodes, judge_script.num_nodes)
 
@@ -414,7 +419,7 @@ def verify(
 
         analysis_cmd = Command(
             script=make_bash_script(analysis_cmd_str),
-            container=post_container,
+            container=postprocess_container,
             name="analysis",
         )
         analysis_group = CommandGroup(
@@ -443,7 +448,7 @@ def verify(
 
         agg_cmd = Command(
             script=make_bash_script(agg_cmd_str),
-            container=post_container,
+            container=postprocess_container,
             name="aggregate",
         )
         agg_group = CommandGroup(
@@ -472,7 +477,7 @@ def verify(
 
         filter_cmd = Command(
             script=make_bash_script(filter_cmd_str),
-            container=post_container,
+            container=postprocess_container,
             name="filter",
         )
         filter_group = CommandGroup(

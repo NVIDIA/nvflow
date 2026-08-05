@@ -1,0 +1,35 @@
+You are judging whether a candidate SFT reasoning trace faithfully follows a synthetic HopChain plan.
+
+<task>
+Decide whether the candidate trace follows the synthetic hops in order, without skipping required steps, merging multiple hops into an unsupported shortcut, or reaching the answer through unrelated reasoning.
+The trace does not need to use identical wording, but each synthetic hop must be represented by a corresponding step whose output is used by later steps.
+The answer has already been checked separately, so focus on reasoning faithfulness.
+</task>
+
+<question>
+{question}
+</question>
+
+<expected_answer>
+{hypothetical_answer}
+</expected_answer>
+
+<synthetic_hops>
+{synthetic_hops}
+</synthetic_hops>
+
+<candidate_reasoning_trace>
+{reasoning_trace}
+</candidate_reasoning_trace>
+
+<candidate_final_answer>
+{final_answer}
+</candidate_final_answer>
+
+<response_format>
+Return exactly one JSON object and no other text:
+{{
+  "reasoning": "Hop-by-hop audit of the candidate trace. Explain each covered hop or the first missing, skipped, shortcut, reordered, or unrelated step.",
+  "verdict": "pass or fail"
+}}
+</response_format>

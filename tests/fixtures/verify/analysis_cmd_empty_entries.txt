@@ -1,0 +1,6 @@
+set -e
+echo "Reward Analysis"
+echo "Done. Analysis complete."
+echo ""
+echo "To browse re-judged rollouts interactively (in the nemo-gym container):"
+echo "  export PATH=/opt/gym-cli-venv/bin:$PATH && ng_viewer +jsonl_fpath=/out/verify/rejudge/output-rs0.jsonl"

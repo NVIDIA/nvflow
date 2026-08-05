@@ -144,7 +144,7 @@ stages:
     server_type: vllm
     gpus: 1
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.temperature=0.6
       ++inference.top_p=0.95
       ++inference.top_k=20

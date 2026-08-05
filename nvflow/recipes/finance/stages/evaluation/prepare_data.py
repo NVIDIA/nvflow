@@ -35,7 +35,7 @@ class PrepareFinanceBenchmarksStage(BaseStage):
 
     Example:
         benchmarks: ["secque", "financebench"]
-        output_dir: "/workspace/nvflow/recipes/finance/datasets"
+        output_dir: "/workspace/outputs/finance/eval-datasets"
     """
 
     def execute(
@@ -64,7 +64,7 @@ class PrepareFinanceBenchmarksStage(BaseStage):
         if not output_dir or not Path(output_dir).is_absolute():
             raise ValueError(
                 f"output_dir must be an absolute path, got: '{output_dir}'. "
-                "Example: output_dir: /workspace/nvflow/recipes/finance/datasets"
+                "Example: output_dir: /workspace/outputs/finance/eval-datasets"
             )
 
         # Convert benchmarks to list if string

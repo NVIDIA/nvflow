@@ -32,12 +32,15 @@ Usage::
     python -m nvflow.recipes.finance.utils.rl.responses_api_converter <input> <output.jsonl>
 """
 
+from __future__ import annotations
+
 import argparse
-import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from nvflow.utils import setup_logger
+from nvflow.utils.jsonl import iter_jsonl, write_jsonl
 
 logger = setup_logger(__name__)
 
@@ -77,75 +80,116 @@ def _convert_row(row: dict) -> dict:
     return result
 
 
-def _read_jsonl(path: Path) -> list[dict]:
-    """Read a JSONL file, skipping blank lines and logging malformed rows."""
-    rows: list[dict] = []
-    with open(path) as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                logger.warning("Skipping malformed JSON at %s:%d: %s", path, line_num, e)
-    return rows
+def _resolve_input_files(path: Path) -> list[Path]:
+    """Resolve ``path`` to the list of JSONL files we will read.
+
+    Hoisted out of ``_iter_input`` so ``convert()`` can validate the
+    input path *before* opening the output writer.  Without this
+    upfront check, ``write_jsonl.__enter__`` would create (and
+    immediately close) a 0-byte output file before ``_iter_input``'s
+    first iteration raised ``FileNotFoundError`` -- a zombie output
+    that would mislead ``Path.exists()`` health checks and reruns of
+    the failed job into thinking the stage succeeded.
+
+    Raises ``FileNotFoundError`` when ``path`` does not exist or a
+    directory contains no JSONL files; ``main()`` translates this into
+    a clean non-zero exit so the Slurm log shows a single error line
+    instead of a buried stack trace.
+    """
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        files = sorted(path.glob("*.jsonl"))
+        if not files:
+            raise FileNotFoundError(f"No .jsonl files found in directory: {path}")
+        return files
+    raise FileNotFoundError(f"Input path does not exist: {path}")
 
 
-def _read_input(path: Path) -> list[dict]:
-    """Read rows from a single JSONL file or a directory of JSONL files."""
+def _iter_input(path: Path) -> Iterator[dict]:
+    """Yield rows lazily from a single JSONL file or a directory of JSONL files.
+
+    Streaming (vs. buffering all rows into a list) keeps peak memory
+    constant in the dataset size -- at finance-sec-search scale (~187K
+    records, ~13 KB each in-memory) the previous list-based reader held
+    ~2.4 GB in heap before the writer started flushing.  The streaming
+    contract lets the caller pipe rows straight through to ``write_jsonl``.
+
+    Malformed JSON lines are logged with their source location and
+    skipped; this preserves the historical "warn + continue" behaviour
+    that operators rely on for triaging flaky inputs without having to
+    rerun the whole stage.
+
+    Path validation lives in :func:`_resolve_input_files`; ``convert()``
+    calls that helper upfront so a missing input dir cannot leave a
+    zombie 0-byte output behind.
+    """
+    files = _resolve_input_files(path)
     if path.is_file():
         logger.info("Reading file: %s", path)
-        return _read_jsonl(path)
+    else:
+        logger.info("Reading %d file(s) from directory: %s", len(files), path)
 
-    if path.is_dir():
-        jsonl_files = sorted(path.glob("*.jsonl"))
-        if not jsonl_files:
-            logger.error("No .jsonl files found in directory: %s", path)
-            sys.exit(1)
-        logger.info("Reading %d file(s) from directory: %s", len(jsonl_files), path)
-        rows: list[dict] = []
-        for fpath in jsonl_files:
-            rows.extend(_read_jsonl(fpath))
-        logger.info("Total rows read: %d", len(rows))
-        return rows
-
-    logger.error("Input path does not exist: %s", path)
-    sys.exit(1)
+    for fpath in files:
+        for line_num, (row, parse_exc, _raw_line) in enumerate(
+            iter_jsonl(fpath, on_error="yield_error"), 1
+        ):
+            if parse_exc is not None:
+                logger.warning("Skipping malformed JSON at %s:%d: %s", fpath, line_num, parse_exc)
+                continue
+            # ``iter_jsonl(on_error="yield_error")`` contract: ``row`` is
+            # ``None`` iff ``parse_exc`` is set; the assert narrows the
+            # type for mypy so ``yield row`` doesn't leak ``None`` into
+            # the iterator's element type.
+            assert row is not None
+            yield row
 
 
 def convert(input_path: Path, output_file: Path) -> None:
-    """Convert apply_prompt_template output to Responses API format."""
-    rows = _read_input(input_path)
+    """Convert apply_prompt_template output to Responses API format.
 
-    if not rows:
-        logger.warning("Empty input -- writing empty output file")
-        output_file.touch()
-        return
+    Streams rows from input -> output without buffering, so peak heap
+    is independent of dataset size.  Rows missing required fields
+    (``prompt`` / ``expected_answer`` / ``uuid``) are routed to a
+    sibling ``errors.jsonl`` for operator triage; the row's original
+    fields are preserved so an operator can grep ``errors.jsonl`` to
+    pinpoint the offending record without re-parsing the source file.
 
-    logger.info("Converting %d rows to Responses API format", len(rows))
+    The output directory is created up front so the empty-input edge
+    case (zero rows in -> zero rows out) still materialises an empty
+    output file at the expected path; downstream stages distinguish
+    "empty success" from "missing file" using ``Path.exists()``.
+
+    Input validation runs *before* the output directory is created so
+    a missing/empty input never leaves a zombie 0-byte output file or
+    parent dir behind on the failure path -- this is what we observed
+    in slurm job 12091275 (wrong config -> input dir missing -> 0-byte
+    output created before the FileNotFoundError surfaced).  The empty
+    dir/file pair would mislead ``Path.exists()`` health checks and
+    cause reruns to skip the stage as "already done".
+    """
+    _resolve_input_files(input_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
 
     converted = 0
     skipped_rows: list[dict] = []
-    output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(output_file, "w") as f:
-        for idx, row in enumerate(rows):
+    with write_jsonl(output_file) as f:
+        for row in _iter_input(input_path):
             try:
-                result = _convert_row(row)
-                f.write(json.dumps(result) + "\n")
+                f.write(_convert_row(row))
                 converted += 1
             except (KeyError, TypeError) as e:
-                logger.warning("Skipping row %d: %s", idx, e)
-                skipped_rows.append({"row_index": idx, "reason": str(e), **row})
+                logger.warning("Skipping row: %s", e)
+                skipped_rows.append({"reason": str(e), **row})
 
     logger.info("Converted %d rows -> %s", converted, output_file)
 
     if skipped_rows:
         errors_file = output_file.parent / "errors.jsonl"
-        with open(errors_file, "w") as ef:
+        with write_jsonl(errors_file) as ef:
             for row in skipped_rows:
-                ef.write(json.dumps(row) + "\n")
+                ef.write(row)
         logger.warning("Skipped %d rows -> %s", len(skipped_rows), errors_file)
 
 
@@ -157,7 +201,11 @@ def main() -> int:
     parser.add_argument("output_file", help="Output JSONL file path")
     args = parser.parse_args()
 
-    convert(Path(args.input_path), Path(args.output_file))
+    try:
+        convert(Path(args.input_path), Path(args.output_file))
+    except FileNotFoundError as e:
+        logger.error("%s", e)
+        return 1
     return 0
 
 

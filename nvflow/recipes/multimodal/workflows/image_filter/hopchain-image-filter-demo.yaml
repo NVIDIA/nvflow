@@ -1,0 +1,14 @@
+# Small, deterministic HopChain image-filter run used by the quick start.
+# Put images under data/images, then run this file directly.
+
+_base_: hopchain-image-filter.yaml
+
+execution_id: demo
+
+stages:
+  image_filter:
+    image_directories:
+      - directory: ${project_root}/data/images
+        recursive: true
+        end_index: 100
+    num_chunks: 1

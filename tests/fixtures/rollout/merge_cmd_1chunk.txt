@@ -1,0 +1,78 @@
+set -e
+
+MERGED_FILE=/out/rollout/output-rs0.jsonl
+ANALYSIS_DIR=/out/rollout/analysis_rs0
+SEED_LABEL=rs0
+NUM_CHUNKS=1
+INPUT_DATA=/data/train.jsonl
+
+echo "============================================================"
+echo "Merge Rollout Chunks  [$SEED_LABEL]"
+echo "============================================================"
+
+# Clean up stale temp file from a prior crashed merge
+rm -f "$MERGED_FILE.tmp"
+
+# Precondition: ALL chunk .done markers must exist.  A missing
+# .done means upstream rollout never finalised (job failed before
+# the cp/touch finalize step, or output was deleted).  Fail loudly
+# so Slurm marks the merge job FAILED and an operator notices --
+# silently exit-0'ing here is what produced the silent-success
+# cascade where aggregate runs on N-1 seeds and the pipeline
+# reports COMPLETED 0:0 despite missing training data.
+for i in $(seq 0 $((NUM_CHUNKS - 1))); do
+    CHUNK_DONE="/out/rollout/rs0/chunk_$i.jsonl.done"
+    if [ ! -f "$CHUNK_DONE" ]; then
+        echo "ERROR: chunk $i .done missing for [$SEED_LABEL] -- upstream rollout failed before finalize. Aborting merge."
+        exit 1
+    fi
+done
+
+echo "[Step 1/3] Merging chunk files ..."
+> "$MERGED_FILE.tmp"
+for i in $(seq 0 $((NUM_CHUNKS - 1))); do
+    CHUNK_FILE="/out/rollout/rs0/chunk_$i.jsonl"
+    if [ ! -f "$CHUNK_FILE" ] || [ ! -s "$CHUNK_FILE" ]; then
+        echo "ERROR: chunk $i .done exists but file missing/empty — aborting."
+        rm -f "$MERGED_FILE.tmp"
+        exit 1
+    fi
+    LINES=$(wc -l < "$CHUNK_FILE")
+    echo "  Chunk $i: $LINES lines"
+    cat "$CHUNK_FILE" >> "$MERGED_FILE.tmp"
+done
+
+TOTAL=$(wc -l < "$MERGED_FILE.tmp")
+echo "  Merged total: $TOTAL lines"
+if [ "$TOTAL" -eq 0 ]; then
+    echo "ERROR: All chunks present but 0 lines merged."
+    rm -f "$MERGED_FILE.tmp"
+    exit 1
+fi
+
+# Atomic replace — old merged file untouched until this point
+mv -f "$MERGED_FILE.tmp" "$MERGED_FILE"
+
+echo ""
+echo "[Step 2/3] Enriching rollouts with input metadata ..."
+PYTHONPATH=/nemo_run/code python3 -m nvflow.recipes.finance.utils.rl.enrich_rollouts \
+    "$INPUT_DATA" \
+    "$MERGED_FILE"
+
+echo ""
+echo "[Step 3/3] Analyzing rollouts ..."
+PYTHONPATH=/nemo_run/code python3 -m nvflow.recipes.finance.utils.rl.analyze_rollouts \
+    "$MERGED_FILE" \
+    "$ANALYSIS_DIR"
+
+touch /out/rollout/output-rs0.jsonl.done
+
+# Safe cleanup: delete chunk data files only (keep .done markers).
+for i in $(seq 0 $((NUM_CHUNKS - 1))); do
+    CHUNK_FILE="/out/rollout/rs0/chunk_$i.jsonl"
+    rm -f "$CHUNK_FILE"
+done
+echo "Done [$SEED_LABEL]."
+echo ""
+echo "To browse rollouts interactively (in the nemo-gym container):"
+echo "  export PATH=/opt/gym-cli-venv/bin:$PATH && ng_viewer +jsonl_fpath=$MERGED_FILE"

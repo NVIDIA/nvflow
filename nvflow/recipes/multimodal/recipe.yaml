@@ -1,0 +1,13 @@
+# ============================================================================
+# Multimodal Recipe Configuration
+# ============================================================================
+# Initial scaffold for multimodal workflows. HopChain is the first planned SDG
+# workflow under this recipe.
+# ============================================================================
+
+recipe: multimodal
+description: "Multimodal synthetic data generation and training workflows"
+
+workflow_order:
+  - hopchain_image_filter
+  - hopchain_sdg

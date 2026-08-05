@@ -1,0 +1,58 @@
+# ============================================================================
+# SDG overlay for upstream NeMo-Gym format_verification environment.
+# ============================================================================
+# Used for both SDG "passthrough" and "parse-response" modes — they share the
+# same resources server (format_verification); the per-stage difference is the
+# `verifier` block injected into each input record by `responses_api.py`
+# (see `extra_record_fields` in workflow YAMLs).
+#
+# Behaviors via injected verifier
+# -------------------------------
+# - passthrough (always reward=1.0):
+#     verifier:
+#       type: regex
+#       verify_regex: [".*"]
+#       verify_min_matches: 0
+#
+# - parse-response (Yes/No vote, reward=1.0 if any positive label appears):
+#     verifier:
+#       type: regex
+#       verify_regex: ["[Yy][Ee][Ss]"]
+#       verify_min_matches: 1
+#
+# Usage in workflow YAML:
+#   gym_config_paths:
+#     - nvflow/lib/sdg/document_grounded/gym_configs/sdg_format_verification.yaml
+#   gym_agent_name: sdg_format_verification_simple_agent
+# ============================================================================
+
+sdg_format_verification:
+  resources_servers:
+    format_verification:
+      entrypoint: app.py
+      # `domain` must be one of the upstream NeMo-Gym taxonomy values:
+      #   math, coding, agent, knowledge, instruction_following, long_context,
+      #   safety, games, translation, e2e, rlhf, other.
+      # SDG isn't a task domain, so `other`.  Schema validates this strictly
+      # at ng_run startup — any other value crashes the head server with an
+      # "almost-server" validation error.
+      domain: other
+      verified: false
+      description: SDG-side reuse of format_verification (passthrough / parse-response)
+      value: Provide reward signal for SDG question-verify and generation-only stages
+
+sdg_format_verification_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        # `name` references the top-level YAML group key (`sdg_format_verification`
+        # above), NOT the inner key under `resources_servers:` (which is `format_verification`,
+        # the upstream Gym dir name used only to resolve `entrypoint: app.py`).
+        # See Gym/resources_servers/finance_sec_search/configs/finance_sec_search.yaml
+        # for the canonical pattern.
+        name: sdg_format_verification
+      model_server:
+        type: responses_api_models
+        name: policy_model

@@ -39,13 +39,10 @@ keeps the record.  Parse failures are counted separately in the companion
 import argparse
 import re
 
-import orjson
-
 from nvflow.utils import setup_logger
+from nvflow.utils.jsonl import iter_jsonl, write_jsonl
 
 logger = setup_logger(__name__)
-
-WRITE_BUFFER_SIZE = 1000
 
 # Accepts "Answer: VALID" / "Answer: INVALID" (case-insensitive).  We take
 # the LAST match to avoid false positives when the rubric/reasoning
@@ -105,29 +102,23 @@ def parse_validate_responses(input_file: str, output_file: str) -> None:
     num_invalid = 0
     num_parse_failed_defaulted_valid = 0
 
-    buffer: list[bytes] = []
-
     with (
-        open(input_file, "rb") as reader,
-        open(output_file, "wb") as writer,
+        write_jsonl(output_file) as writer,
         open(log_file, "w") as log_writer,
     ):
-        for line in reader:
-            line = line.strip()
-            if not line:
-                continue
-
+        # ``yield_error`` so we preserve the historical behaviour: malformed
+        # JSON lines still count against ``num_total`` and emit an entry to
+        # the parse log; only the corresponding row is omitted from the
+        # output JSONL.
+        for row, parse_exc, _raw_line in iter_jsonl(input_file, on_error="yield_error"):
             num_total += 1
 
-            try:
-                row = orjson.loads(line)
-            except orjson.JSONDecodeError as exc:
-                msg = f"Failed to parse JSON at entry {num_total}: {exc}"
-                log_writer.write(msg + "\n")
+            if parse_exc is not None:
+                log_writer.write(f"Failed to parse JSON at entry {num_total}: {parse_exc}\n")
                 num_parse_failed += 1
-                # Can't attach anything useful — skip this line entirely.
                 continue
 
+            assert row is not None  # narrow for type-checkers in yield_error mode
             generation = row.get("generation", "")
 
             tag, explanation, error = parse_validate_tag(generation)
@@ -154,13 +145,7 @@ def parse_validate_responses(input_file: str, output_file: str) -> None:
                 else:
                     num_invalid += 1
 
-            buffer.append(orjson.dumps(row))
-            if len(buffer) >= WRITE_BUFFER_SIZE:
-                writer.write(b"\n".join(buffer) + b"\n")
-                buffer.clear()
-
-        if buffer:
-            writer.write(b"\n".join(buffer) + b"\n")
+            writer.write(row)
 
         log_writer.write(f"\n{'=' * 60}\n")
         log_writer.write("VALIDATE PARSE SUMMARY\n")
