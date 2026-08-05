@@ -43,7 +43,24 @@ dco-check:
   stage: lint
   image: python:3.12-slim
   script:
-    - python scripts/check_dco.py
+    - python3 scripts/check_dco.py
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Mirrors .github/workflows/secrets-detector.yml.  The GitHub copy only runs on
+# pull requests, and this repo opens one per release, so without this job a
+# finding stays invisible until release day.  Keep the flags in sync with the
+# GitHub workflow.
+secrets-detector:
+  stage: lint
+  image: python:3.12-slim
+  variables:
+    GIT_DEPTH: 0
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git curl > /dev/null
+    - curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+  script:
+    - trufflehog git file://. --since-commit "$CI_MERGE_REQUEST_DIFF_BASE_SHA" --fail --no-update --results=verified,unknown
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
@@ -54,11 +71,14 @@ test:
   stage: test
   image: python:3.12-slim
   script:
-    # Lightweight install: skip heavy core deps (nemo-skills ~200+ packages)
-    # that unit tests don't need.  Only install the project + test deps.
+    # Lightweight install: the project plus tests/requirements-ci.txt, but not
+    # the heavy nemo-skills stack (~200 packages incl. torch).  Tests that
+    # genuinely need nemo-skills use pytest.importorskip and skip here; they
+    # run in the full-deps CI.  The dependency list is shared with
+    # .github/workflows/unit-tests.yml — edit it there, in one place.
     - uv venv --python 3.12
-    - uv pip install -e ".[dev]" --no-deps
-    - uv pip install pytest pytest-cov pytest-xdist pytest-timeout PyYAML omegaconf rich
+    - uv pip install -e . --no-deps
+    - uv pip install -r tests/requirements-ci.txt
     # --no-sync prevents `uv run` from implicitly auto-installing heavy core
     # deps (nemo-skills etc) that we deliberately skipped above.  Without it,
     # tests would pass here for the wrong reason and fail on GitHub CI.

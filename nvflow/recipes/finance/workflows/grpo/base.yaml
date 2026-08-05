@@ -19,18 +19,18 @@
 # Environment Configuration:
 #   NeMo-Gym environments are defined in the top-level `environments` dict.
 #   Each environment has its own data pipeline and NeMo-Gym config.
-#   Use --environment <name> to run a single environment.
+#   A model config's `environments` block MERGES with this one rather than
+#   replacing it, so pass `-e <name>` to run a single environment -- without it
+#   every environment declared here is trained jointly.
 #
 # NeMo-RL / NeMo-Gym versions:
-#   Baked into the air-gapped `nvflow-nemo-rl` image (see dockerfiles/Dockerfile.nemo-rl):
-#     - Base: nvcr.io/nvidia/nemo-rl:v0.6.0
-#     - NeMo-Skills: 022904023ad7a83a87662a313cf72e7df5891d55 (`0229040`)
-#     - NeMo-Gym branch: ude/finance-sec-search-v2 (override via NEMO_GYM_BRANCH build arg)
-#     - Pre-built Gym .venv symlinked across all 6 components
-#   Do NOT bind-mount host clones at /opt/NeMo-RL or
-#   /opt/NeMo-RL/3rdparty/Gym-workspace/Gym in production -- the overlays
-#   shadow the baked .venv and break GRPO stages.  See INSTALL.md
-#   "Setup NeMo-RL & NeMo-Gym Sources (for GRPO)" for the dev-mode exception.
+#   Baked into the airgapped `nvflow-nemo-rl` image (see dockerfiles/Dockerfile.nemo-rl):
+#     - Base: nvcr.io/nvidia/nemo-rl:v0.7.0
+#     - NeMo-Gym: upstream main 33ef60369 (override via the GYM_REF build arg)
+#     - One prebuilt Gym venv per component, baked at image build time
+#   Do NOT bind-mount host clones over /opt/nemo-rl or
+#   /opt/nemo-rl/3rdparty/Gym-workspace/Gym -- the overlay shadows the baked
+#   venvs and breaks the GRPO stages. See INSTALL.md for the dev-mode exception.
 # ============================================================================
 
 # Recipe identifier (defines which recipe this workflow belongs to)
@@ -43,8 +43,6 @@ workflow:
   description: "GRPO RL training for financial reasoning with NeMo-Gym"
 
 # Cluster to run jobs on (references cluster_configs/<cluster>.yaml).
-# my_cluster.yaml selects the air-gapped `nvflow-nemo-rl` image, which already
-# contains NeMo-RL source + a pre-built Gym .venv -- no host overlays needed.
 cluster: my_cluster
 
 # Root directory for all finance pipeline outputs (shared across workflows).
@@ -69,7 +67,7 @@ model_output_dir: ${base_output_dir}
 # Stage 1: data_transformation      - SDG cleanup → model-agnostic schema (shared, CPU)
 # Stage 2: apply_prompt_template    - Apply prompt template + extract expected answer (CPU)
 # Stage 3: convert_to_responses_api - Convert to NeMo-Gym Responses API format (CPU)
-# Stage 4: prepare_data             - Add agent_ref routing fields via ng_prepare_data (CPU)
+# Stage 4: prepare_data             - Add agent_ref routing fields via gym dataset collate (CPU)
 #          prefetch_cache           - OPTIONAL: pre-warm SEC metadata cache (no step-N; SEC cache)
 # Stage 5: collect_rollouts         - Rollout collection + reward profiling + filter (GPU)
 # Stage 6: compute_rewards          - OPTIONAL: re-judge rollouts with different judge
@@ -166,13 +164,13 @@ environments:
     raw_train_data: /workspace/outputs/finance/sap-500/workflow-3-template-based-sdg/step-5-filter-answers
     source_format: separated
     reasoning_mode: none
-    prompt_template: /workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+    prompt_template: nvflow/recipes/finance/prompts/secque_template.yaml
     answer_prefix: "Answer:"
 
     # NeMo-Gym (stages 5-8)
     config_paths:
       - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
-      - /workspace/nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
+      - /nemo_run/code/nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
     agent_name: equivalence_llm_judge_simple_agent
     judge_vllm:
       num_gpus: 0                 # requires judge -- override in model config
@@ -197,7 +195,7 @@ environments:
     raw_train_data: /workspace/outputs/finance/sap-500/workflow-3-template-based-sdg/step-5-filter-answers
     source_format: separated
     reasoning_mode: none
-    prompt_template: /workspace/nvflow/recipes/finance/prompts/finance_sec_search_template_without_web.yaml
+    prompt_template: nvflow/recipes/finance/prompts/finance_sec_search_template_without_web.yaml
     answer_prefix: null
 
     # NeMo-Gym (stages 5-8)
@@ -205,7 +203,7 @@ environments:
     resources_server_name: finance_sec_search_resources_server
     config_paths:
       - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
-      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
     agent_name: finance_agent
     agent_type: finance_agent
     judge_vllm:
@@ -218,7 +216,7 @@ environments:
     # Set force: true to re-fetch all (e.g. after adding pagination support).
     prefetch:
       script: "resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py"
-      ticker_config: /workspace/nvflow/recipes/finance/configs/sp500.yaml
+      ticker_config: /nemo_run/code/nvflow/recipes/finance/configs/sp500.yaml
       cache_dir: ${directories.cache-finance-sec-search}
       force: false
 
@@ -249,7 +247,7 @@ stages:
     source_data: null                # REQUIRED override in model config (e.g. *dg_sdg_data)
     output_dir: ${directories.step-0-validate-questions}
     environments: ${environments}
-    prompt_config: /workspace/nvflow/recipes/finance/prompts/validate_questions.yaml
+    prompt_config: nvflow/recipes/finance/prompts/validate_questions.yaml
     stage_kwargs:
       model: null                    # REQUIRED override in model config
       server_type: vllm
@@ -311,6 +309,7 @@ stages:
     input_dir: ${directories.step-1-data-transformation}
     output_dir: ${directories.step-2-apply-prompt-template}
     environments: ${environments}
+    container: "nemo-skills"   # Pure Python JSONL transform; runs on CPU nodes without nvidia-container-cli
 
     # Dynamic current_date per record.  The rendered prompt's "as of X"
     # anchor becomes the record's SDG source filing_date + a deterministic
@@ -347,7 +346,7 @@ stages:
       - apply_prompt_template
 
   # --------------------------------------------------------------------------
-  # Stage 4: Data Preparation (ng_prepare_data)  [CPU-only]
+  # Stage 4: Data Preparation (gym dataset collate)  [CPU-only]
   # --------------------------------------------------------------------------
   # Stamps each JSONL record with agent_ref so NeMo-Gym can route it to the
   # correct environment server during training.  Agent definitions are derived
@@ -381,19 +380,21 @@ stages:
       - convert_to_responses_api
     should_download: false              # download missing datasets from HuggingFace?
 
-    # Container / runtime
-    container: "nemo-rl"
-    num_gpus: 1                         # nemo-rl container needs GPU node for nvidia-container-cli
-    gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
+    # Container / runtime -- CPU-only nemo-gym (Gym-only stage; no GPU node)
+    container: "nemo-gym"
+    num_gpus: 0
+    gym_path: "/opt/Gym"
 
-    # Activate NeMo-Gym venv: use pre-built if available, otherwise build via uv.
-    # Anchored as &gym_install -- reused by prefetch_cache, collect_rollouts, and compute_rewards.
-    installation_command: &gym_install >-
-      if [ -f /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate ]; then
-        source /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate;
-      else
-        cd /opt/NeMo-RL && uv sync --extra nemo_gym;
-      fi
+    # nemo-gym bakes the Gym CLI (/opt/gym-cli-venv) + per-component venvs
+    # (/opt/gym-venvs), both self-sufficient. Install only exposes the baked CLI
+    # entry points (ng_prepare_data, ...) on PATH -- no venv build. A /opt/Gym
+    # dev-mount overlays source only (editable install picks it up); baked
+    # component venvs live outside /opt/Gym so a mount can't shadow them.
+    #
+    # Anchored as &gym_install_cpu -- reused by prefetch_cache.
+    installation_command: &gym_install_cpu |-
+      echo "[gym_install] nemo-gym: baked Gym CLI + venvs; exposing CLI on PATH"
+      export PATH=/opt/gym-cli-venv/bin:$PATH
 
   # --------------------------------------------------------------------------
   # Prefetch Cache (optional, CPU-only; no step-N -- writes to cache-finance-sec-search)
@@ -406,16 +407,16 @@ stages:
   # To disable: comment out "prefetch_cache" in pipeline_stages above.
   # To force re-fetch: set force: true in the environment's prefetch block.
   prefetch_cache:
-    container: "nemo-rl"
-    num_gpus: 1                         # nemo-rl container needs GPU node for nvidia-container-cli
-    gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
+    container: "nemo-gym"
+    num_gpus: 0
+    gym_path: "/opt/Gym"
     environments: ${environments}
-    installation_command: *gym_install
+    installation_command: *gym_install_cpu
     dependencies:
       - prepare_data
 
   # --------------------------------------------------------------------------
-  # Stage 5: Rollout Collection (ng_collect_rollouts)
+  # Stage 5: Rollout Collection (gym eval run --no-serve)
   # --------------------------------------------------------------------------
   # Two-phase GRPO design: this stage is Phase 1 (offline difficulty profiling).
   # Phase 2 (GRPO training) generates fresh on-policy rollouts internally.
@@ -463,14 +464,19 @@ stages:
   collect_rollouts:
     output_dir: ${directories.step-5-collect-rollouts}
     prepare_data_dir: ${directories.step-4-prepare-data}
-    container: "nemo-rl"               # rollout client + Gym (GPU jobs)
-    post_container: "nemo-skills"      # merge/analyze/aggregate/filter (CPU jobs, no GPU deps)
-    gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
+    # CPU nemo-gym for the Gym rollout client (ng_run head server + env
+    # component servers + ng_collect_rollouts); the model runs in the GPU vLLM
+    # servers (vllm_container), so the client itself needs no GPU.
+    container: "nemo-gym"                   # rollout client + Gym env servers (CPU orchestration)
+    postprocess_container: "nemo-skills"    # merge/analyze/aggregate/filter (CPU jobs, no GPU deps)
+    vllm_container: "vllm-grpo"             # policy + judge vLLM servers (GPU); v0.20.0 matches GRPO training generation
+    gym_path: "/opt/Gym"
+    gym_uv_venv_dir: "/opt/gym-venvs"       # ng_run reuses the baked per-component venvs (else Gym defaults to /opt/Gym/<comp>/.venv)
     environments: ${environments}
     dependencies:
       - prepare_data
       - prefetch_cache
-    installation_command: *gym_install
+    installation_command: *gym_install_cpu
 
     # ---- Rollout jobs (GPU): num_chunks x num_random_seeds ---------------
     # Each job starts policy vLLM + (optional) judge vLLM + NeMo-Gym client.
@@ -513,6 +519,16 @@ stages:
     # Runs after aggregate; produces train.jsonl at the stage output_dir
     # root (one per env).  Consumed by train_validation_split below.
     # Remove this block to skip filtering.
+    #
+    # Output retains ONLY samples with measured RL signal:
+    #   - profiled in difficulty.jsonl, AND
+    #   - reward_std >= min_reward_std (non-trivial variance).
+    # Drops both zero-signal profiled samples (all seeds same reward, no
+    # GRPO gradient) and unprofiled samples. Unprofiled means rollouts
+    # never measured the prompt -- typically because rollout.max_num_samples
+    # is smaller than len(train.jsonl) (smoke / sweep configs); in production
+    # max_num_samples is unset and every sample is rolled out, so unprofiled
+    # is empty.
     filter:
       min_reward_std: 1e-6  # remove questions with zero reward variance (no GRPO gradient)
 
@@ -539,13 +555,17 @@ stages:
     output_dir: ${directories.step-6-compute-rewards}
     rollouts_dir: ${directories.step-5-collect-rollouts}
     prepare_data_dir: ${directories.step-4-prepare-data}
-    container: "nemo-rl"               # verify client + Gym (GPU jobs)
-    post_container: "nemo-skills"      # analysis/aggregate/filter (CPU jobs, no GPU deps)
-    gym_path: "/opt/NeMo-RL/3rdparty/Gym-workspace/Gym"
+    # CPU nemo-gym for the Gym verify client (ng_run judge head server +
+    # verify_worker); the judge model runs in the GPU vLLM server (vllm_container).
+    container: "nemo-gym"                   # verify client + Gym env servers (CPU orchestration)
+    postprocess_container: "nemo-skills"    # analysis/aggregate/filter (CPU jobs, no GPU deps)
+    vllm_container: "vllm-grpo"             # judge vLLM server (GPU); v0.20.0 matches GRPO training generation
+    gym_path: "/opt/Gym"
+    gym_uv_venv_dir: "/opt/gym-venvs"       # ng_run reuses the baked per-component venvs
     environments: ${environments}
     dependencies:
       - collect_rollouts
-    installation_command: *gym_install
+    installation_command: *gym_install_cpu
 
     # ---- Re-judge jobs (GPU): 1 per seed ---------------------------------
     # Each job starts a judge vLLM server + verify client.

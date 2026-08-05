@@ -1,131 +1,123 @@
 # =============================================================================
-# NVFlow NeMo-RL Container
-# =============================================================================
-# Extends the NeMo-RL nightly container with NeMo-Skills and the NeMo-Gym
-# finance agent for NVFlow workflows.  The base image ships with frozen
-# environments and pre-built Ray venvs; this Dockerfile adds the NeMo-Skills
-# package, replaces the Gym submodule with a feature branch that includes the
-# finance-SEC-search resource server and finance agent, pre-builds all Gym
-# component venvs, and relocates paths for Slurm/enroot compatibility.
+# NVFlow NeMo-RL trainer (airgapped) for GRPO/SFT `training`.
 #
-# Build:
-#   docker build -f dockerfiles/Dockerfile.nemo-rl -t nvflow-nemo-rl:latest .
+# The base bakes the RL environment but leaves the Gym venvs unbuilt (upstream
+# gates that prefetch behind NEMO_GYM_PREFETCH_CONFIGS). This image bakes them,
+# so no `uv` resolve happens at job runtime.
+#
+# Run with `--no-container-mount-home`, which the NeMo-Skills launcher always
+# passes: the venvs resolve through /root, which enroot otherwise shadows with
+# $HOME.
+#
+# Build (single-arch, host platform; see docker_instructions.md for multi-arch):
+#   docker build -f dockerfiles/Dockerfile.nemo-rl -t nvflow-nemo-rl:v0.7.0 .
 # =============================================================================
-
-ARG BASE_IMAGE=nvcr.io/nvidia/nemo-rl:v0.6.0
+ARG BASE_IMAGE=nvcr.io/nvidia/nemo-rl:v0.7.0
 FROM ${BASE_IMAGE}
 
-# --- Symlink for NeMo-Skills code that references /opt/NeMo-RL (wrong case) --
+ARG GYM_REF=33ef60369f76557e6a6dd828c0bd5f5529624a92
+ARG NEMO_GYM_CUDA=cu130
+ARG NEMO_GYM_VLLM_VERSION=0.20.0
+ARG TARGETARCH
+ARG GYM_SRC=/opt/nemo-rl/3rdparty/Gym-workspace/Gym
+ARG GYM_VENV=/opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym
+
+# scripts/convert_checkpoint_to_hf.sh cd's to /opt/NeMo-RL (wrong case).
 RUN ln -sf /opt/nemo-rl /opt/NeMo-RL
 
-# --- Upgrade uv (nemo-gym may require newer features than what the nightly ships)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# Versions every process joining the Ray cluster must share. Gym's ray floor is
+# only >=2.55.1, which would not stop a resolver from moving it.
+RUN /opt/nemo_rl_venv/bin/python -c \
+        "import numpy, ray; print(f'numpy=={numpy.__version__}'); print(f'ray=={ray.__version__}')" \
+        > /opt/nvflow-pins.txt && \
+    cat /opt/nvflow-pins.txt
 
-# --- Pre-cache Python interpreter for uv (air-gapped safety net) -------------
-# Gym's cli_setup_command runs `uv venv --python <version>`.  If
-# skip_venv_if_present ever misses, uv still needs a local interpreter.
-RUN /root/.local/bin/uv python install 3.12
+# Advance in place: generate_fingerprint.py hashes submodule SHAs.
+WORKDIR ${GYM_SRC}
+RUN git fetch --depth 1 origin ${GYM_REF} && \
+    git checkout --detach ${GYM_REF} && \
+    test "$(git rev-parse HEAD)" = "${GYM_REF}"
 
-# --- Install NeMo-Skills into the frozen venv --------------------------------
-ARG NEMO_SKILLS_COMMIT=022904023ad7a83a87662a313cf72e7df5891d55
-RUN git clone https://github.com/NVIDIA-NeMo/Skills.git /opt/NeMo-Skills && \
-    cd /opt/NeMo-Skills && git checkout ${NEMO_SKILLS_COMMIT} && \
-    /root/.local/bin/uv pip install --python /opt/nemo_rl_venv/bin/python .
+# Pick up deps Gym declared since the base was built (editable, so source follows).
+RUN uv pip install --python ${GYM_VENV}/bin/python \
+        --constraint /opt/nvflow-pins.txt -e . && \
+    ${GYM_VENV}/bin/python -c "import nemo_gym"
 
-# --- Replace NeMo-Gym submodule with feature branch -------------------------
-# The feature branch includes the finance-SEC-search resource server and
-# finance agent that are not yet on main.
-ARG NEMO_GYM_BRANCH=ude/finance-sec-search-v2
-RUN rm -rf /opt/nemo-rl/3rdparty/Gym-workspace/Gym && \
-    git clone --branch ${NEMO_GYM_BRANCH} \
-        https://github.com/NVIDIA-NeMo/Gym.git \
-        /opt/nemo-rl/3rdparty/Gym-workspace/Gym
+# Bake one venv per Gym component. Driving the CLI from the actor venv is what
+# makes Gym pin each component to that interpreter's ray== and python_version().
+# Gym's vllm==0.20.0 defaults to a cu12 wheel; override to cu130 to match torch.
+RUN <<"EOF" bash -eux
+case "${TARGETARCH:-amd64}" in arm64) WHEEL_ARCH=aarch64 ;; *) WHEEL_ARCH=x86_64 ;; esac
+printf 'vllm @ https://github.com/vllm-project/vllm/releases/download/v%s/vllm-%s-cp38-abi3-manylinux_2_35_%s.whl\n' \
+    "${NEMO_GYM_VLLM_VERSION}" "${NEMO_GYM_VLLM_VERSION}" "${WHEEL_ARCH}" > /tmp/gym-vllm.txt
+export UV_TORCH_BACKEND="${NEMO_GYM_CUDA}" UV_OVERRIDE=/tmp/gym-vllm.txt UV_LINK_MODE=symlink
 
-# --- Pre-build Gym venv ------------------------------------------------------
-WORKDIR /opt/nemo-rl/3rdparty/Gym-workspace/Gym
-RUN /root/.local/bin/uv venv .venv --python 3.12 && \
-    . .venv/bin/activate && \
-    /root/.local/bin/uv sync --active --extra dev
+# Empty to start, so skip_venv_if_present can only reuse venvs from this build
+# (the shared vllm_model/agent ones), never a stale one.
+test -z "$(ls -A "${NEMO_GYM_VENV_DIR}" 2>/dev/null)"
 
-# Install finance-specific dependencies into Gym venv
-# uvicorn>=0.37.0 is required for timeout_worker_healthcheck support;
-# uv sync resolves from the parent nemo-rl workspace lock (0.35.0) instead
-# of the Gym lock, so we force the correct version here.
-RUN . .venv/bin/activate && \
-    /root/.local/bin/uv pip install aiohttp beautifulsoup4 "tavily==1.1.0" tenacity "uvicorn>=0.37.0"
+BAKE="${GYM_VENV}/bin/gym env start --model-type vllm_model +dry_run=true"
+BAKE="${BAKE} +uv_venv_dir=${NEMO_GYM_VENV_DIR} +skip_venv_if_present=true"
+BAKE="${BAKE} +policy_base_url=http://unset/v1 +policy_api_key=unset +policy_model_name=unset"
 
-# --- Symlink component venvs to the main Gym venv ---------------------------
-# Each NeMo-Gym component expects its own .venv/; symlinking avoids multi-GB
-# duplication and guarantees every component runs with the same packages.
-RUN for component in \
-      resources_servers/equivalence_llm_judge \
-      resources_servers/finance_sec_search \
-      responses_api_agents/simple_agent \
-      responses_api_agents/finance_agent \
-      responses_api_models/openai_model \
-      responses_api_models/vllm_model; do \
-        dir="/opt/nemo-rl/3rdparty/Gym-workspace/Gym/$component"; \
-        [ -d "$dir" ] && ln -sf /opt/nemo-rl/3rdparty/Gym-workspace/Gym/.venv "$dir/.venv"; \
-    done
+${BAKE} --resources-server equivalence_llm_judge
+${BAKE} --resources-server format_verification/freeform_formatting
+${BAKE} --resources-server finance_sec_search \
+    +search_judge_model_base_url=https://api.openai.com/v1 \
+    +search_judge_model_api_key=unset +search_judge_model_name=gpt-5-mini \
+    +tavily_api_key=null
 
-WORKDIR /
+rm -f /tmp/gym-vllm.txt
 
-# --- Install Gym into the NemoGym Ray venv ------------------------------------
-# The pre-built Ray venv from the base image is stale (built from the old Gym
-# submodule). Install the new Gym branch editable + all deps so the Ray actor
-# can import nemo_gym without missing modules (e.g. gprof2dot, pydot).
-RUN /root/.local/bin/uv pip install \
-      --python /opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym/bin/python \
-      -e /opt/nemo-rl/3rdparty/Gym-workspace/Gym
+# Gym calls uvicorn.run(timeout_worker_healthcheck=) (uvicorn>=0.37) but declares
+# no floor; assert so a resolver regression fails here, not at the first rollout.
+SEC_VENV="${NEMO_GYM_VENV_DIR}/resources_servers/finance_sec_search/.venv"
+test -d "$SEC_VENV"
+"$SEC_VENV/bin/python" -c "import inspect, uvicorn; \
+assert 'timeout_worker_healthcheck' in inspect.signature(uvicorn.run).parameters, uvicorn.__version__; \
+print('uvicorn', uvicorn.__version__, 'OK')"
+EOF
 
-# --- Align numpy across all Ray venvs to match the main venv ----------------
-# NeMo-Skills may upgrade numpy; mismatched versions cause pickle failures
-# when Ray serializes data between the main process and worker processes.
-RUN MAIN_NP=$(/opt/nemo_rl_venv/bin/python -c "import numpy; print(numpy.__version__)") && \
-    for venv in /opt/ray_venvs/*/; do \
-      "$venv/bin/pip" install --no-cache-dir "numpy==$MAIN_NP" 2>/dev/null || true; \
-    done
+WORKDIR /opt/nemo-rl
+RUN python tools/generate_fingerprint.py > /opt/nemo_rl_container_fingerprint
 
-# --- Relocate /root/.local/ → /opt/ -----------------------------------------
-# enroot/pyxis on Slurm mounts the user's home directory over /root at runtime,
-# which shadows everything uv installed there during the Docker build.
-# NOTE: Do NOT move /root/.cache/uv — base-image venvs symlink into it.
-RUN REAL_PYTHON=$(readlink /opt/nemo_rl_venv/bin/python) && \
-    mv /root/.local/share/uv/python /opt/uv-python && \
-    find /opt/uv-python -maxdepth 1 -type l | while read link; do \
-      target=$(readlink "$link") && \
-      new_target=$(echo "$target" | sed "s|/root/.local/share/uv/python|/opt/uv-python|") && \
-      ln -sf "$new_target" "$link"; \
-    done && \
-    NEW_PYTHON=$(echo "$REAL_PYTHON" | sed "s|/root/.local/share/uv/python|/opt/uv-python|") && \
-    ln -sf "$NEW_PYTHON" /opt/nemo_rl_venv/bin/python && \
-    sed -i "s|/root/.local/share/uv/python|/opt/uv-python|g" /opt/nemo_rl_venv/pyvenv.cfg && \
-    mv /root/.local/bin /opt/uv-bin
+# ===========================================================================
+# Security hardening (mirrors Dockerfile.vllm)
+# ===========================================================================
+# Keep headers installed: triton and TransformerEngine JIT-compile at run time.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
-# --- Fix pre-built Ray venvs (same /root/ relocation) -----------------------
-RUN for cfg in /opt/ray_venvs/*/pyvenv.cfg; do \
-      sed -i "s|/root/.local/share/uv/python|/opt/uv-python|g" "$cfg"; \
-    done && \
-    find /opt/ray_venvs/ -type l | while read link; do \
-      target=$(readlink "$link") && \
-      case "$target" in */root/.local/share/uv/python*) \
-        new_target=$(echo "$target" | sed "s|/root/.local/share/uv/python|/opt/uv-python|") && \
-        ln -sf "$new_target" "$link" ;; \
-      esac; \
-    done
+# ray_dist.jar: jackson-databind RCE CVE-2026-54512/CVE-2026-54513, Ray-Java
+# unused. Most copies are venv symlinks into the uv cache, so the cache holds the
+# only real file and must be searched -- but never delete the cache itself, which
+# the worker venvs symlink into for everything else.
+RUN find /usr/local /opt /root/.cache/uv -name 'ray_dist.jar' -delete 2>/dev/null; \
+    ! find /usr/local /opt /root/.cache/uv -name 'ray_dist.jar' 2>/dev/null | grep -q . && \
+    /opt/nemo_rl_venv/bin/python -c "import ray; print('ray OK', ray.__version__)"
 
-# --- Fix Gym venv (same /root/ relocation) ----------------------------------
-RUN GYM_VENV=/opt/nemo-rl/3rdparty/Gym-workspace/Gym/.venv && \
-    sed -i "s|/root/.local/share/uv/python|/opt/uv-python|g" "$GYM_VENV/pyvenv.cfg" && \
-    find "$GYM_VENV" -type l | while read link; do \
-      target=$(readlink "$link") && \
-      case "$target" in */root/.local/share/uv/python*) \
-        new_target=$(echo "$target" | sed "s|/root/.local/share/uv/python|/opt/uv-python|") && \
-        ln -sf "$new_target" "$link" ;; \
-      esac; \
-    done
-
-# --- Runtime environment -----------------------------------------------------
-ENV VIRTUAL_ENV=/opt/nemo_rl_venv
-ENV PATH=/opt/uv-bin:/opt/nemo_rl_venv/bin:$PATH
-ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
+# Ray refuses to join a cluster on a different Ray or Python version. numpy is
+# gated only in the actor venvs, which exchange pickled arrays; Gym components
+# talk HTTP/orjson, so a difference there is reported, not fatal.
+RUN <<"EOF" bash -eux
+ref() { /opt/nemo_rl_venv/bin/python -c "import $1 as m, platform; print(m.__version__)"; }
+REF_PY=$(/opt/nemo_rl_venv/bin/python -c "import platform; print(platform.python_version())")
+REF_RAY=$(ref ray); REF_NP=$(ref numpy)
+FOUND=0
+for py in /opt/ray_venvs/*/bin/python "${NEMO_GYM_VENV_DIR}"/*/*/.venv/bin/python; do
+    [ -x "$py" ] || continue
+    FOUND=$((FOUND + 1))
+    got() { "$py" -c "import $1 as m; print(m.__version__)" 2>/dev/null || true; }
+    V=$("$py" -c "import platform; print(platform.python_version())")
+    [ "$V" = "$REF_PY" ] || { echo "python skew: $py is $V, want $REF_PY"; exit 1; }
+    RAY=$(got ray)
+    [ -z "$RAY" ] || [ "$RAY" = "$REF_RAY" ] || { echo "ray skew: $py has $RAY, want $REF_RAY"; exit 1; }
+    NP=$(got numpy)
+    case "$py" in
+      /opt/ray_venvs/*) [ -z "$NP" ] || [ "$NP" = "$REF_NP" ] || \
+          { echo "numpy skew: $py has $NP, want $REF_NP"; exit 1; } ;;
+      *) [ -z "$NP" ] || [ "$NP" = "$REF_NP" ] || echo "note: gym venv $py numpy $NP vs $REF_NP" ;;
+    esac
+done
+[ "$FOUND" -gt 0 ] || { echo "no venvs inspected"; exit 1; }
+echo "python ${REF_PY} / ray ${REF_RAY} consistent across ${FOUND} venvs; numpy ${REF_NP} in actor venvs"
+EOF

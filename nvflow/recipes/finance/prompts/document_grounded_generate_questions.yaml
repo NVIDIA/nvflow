@@ -20,20 +20,37 @@ user: |-
   Your task is to propose the most important questions an analyst should ask based on the provided content.
 
   Requirements:
-  1. The questions MUST be relevant to ALL provided sections/documents. If multiple sections are provided, the questions should relate to all of them (e.g., via comparison, common trends, or synthesized insights).
-  2. You must generate exactly 3 questions for EACH of the following four categories:
-     - Comparison and Trend Analysis
-     - Ratio Analysis
-     - Risk Factors
-     - Analyst Insights
-  3. Respond ONLY with a valid JSON object. Do not include any other text or markdown formatting.
+  1. Every question MUST be answerable from the provided content. When multiple sections/documents are provided, prefer questions that span them (comparison, common trends, synthesized insights); single-section lookups are acceptable for the retrieval categories below.
+  2. You must generate exactly 2 questions for EACH of the following twelve categories. Make the two questions within a category distinct from each other, and keep every question aligned with its category's intent:
+     - Comparison and Trend Analysis: compare metrics across periods, companies, or segments and surface trends over time.
+     - Ratio Analysis: compute or interpret financial ratios (liquidity, profitability, leverage, efficiency).
+     - Risk Factors: identify and assess business, market, regulatory, or financial risks disclosed.
+     - Analyst Insights: higher-level interpretive takeaways, implications, or recommendations an analyst would draw.
+     - Adjustments: non-GAAP adjustments, restatements, one-time/non-recurring items, and reconciliations.
+     - Beat or Miss: whether results beat or missed guidance, estimates, or prior periods, and by how much.
+     - Complex Retrieval: multi-step lookups that require combining several facts or sections to answer.
+     - Financial Modeling Projections: forward-looking estimates, forecasts, and projection-oriented questions.
+     - Market Analysis: competitive landscape, market position, demand drivers, and macro/industry context.
+     - Numerical Reasoning: multi-step quantitative calculations beyond simple ratios (e.g., growth rates, margins, aggregations).
+     - Simple Retrieval Qualitative: direct lookup of a single qualitative fact stated in the text.
+     - Simple Retrieval Quantitative: direct lookup of a single specific number or figure stated in the text.
+  3. Every question MUST be self-contained. Explicitly name the company it concerns (use the ticker/company name from the document) and the fiscal period or year it refers to. For comparison questions spanning two companies or two periods, name BOTH companies and BOTH periods. Do NOT rely on unstated context: never write "the company", "this period", "the firm", etc.
+  4. Respond ONLY with a valid JSON object. Do not include any other text or markdown formatting.
 
   Output Format:
   {{
-    "Comparison_and_Trend_Analysis": ["question 1", "question 2", "question 3"],
-    "Ratio_Analysis": ["question 1", "question 2", "question 3"],
-    "Risk_Factors": ["question 1", "question 2", "question 3"],
-    "Analyst_Insights": ["question 1", "question 2", "question 3"]
+    "Comparison_and_Trend_Analysis": ["question 1", "question 2"],
+    "Ratio_Analysis": ["question 1", "question 2"],
+    "Risk_Factors": ["question 1", "question 2"],
+    "Analyst_Insights": ["question 1", "question 2"],
+    "Adjustments": ["question 1", "question 2"],
+    "Beat_or_Miss": ["question 1", "question 2"],
+    "Complex_Retrieval": ["question 1", "question 2"],
+    "Financial_Modeling_Projections": ["question 1", "question 2"],
+    "Market_Analysis": ["question 1", "question 2"],
+    "Numerical_Reasoning": ["question 1", "question 2"],
+    "Simple_Retrieval_Qualitative": ["question 1", "question 2"],
+    "Simple_Retrieval_Quantitative": ["question 1", "question 2"]
   }}
 
   Document: {context}

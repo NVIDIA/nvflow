@@ -1,12 +1,14 @@
 # ============================================================================
-# Qwen3-4B GRPO Training — finance_sec_search (Megatron, 64 GPUs)
+# Qwen3-4B GRPO Training — finance_sec_search (Megatron, 16 GPUs)
 # ============================================================================
 # Single-environment config for finance_sec_search GRPO training.
 # Uses Megatron backend (required for YaRN context extension to 131K).
 #
-# Usage:
-#   uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml
-#   uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml
+# Usage -- `-e finance_sec_search` is REQUIRED. environments here merges with
+# base.yaml rather than replacing it, so omitting -e trains all three jointly
+# (equivalence_llm_judge+mcqa+finance_sec_search).
+#   uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
+#   uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
 #
 # Pre-requisites:
 #   Run data prep + rollouts + split from qwen3_4b.yaml first:
@@ -37,7 +39,7 @@ _rope_scaling_131k: &rope_scaling_131k
 # ============================================================================
 _judge_vllm: &judge_vllm
   model_path: /hf_models/openai/gpt-oss-120b
-  num_gpus: 2
+  num_gpus: 4                             # QOS MinTRES = gres/gpu=4 (min per job)
   server_nodes: 1
   max_model_len: 32768
   async_scheduling: true
@@ -51,8 +53,8 @@ environments:
     raw_train_data: ${base_output_dir}/step-0-validate-questions/finance_sec_search
     config_paths:
       - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
-      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
-      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_demo.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_demo.yaml
     policy_vllm:
       num_gpus: 4
       max_model_len: 131072
@@ -69,7 +71,7 @@ stages:
     model_name: Qwen/Qwen3-4B
     hf_checkpoint_path: ${hf_model_path}
     backend: megatron
-    total_gpus: 64
+    total_gpus: 16
     dependent_jobs: 0
     preset: "grpo-base"
 
@@ -96,8 +98,8 @@ stages:
               reasoning_parser: qwen3
         train_global_batch_size: 128
 
-        # Megatron: TP=2, CP=8 → model_parallel=16, DP = 64/16 = 4
-        # CP=8 keeps per-rank tokens at 16K (131K/8), halving logits vs CP=4.
+        # TP=2, CP=8 → MP=16, DP=1 (demo, 16 GPUs). CP=8 shards 131K to 16K/rank.
+        # Bump total_gpus to 64 for DP=4 on a full run.
         megatron_cfg:
           tensor_model_parallel_size: 2
           pipeline_model_parallel_size: 1
@@ -123,20 +125,36 @@ stages:
 
   eval:
     eval_steps: [20]
-    checkpoint_path: ${directories.step-8-training}/finance_sec_search/grpo-qwen3-4b-64g-tp2-cp8-seq128k
+    # Run-dir name from rl/training.py; total_gpus interpolated so demo/full tracks it.
+    checkpoint_path: ${directories.step-8-training}/finance_sec_search/grpo-qwen3-4b-${stages.training.total_gpus}g-tp2-cp8-seq128k
     eval_output_dir: ${directories.step-9-eval}/finance_sec_search
     base_output_dir: ${model_output_dir}/finance_sec_search
     format: megatron
     base_model: ${hf_model_path}
     server_type: vllm
     gpus: 4
+    # Local vLLM judge (keeps the quick-start air-gapped; production GRPO
+    # configs inherit the gpt-5 judge from workflows/eval/base.yaml).
+    judge:
+      model: /hf_models/openai/gpt-oss-120b
+      server_type: vllm
+      server_address: null
+      server_gpus: 4                       # QOS MinTRES = gres/gpu=4 (min per job)
+      server_nodes: 1
+      server_args: "--max-model-len 32768 --async-scheduling"
+      extra_args: >-
+        ++prompt_config=nvflow/recipes/finance/prompts/sec_judge.yaml
+        ++inference.temperature=0.0
+        ++inference.tokens_to_generate=8192
+        ++generation_key=judgement
+        ++skip_extraction=True
     benchmarks:
       secque:
         seeds: 5
       financebench:
         seeds: 5
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.temperature=0.6
       ++inference.top_p=0.95
       ++inference.top_k=20

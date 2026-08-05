@@ -24,11 +24,11 @@ judge:
   model: /hf_models/openai/gpt-oss-120b
   server_type: vllm
   server_address: null
-  server_gpus: 2
+  server_gpus: 4          # whole node: some clusters enforce a per-job GRES minimum (e.g. GB200 gpu:4)
   server_nodes: 1
   server_args: "--max-model-len 32768 --async-scheduling"
   extra_args: >-
-    ++prompt_config=/workspace/nvflow/recipes/finance/prompts/sec_judge.yaml
+    ++prompt_config=nvflow/recipes/finance/prompts/sec_judge.yaml
     ++inference.temperature=0.0
     ++inference.tokens_to_generate=8192
     ++generation_key=judgement
@@ -50,7 +50,7 @@ benchmarks:
 stages:
   prepare_data:
     dataset_names: [secque, financebench]
-    output_dir: /workspace/nvflow/recipes/finance/datasets
+    output_dir: /workspace/outputs/finance/eval-datasets
 
 models:
   qwen3-4b:
@@ -58,7 +58,7 @@ models:
     server_type: vllm
     dependencies: [prepare_data]
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.temperature=0.6
       ++inference.top_p=0.95
       ++inference.top_k=20
@@ -74,7 +74,7 @@ models:
     dependencies: [prepare_data]
     # Max output context is 8192 tokens (hard limit: https://huggingface.co/google/gemma-3-4b-it)
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.tokens_to_generate=8192
     server_args: "--max-model-len 40960 --async-scheduling --tensor-parallel-size 2"
     gpus: 4
@@ -85,7 +85,7 @@ models:
     server_type: vllm
     dependencies: [prepare_data]
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.tokens_to_generate=32768
       ++chat_template_kwargs.reasoning_effort=high
     server_args: "--max-model-len 65536 --async-scheduling --tensor-parallel-size 4"

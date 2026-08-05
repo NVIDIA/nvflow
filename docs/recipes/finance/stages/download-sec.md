@@ -2,12 +2,13 @@
 
 Technical reference for the download-sec workflow stage.
 
-## Stage: sap-500 / demo
+## Stage: smoke / demo / sap-500
 
 **File:** `nvflow/recipes/finance/stages/download/download_sec_filings.py`
-**Registry:** `recipe="finance"`, `workflow="download-sec"`, `stage="sap-500"` and `stage="demo"`
+**Registry:** `recipe="finance"`, `workflow="download-sec"`, `stage="smoke"`, `stage="demo"` and `stage="sap-500"`
 
-> **Note:** Both `sap-500` and `demo` stages use the same implementation but load different configuration files:
+> **Note:** All three stages share one implementation and differ only in the ticker config they load:
+> - `smoke`: 2 companies, 1 year — for pipeline smoke tests
 > - `demo`: 7 companies (NVDA, AAPL, GOOG, MSFT, CSCO, META, IBM) with 10-K and 10-Q forms (2020-2024)
 > - `sap-500`: 500+ S&P 500 companies with 10-K, 10-Q, and 8-K forms
 

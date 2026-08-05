@@ -36,7 +36,7 @@ NRL_PYTHON_PREAMBLE = (
     "if [ -x /opt/nemo_rl_venv/bin/python ]; then "
     "  NRL_PYTHON=/opt/nemo_rl_venv/bin/python; "
     "else "
-    "  export UV_PROJECT=/opt/NeMo-RL; "
+    "  export UV_PROJECT=/opt/nemo-rl; "
     '  NRL_PYTHON="uv run --active python"; '
     "fi"
 )
@@ -54,7 +54,7 @@ def ray_venv_python_preamble(venv_path: str, uv_extra: str) -> str:
         f"if [ -x {venv_path} ]; then "
         f"  CONVERT_PYTHON={venv_path}; "
         f"else "
-        f"  export UV_PROJECT=/opt/NeMo-RL; "
+        f"  export UV_PROJECT=/opt/nemo-rl; "
         f'  CONVERT_PYTHON="uv run --extra {uv_extra} python"; '
         f"fi"
     )

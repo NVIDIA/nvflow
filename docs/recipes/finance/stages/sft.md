@@ -204,7 +204,7 @@ Group training examples by total sequence length (input + output tokens) to redu
 | `input_file` | path | Training data from train_validation_split | Required |
 | `output_dir` | path | Directory for grouped/bucketed data | Required |
 | `tokenizer_path` | path | Tokenizer for computing lengths (optional if pre-computed) | None |
-| `bucket_sizes` | list | Token length boundaries for buckets | `[16000, 32000, 64000]` |
+| `bucket_sizes` | list | Token length boundaries for buckets | `[16000, 24000, 32000, 48000]` |
 
 ### Bucket Configuration
 
@@ -255,42 +255,67 @@ Fine-tune the language model on financial Q&A data using supervised learning.
 
 ### Inputs
 
+Training uses NeMo-RL's config schema: pick a `preset`, then patch it through `overrides`, which is passed to NeMo-RL nested and unflattened.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `model_name_or_path` | path | Base model to fine-tune |
-| `train_file` | path | Training data |
-| `val_file` | path | Validation data |
-| `output_dir` | path | Directory for checkpoints and logs |
-| `num_train_epochs` | int | Number of training epochs (default: 3) |
-| `learning_rate` | float | Learning rate (default: 2e-5) |
-| `per_device_train_batch_size` | int | Batch size per GPU (default: 4) |
-| `gradient_accumulation_steps` | int | Gradient accumulation (default: 8) |
-| `save_steps` | int | Checkpoint save frequency (default: 500) |
-| `eval_steps` | int | Evaluation frequency (default: 500) |
+| `model_name` | string | Model identifier, e.g. `Qwen/Qwen3-14B` |
+| `hf_checkpoint_path` | path | Base model on disk, e.g. `/hf_models/Qwen/Qwen3-14B` |
+| `backend` | string | `megatron` or `dtensor` |
+| `total_gpus` | int | GPUs for the job; data parallelism is derived from it |
+| `dependent_jobs` | int | Extra chained jobs, for training longer than one time limit |
+| `preset` | string | Base config to start from, e.g. `sft-base` |
+| `overrides` | dict | Nested patch over the preset, grouped into `sft`, `checkpointing`, `policy` and `data` |
+
+Commonly overridden keys:
+
+| Key | Description |
+|-----|-------------|
+| `sft.max_num_epochs` | Number of epochs |
+| `sft.val_period` | Validate every N steps |
+| `checkpointing.save_period` | Save every N steps |
+| `checkpointing.keep_top_k` | Checkpoints to retain |
+| `policy.train_global_batch_size` | Global batch size |
+| `policy.train_micro_batch_size` | Per-rank micro batch |
+| `policy.max_total_sequence_length` | Sequence budget |
+| `policy.megatron_cfg.*` | Parallelism (`tensor_model_parallel_size`, `context_parallel_size`, …) |
+| `policy.megatron_cfg.optimizer.lr` | Learning rate |
 
 ### Training Configuration
 
 ```yaml
-training:
-  learning_rate: 2e-5
-  global_batch_size: 128
-  max_num_epochs: 5
+stages:
+  training:
+    model_name: Qwen/Qwen3-14B
+    hf_checkpoint_path: /hf_models/Qwen/Qwen3-14B
+    backend: megatron
+    total_gpus: 256
+    preset: "sft-base"
+    overrides:
+      sft:
+        max_num_epochs: 3
+      policy:
+        train_global_batch_size: 128
+        max_total_sequence_length: 49152
+        megatron_cfg:
+          tensor_model_parallel_size: 4
+          context_parallel_size: 8
+          optimizer:
+            lr: 5e-6
 ```
 
 ### Outputs
 
 ```
-${output_dir}/
+${output_dir}/model-{model}-{total_gpus}g-tp{tp}-pp{pp}-cp{cp}-seq{seq}k/
 ├── checkpoints/
-│   ├── checkpoint-500/
-│   ├── checkpoint-1000/
-│   ├── checkpoint-1500/
-│   └── final/              # ← Final model
-├── logs/
-│   └── training.log
-├── runs/                   # Tensorboard logs
-└── training_args.json
+│   ├── step_10/
+│   └── step_20/
+├── training-logs/
+└── run_metadata_*.yaml
 ```
+
+Checkpoints are step-numbered; there is no `final/` directory. The `eval` stage converts a chosen step to HuggingFace format when it needs one.
 
 ### Resources
 
@@ -401,24 +426,20 @@ Convert Qwen3 chat-templated training data to OpenAI messages format. Parses Qwe
 
 ## Common Training Parameters
 
+All of these live under `overrides` in the training stage.
+
 ### Learning Rate
 
-| Model Size | Recommended LR |
-|------------|----------------|
-| 7-14B | 2e-5 |
-| 32B | 1e-5 |
-| 70B+ | 5e-6 |
+Set at `policy.megatron_cfg.optimizer.lr`. The shipped configs use `5e-6` with `min_lr: 5e-7`, cosine decay, and warmup from `1e-7`. Treat `5e-6` as the starting point rather than scaling by model size.
 
 ### Batch Size
 
-Effective batch size = `per_device_train_batch_size` × `gradient_accumulation_steps` × `total_gpus`
-
-Recommended: 32-128 for most models
+`policy.train_global_batch_size` is the global batch, and `policy.train_micro_batch_size` the per-rank micro batch; gradient accumulation is derived from the two together with the data-parallel width. The production 14B config uses `128` global and `1` micro.
 
 ### Checkpointing
 
-- **save_steps**: 500-1000 (more frequent for smaller datasets)
-- **save_total_limit**: 3-5 (keep only recent checkpoints to save space)
-- **eval_steps**: Same as save_steps
+- **`checkpointing.save_period`**: save every N steps — `100` for full training, `10` in the demo
+- **`checkpointing.keep_top_k`**: checkpoints to retain
+- **`sft.val_period`**: validate every N steps
 
 See [SFT Workflow](../workflows/04-sft.md) for usage examples and configuration details.

@@ -133,8 +133,9 @@ def convert_checkpoint(
     # Import here to avoid loading nemo-rl when not needed
     from nemo_rl.models.megatron.community_import import export_model_from_megatron
 
-    # Note: hf_overrides is not passed due to nemo-rl 0.7.1 bug.
-    # The bug is patched via installation_command in eval/base.yaml.
+    # hf_overrides is not passed here. Per-model HF config overrides (e.g. YaRN
+    # rope_scaling) are applied at serve time instead, via the model overlay
+    # directory built by nvflow/lib/rl/create_overlay.py.
     input_path = weights_path / "iter_0000000"
     export_model_from_megatron(
         hf_model_name=model_name,
@@ -323,7 +324,7 @@ if ls "$MODEL_DIR"/shard-*.safetensors 1>/dev/null 2>&1; then
     fi
 
     {ray_venv_python_preamble(DTENSOR_V2_VENV_PYTHON, "automodel")}
-    $CONVERT_PYTHON /opt/NeMo-RL/3rdparty/Automodel-workspace/Automodel/tools/offline_hf_consolidation.py \\
+    $CONVERT_PYTHON /opt/nemo-rl/3rdparty/Automodel-workspace/Automodel/tools/offline_hf_consolidation.py \\
         --model-name unused \\
         --input-dir "$MODEL_DIR" \\
         --output-dir "$HF_OUTPUT"
@@ -335,7 +336,7 @@ else
     echo "Converting: $STEP_DIR -> $HF_OUTPUT"
 
     {ray_venv_python_preamble(DTENSOR_V1_VENV_PYTHON, "fsdp")}
-    cd /opt/NeMo-RL
+    cd /opt/nemo-rl
     $CONVERT_PYTHON examples/converters/convert_dcp_to_hf.py \\
         --config="$STEP_DIR/config.yaml" \\
         --dcp-ckpt-path="$WEIGHTS_DIR" \\

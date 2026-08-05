@@ -1,0 +1,11 @@
+set -e
+echo "Filter Training Data (reward-variance difficulty)"
+PYTHONPATH=/nemo_run/code python3 -m nvflow.recipes.finance.utils.rl.filter_training_data \
+    "/in/train.jsonl" \
+    "/out/rollout/aggregate/difficulty.jsonl" \
+    "/out" \
+    --min-reward-std 1e-06 \
+    --train-filename "train.jsonl" \
+    --val-filename "validation.jsonl" \
+    --report-filename "filter_report.json"
+echo "Done. Filtered data in /out/"

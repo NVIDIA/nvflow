@@ -566,9 +566,9 @@ class SFTStage(BaseStage):
         cmd = (
             f"{NRL_PYTHON_PREAMBLE} && "
             f"{config_snippet} && "
-            f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/NeMo-RL && "
+            f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/nemo-rl && "
             f"echo 'Starting training' && "
-            f"$NRL_PYTHON /opt/NeMo-RL/examples/run_sft.py "
+            f"$NRL_PYTHON /opt/nemo-rl/examples/run_sft.py "
             f"  --config {config_path}"
             f"  ++policy.model_name={hf_model}"
             f"  ++cluster.gpus_per_node={prepared.num_gpus}"
@@ -580,7 +580,12 @@ class SFTStage(BaseStage):
 
         if prepared.backend == "megatron":
             cmd += " ++policy.dtensor_cfg.enabled=false ++policy.megatron_cfg.enabled=true"
-            cmd += " ++policy.optimizer=None ++policy.dynamic_batching.enabled=false"
+            # NeMo-RL >= bd8a540 types policy.optimizer as a dict, so a "=None"
+            # CLI override is parsed as the string 'None' and fails validation.
+            # Megatron uses policy.megatron_cfg.optimizer; the top-level
+            # policy.optimizer dict from the preset is ignored (matches the
+            # upstream reference sft.yaml, which keeps it populated).
+            cmd += " ++policy.dynamic_batching.enabled=false"
         else:
             cmd += " ++policy.dtensor_cfg.enabled=true ++policy.megatron_cfg.enabled=false"
 

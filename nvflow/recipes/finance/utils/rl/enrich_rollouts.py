@@ -37,12 +37,33 @@ Usage:
 
 import hashlib
 import json
+import os
 import sys
 import uuid as uuid_mod
 
 from nvflow.utils import setup_logger
 
 logger = setup_logger(__name__)
+
+
+def _atomic_write_jsonl(path: str, rows: list[dict]) -> None:
+    """Write *rows* to *path* atomically via ``tmp + os.replace``.
+
+    A process killed mid-write leaves only ``{path}.tmp`` behind, never a
+    truncated ``{path}``.  Critical when *path* is the SOURCE of truth on
+    a re-run: a partial overwrite of the merged rollouts file (or the
+    input file during deterministic UUID write-back) would lose data
+    under SIGKILL / OOM / node-failure.
+
+    Uses :func:`os.replace` which is atomic on POSIX provided tmp and
+    target share a mount; emitting tmp in the same directory as target
+    satisfies that requirement.
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    os.replace(tmp, path)
 
 
 def _extract_prompt(row: dict) -> str:
@@ -86,9 +107,10 @@ def _ensure_uuids(inputs: list[dict], input_file: str | None = None) -> int:
             generated += 1
 
     if generated and input_file:
-        with open(input_file, "w") as f:
-            for row in inputs:
-                f.write(json.dumps(row) + "\n")
+        # Atomic write: a SIGKILL between truncate and full re-write would
+        # otherwise leave the input file empty or partial, breaking the
+        # next run's UUID indexing (deterministic_uuid depends on row index).
+        _atomic_write_jsonl(input_file, inputs)
 
     return generated
 
@@ -136,18 +158,25 @@ def enrich(input_file: str, rollouts_file: str) -> None:
 
     matched = 0
     unmatched = 0
-    with open(rollouts_file, "w") as f:
-        for rollout in rollouts:
-            match = _find_input(rollout)
-            if match:
-                merged = {**match, **rollout}
-                if "uuid" in match:
-                    merged["uuid"] = match["uuid"]
-                matched += 1
-            else:
-                merged = rollout
-                unmatched += 1
-            f.write(json.dumps(merged) + "\n")
+    enriched: list[dict] = []
+    for rollout in rollouts:
+        match = _find_input(rollout)
+        if match:
+            merged = {**match, **rollout}
+            if "uuid" in match:
+                merged["uuid"] = match["uuid"]
+            matched += 1
+        else:
+            merged = rollout
+            unmatched += 1
+        enriched.append(merged)
+
+    # Atomic publish: write all enriched rows to a tmp file then rename.
+    # If killed mid-write, the original rollouts_file (the chunk-merge
+    # output) stays intact and the next merge run will re-enrich from
+    # the same input.  A non-atomic write would silently corrupt the
+    # merged data, since rollouts_file IS our source of rollouts.
+    _atomic_write_jsonl(rollouts_file, enriched)
 
     logger.info(
         "Enriched %d/%d rollouts (%d fields restored)", matched, len(rollouts), len(missing_keys)

@@ -31,7 +31,7 @@ benchmarks:
 stages:
   prepare_data:
     dataset_names: [secque]
-    output_dir: /workspace/nvflow/recipes/finance/datasets
+    output_dir: /workspace/outputs/finance/eval-datasets
 
 models:
   qwen3-4b:
@@ -39,7 +39,7 @@ models:
     server_type: vllm
     dependencies: [prepare_data]
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.temperature=0.6
       ++inference.top_p=0.95
       ++inference.top_k=20

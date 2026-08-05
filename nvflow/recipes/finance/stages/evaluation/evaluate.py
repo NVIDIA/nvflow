@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
-from nvflow.lib.vllm_compat import inject_server_entrypoint
 
 
 def _normalize_args(args: str | None) -> str:
@@ -45,13 +44,11 @@ def _normalize_args(args: str | None) -> str:
 
 
 def _build_stage_kwargs(config: dict, model_path: str = "") -> dict:
-    """Build stage_kwargs with server_args and gpt-oss aarch64 workaround."""
+    """Build stage_kwargs with server_args (plus optional server_entrypoint)."""
     kwargs: dict[str, str] = {"server_args": config.get("server_args", "")}
     if ep := config.get("server_entrypoint"):
         kwargs["server_entrypoint"] = ep
-    return inject_server_entrypoint(
-        kwargs, model_path
-    )  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
+    return kwargs
 
 
 def _load_eval_base_config() -> dict:
@@ -296,6 +293,15 @@ class _BaseFinanceEvaluator(BaseStage):
 
         if config.get("_conversion_type") == "dcp":
             hf_model_path, convert_log_dir = get_hf_output_paths(run_path, step)
+            # Mirror the megatron path below: default to a whole node so the job
+            # clears per-job GRES minimums (e.g. GB200 gpu:4). DCP convert only
+            # needs 1 GPU functionally, but must satisfy the cluster QOS.
+            if "num_gpus" in conversion_config:
+                dcp_num_gpus = conversion_config["num_gpus"]
+            else:
+                from nemo_skills.pipeline.utils import get_cluster_config
+
+                dcp_num_gpus = get_cluster_config(cluster).get("gpus_per_node", 8)
             conversion_job = _submit_dcp_conversion_job(
                 checkpoint_path=run_path_str,
                 step=step,
@@ -303,7 +309,7 @@ class _BaseFinanceEvaluator(BaseStage):
                 convert_log_dir=convert_log_dir,
                 cluster=cluster,
                 expname=expname,
-                num_gpus=conversion_config.get("num_gpus", 1),
+                num_gpus=dcp_num_gpus,
                 installation_command=conversion_config.get("installation_command"),
                 run_after=run_after,
             )
@@ -399,11 +405,14 @@ class _BaseFinanceEvaluator(BaseStage):
         num_jobs = config.get("num_jobs")
         single_node_mode = config.get("single_node_mode")
 
+        # datasets_dir is a self-contained data_dir: prepare_data writes
+        # <bench>/{__init__.py, eval.jsonl} here, so nemo-skills' data_dir fallback
+        # finds both with no repo mount (metric classes resolve via packaged nvflow).
         datasets_dir = config.get("datasets_dir")
         if not datasets_dir or not Path(datasets_dir).is_absolute():
             raise ValueError(
                 f"datasets_dir must be an absolute path, got: '{datasets_dir}'. "
-                "Example: datasets_dir: /workspace/nvflow/recipes/finance/datasets"
+                "Example: datasets_dir: /workspace/outputs/finance/eval-datasets"
             )
 
         # Step 3: Submit eval job
@@ -556,7 +565,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                 stage_config = {
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": base_config.get("judge"),
+                    "judge": config.get("judge", base_config.get("judge")),
                     "output_dir": f"{eval_output_dir}/final",
                     "rollouts": {
                         "model": model_path,
@@ -575,7 +584,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                 stage_config = {
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": base_config.get("judge"),
+                    "judge": config.get("judge", base_config.get("judge")),
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
                         "model": model_path,
@@ -594,7 +603,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                     "_conversion_type": "dcp",
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": base_config.get("judge"),
+                    "judge": config.get("judge", base_config.get("judge")),
                     "conversion": base_config.get("conversion", {}),
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
@@ -614,7 +623,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                     "_step": step,
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": base_config.get("judge"),
+                    "judge": config.get("judge", base_config.get("judge")),
                     "conversion": conversion_config,
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
@@ -641,7 +650,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
             baseline_config = {
                 "benchmarks": benchmarks_list,
                 "datasets_dir": base_config.get("datasets_dir"),
-                "judge": base_config.get("judge"),
+                "judge": config.get("judge", base_config.get("judge")),
                 "output_dir": f"{eval_output_dir}/baseline",
                 "rollouts": {
                     "model": baseline_model,

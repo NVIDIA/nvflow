@@ -1,5 +1,5 @@
 item_section,count
-10q_part1item1;10q_part1item1,42
-10q_part1item1;10q_part1item2,19
-10q_part1item2;10q_part1item1;10q_part1item1,1
-10q_part2item1,1
+10q_part1item1;10q_part1item1,100
+10q_part1item1;10q_part1item2,100
+10q_part1item2;10q_part1item1,100
+10q_part2item1,100

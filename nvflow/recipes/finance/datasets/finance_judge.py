@@ -40,7 +40,7 @@ class FinanceLLMJudgeConfig(GenerationTaskConfig):
     server: dict = field(default_factory=dict)
 
     # Judge prompt and output key
-    prompt_config: str = "/workspace/nvflow/recipes/finance/prompts/secque_judge"
+    prompt_config: str = "nvflow/recipes/finance/prompts/secque_judge"
     generation_key: str = "judgement"
     add_generation_stats: bool = False
 

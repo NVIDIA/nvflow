@@ -1,18 +1,54 @@
 # GRPO Stages Reference
 
-Technical reference for all 10 stages in the GRPO RL training workflow (9 active + 1 optional).
+Technical reference for the GRPO RL training workflow: 10 active stages plus `compute_rewards`, which is optional and commented out by default.
+
+> **Pass `-e <environment>`.** A model config's `environments` block *merges* with `grpo/base.yaml` rather than replacing it, and `base.yaml` declares three environments (`equivalence_llm_judge`, `mcqa`, `finance_sec_search`). Running a single-environment config without `-e` trains all three jointly, including `mcqa`, which is a placeholder with `raw_train_data: null` and is not runnable.
 
 ## Quick Navigation
 
-- [data_transformation](#data_transformation)
-- [apply_prompt_template](#apply_prompt_template)
-- [convert_to_responses_api](#convert_to_responses_api)
-- [train_validation_split](#train_validation_split)
-- [prepare_data](#prepare_data)
-- [collect_rollouts](#collect_rollouts)
-- [compute_rewards](#compute_rewards)
-- [training](#training)
-- [eval](#eval)
+Listed in execution order. `prefetch_cache` is optional and has no `step-N` directory.
+
+- [validate_questions](#validate_questions) — step 0
+- [data_transformation](#data_transformation) — step 1
+- [apply_prompt_template](#apply_prompt_template) — step 2
+- [convert_to_responses_api](#convert_to_responses_api) — step 3
+- [prepare_data](#prepare_data) — step 4
+- [prefetch_cache](#prefetch_cache) — optional
+- [collect_rollouts](#collect_rollouts) — step 5
+- [compute_rewards](#compute_rewards) — step 6, optional
+- [train_validation_split](#train_validation_split) — step 7
+- [training](#training) — step 8
+- [eval](#eval) — step 9
+
+---
+
+## validate_questions
+
+**File:** `nvflow/recipes/finance/stages/rl/validate_questions.py`
+**Registry:** `recipe="finance"`, `workflow="grpo"`, `stage="validate_questions"`
+
+### Purpose
+
+Drop structurally-broken SDG questions before they enter the pipeline, per environment, in two phases:
+
+1. **Regex prefilter (CPU).** Drops questions that say "the company" / "the firm" with no named company or ticker anywhere in the text. Deliberately narrow — recall over precision.
+2. **LLM classifier (GPU).** Asks a judge model (GPT-OSS-120B by default) for `VALID` / `INVALID` on each survivor. Parse failures default to `VALID`.
+
+The kept stream is written where `data_transformation` can read it, so a model config re-points `env.raw_train_data` at this stage's output.
+
+### Outputs
+
+```
+${step-0-validate-questions}/${env_name}/
+├── final_result.jsonl          # VALID records, consumed by data_transformation
+├── phase1_regex/               # prefiltered + dropped + stats (audit)
+└── phase2_llm/                 # raw generation, parsed tags, dropped, stats
+```
+
+### Resources
+
+- **Phase 1:** CPU only
+- **Phase 2:** GPU, for the judge model
 
 ---
 
@@ -154,7 +190,7 @@ Split data into training and validation sets using stratified sampling to mainta
 
 ### Purpose
 
-Run `ng_prepare_data` to stamp each JSONL record with an `agent_ref` field that tells NeMo-Gym which agent server to route the example to during training. Auto-generates an agent config overlay YAML from the workflow's `agents` list.
+Run `gym dataset collate` (formerly `ng_prepare_data`) to stamp each JSONL record with an `agent_ref` field that tells NeMo-Gym which agent server to route the example to during training. Auto-generates an agent config overlay YAML from the workflow's `agents` list.
 
 ### Inputs
 
@@ -171,7 +207,7 @@ Run `ng_prepare_data` to stamp each JSONL record with an `agent_ref` field that 
 
 ### Modes
 
-- **`train_preparation`**: Produces `train.jsonl` + `validation.jsonl`
+- **`train_preparation`**: Produces `train.jsonl`. Only a single `train` dataset is collated here; the train/validation split happens later, in [train_validation_split](#train_validation_split), on reward-filtered data.
 
 ### Agent Configuration
 
@@ -192,18 +228,51 @@ agents:
       - name: train
         type: train
         license: "TBD"
-        jsonl_fpath: ${directories.step-3-train-validation-split}/train.jsonl
+        jsonl_fpath: ${directories.step-3-convert-to-responses-api}/train.jsonl
 ```
 
 ### Outputs
 
 - `${output_dir}/agent_config_overlay.yaml` — Auto-generated agent config
-- `${output_dir}/train.jsonl` + `validation.jsonl` — with `agent_ref` routing fields
+- `${output_dir}/train.jsonl` — with `agent_ref` routing fields
 
 ### Resources
 
 - **Compute:** CPU only
 - **Runtime:** ~1 min
+
+---
+
+## prefetch_cache
+
+**File:** `nvflow/recipes/finance/stages/rl/prefetch_cache.py`
+**Registry:** `recipe="finance"`, `workflow="grpo"`, `stage="prefetch_cache"`
+
+### Purpose
+
+Optional CPU-only stage that populates the SEC filing metadata cache before rollout collection. Doing it here keeps SEC.gov calls out of the GPU-intensive rollout jobs and avoids races when several seeds share one cache directory.
+
+It runs per environment and processes only those whose config carries a `prefetch` block; the rest are skipped silently. In practice that means `finance_sec_search`.
+
+### Inputs
+
+Read from each environment's `prefetch` block:
+
+| Key | Description |
+|-----|-------------|
+| `script` | Upstream Gym prefetch script to run |
+| `cache_dir` | Where the cache is written |
+| `ticker_config` | Ticker set to prefetch |
+| `force` | Re-fetch even if the cache is populated (default `false`) |
+
+### Outputs
+
+The cache directory declared by the environment. For `finance_sec_search` this is `cache-finance-sec-search`, i.e. `${base_output_dir}/cache/finance_sec_search`, holding `filings/`, `filings_metadata/` and `tickers.json`.
+
+### Resources
+
+- **Compute:** CPU only
+- **Network:** needs SEC EDGAR access, so run it on a connected node
 
 ---
 
@@ -218,38 +287,57 @@ Collect model rollouts against a NeMo-Gym environment with reward scoring. Suppo
 
 ### Inputs
 
+Top-level keys are orchestration; rollout behaviour is nested under `rollout`.
+
 | Parameter | Type | Description | Default |
 |-----------|------|-------------|---------|
 | `output_dir` | path | Output directory | Required |
-| `gym_path` | path | Path to NeMo-Gym | Required |
-| `container` | string | Container name | Required |
-| `input_data` | path | Prepared JSONL from prepare_data | Required |
-| `agent_name` | string | Agent name (must match prepare_data) | Required |
-| `model_path` | path | Model to collect rollouts from | Required |
-| `nemo_gym_config_paths` | list | NeMo-Gym config paths | Required |
-| `num_repeats` | int | Repeats per sample | `1` |
-| `num_samples_in_parallel` | int | Concurrent requests | `4` |
+| `prepare_data_dir` | path | Collated data from `prepare_data` | Required |
+| `gym_path` | path | NeMo-Gym root inside the container | `/opt/Gym` |
+| `gym_uv_venv_dir` | path | Baked per-component venvs reused by `ng_run` | `/opt/gym-venvs` |
+| `container` | string | Rollout client + Gym env servers (CPU) | `nemo-gym` |
+| `postprocess_container` | string | Merge/analyze/aggregate/filter (CPU) | `nemo-skills` |
+| `vllm_container` | string | Policy and judge vLLM servers (GPU) | `vllm-grpo` |
+| `environments` | dict | Environments to collect for | `${environments}` |
+
+**`rollout`** — job fan-out and per-request settings:
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `num_samples_in_parallel` | int | Concurrent requests | `64` |
+| `max_num_samples` | int | Truncate to first N rows; `null` for all | `null` |
 | `num_chunks` | int | Split input into N parallel jobs | `1` |
-| `num_random_seeds` | int | Independent runs per chunk | `1` |
+| `num_random_seeds` | int | Independent runs per chunk | `8` |
 | `starting_seed` | int | First seed value | `0` |
-| `dependent_jobs` | int | Chain N+1 Slurm jobs per chunk via `afterany` for timeout recovery | `0` |
-| `responses_create_params` | dict | Pass-through params for NeMo-Gym (e.g., `max_output_tokens`) | `{}` |
+| `dependent_jobs` | int | Chain N+1 jobs per (seed, chunk) for timeout resume | `0` |
 | `rerun_done` | bool | Force re-execution | `false` |
-| `num_gpus` | int | GPUs per Slurm job | `8` |
-| `tensor_parallel_size` | int | Policy vLLM TP | `2` |
+| `responses_create_params` | dict | Per-request overrides, e.g. `max_output_tokens` | `{}` |
+
+**`rollout.policy_vllm`** — the policy server, shared across environments. `num_gpus`, `server_nodes`, `base_url` and `model_path` are orchestration-only; every other key becomes a `--key value` argument to `vllm serve`.
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `model_path` | path | Model to serve | Required, set in the model config |
+| `num_gpus` | int | Slurm GPUs for this endpoint; `0` with `base_url` for an external server | `2` |
+| `server_nodes` | int | Nodes for this vLLM; `>1` uses Ray | `1` |
 | `max_model_len` | int | Max sequence length | `32768` |
-| `vllm_base_url` | string | External vLLM URL (optional) | None |
+| `enable_auto_tool_choice` | bool | Required for tool-calling environments | `true` |
+| `tool_call_parser` | string | Tool-call parser | `hermes` |
+
+> **Don't set `tensor_parallel_size`.** It is derived from `num_gpus` and is silently ignored here.
 
 ### Judge Configuration
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `judge_model_path` | path | Local vLLM judge model |
-| `judge_tensor_parallel_size` | int | Judge TP size |
-| `judge_max_model_len` | int | Judge max sequence length |
-| `judge_openai_base_url` | string | External OpenAI API URL |
-| `judge_openai_model` | string | OpenAI model name |
-| `judge_openai_api_key` | string | API key override (defaults to `$OPENAI_API_KEY`) |
+The judge is configured **per environment**, not on the stage, because each environment decides whether it needs one:
+
+```yaml
+environments:
+  finance_sec_search:
+    judge_vllm:
+      num_gpus: 0          # 0 means no local judge -- override in the model config
+```
+
+Set `num_gpus` above zero to stand up a local judge vLLM for that environment, and use `responses_create_params` alongside it to override the shared rollout defaults.
 
 ### Execution Model
 
@@ -419,7 +507,7 @@ The stage validates parallelism before job submission:
 ### Outputs
 
 ```
-${output_dir}/grpo-{model}-{nodes}n-tp{tp}-cp{cp}-seq{seq}k/
+${output_dir}/grpo-{model}-{total_gpus}g-tp{tp}-cp{cp}-seq{seq}k/
 ├── checkpoints/
 │   ├── step_1/
 │   └── step_2/
@@ -427,12 +515,14 @@ ${output_dir}/grpo-{model}-{nodes}n-tp{tp}-cp{cp}-seq{seq}k/
 └── run_metadata_*.yaml          # Full config for reproducibility
 ```
 
+The directory name is built from the resolved layout, so `grpo-qwen3-4b-16g-tp2-cp1-seq32k` means 16 GPUs total, TP=2, CP=1 and a 32K sequence budget.
+
 ### Resources
 
 | Model Size | GPUs | Runtime (demo) |
 |------------|------|----------------|
-| 4B | 16 (2 nodes) | ~20 min |
-| 14B | 64 (8 nodes) | TBD |
+| 4B | 16 | ~20 min |
+| 30B-A3B | 64 | Longer; see `grpo/qwen3_30b_a3b.yaml` |
 
 ---
 
@@ -454,7 +544,7 @@ Also registered for the SFT workflow, making it a shared evaluation stage across
 | `eval_output_dir` | path | Output directory for evaluation results | Required |
 | `eval_steps` | list | Checkpoint steps to evaluate | `[]` |
 | `checkpoint_path` | path | Path to training checkpoints | Required |
-| `format` | string | Checkpoint format: `"hf"`, `"fsdp"`, `"megatron"` | `"fsdp"` (demo) / `"megatron"` (production) |
+| `format` | string | Checkpoint format; match the training backend: `"hf"`, `"fsdp"` (equivalence demo), `"megatron"` (finance_sec_search demo + production) | backend-dependent |
 | `baseline_model` | path | Baseline model for comparison evaluation | Optional |
 | `server_type` | string | Inference server type | `"vllm"` |
 | `gpus` | int | GPUs for inference server | `1` |

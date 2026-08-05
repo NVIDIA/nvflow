@@ -51,6 +51,9 @@ presets:
       val_at_start: true
       val_at_end: true
       seed: 42
+      # [FINANCE] Required by NeMo-RL >= bd8a540 schema. false = code default
+      # (unmask all assistant turns); matches prior implicit behavior.
+      only_unmask_final: false
 
     # ========================================================================
     # Checkpointing Configuration
@@ -75,7 +78,10 @@ presets:
       model_name: null                 # e.g., "Qwen/Qwen3-4B"
       tokenizer:
         name: ${policy.model_name}     # OmegaConf resolver -- resolved after ++policy.model_name override
-        chat_template: null            # Passthrough: our data has pre-formatted <|im_start|> tags
+        # Passthrough: our data has pre-formatted <|im_start|> tags. This is the
+        # explicit form of NeMo-RL's COMMON_CHAT_TEMPLATES.passthrough_prompt_response
+        # (what chat_template=null resolved to before the schema required a string).
+        chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"
         chat_template_kwargs: null
 
       train_global_batch_size: 128
@@ -157,6 +163,7 @@ presets:
         moe_token_dispatcher_type: "allgather"
         moe_shared_expert_overlap: false
         gradient_accumulation_fusion: false  # Required by v0.6.0 community_import.py
+        use_fused_weighted_squared_relu: false
         use_linear_ce_fusion_loss: false
         linear_ce_fusion_chunk_size: 256
 

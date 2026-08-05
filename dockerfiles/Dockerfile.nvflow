@@ -1,0 +1,151 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# NVFlow client (launcher) image -- the `nflow` CLI + baked venv for airgap use.
+#
+# Lean, unprivileged orchestration image: `nflow` submits Slurm jobs over an SSH
+# tunnel, so no Slurm client / munge / podman / enroot is needed inside. Worker
+# images stay as .sqsh on the cluster (referenced in my_cluster.yaml), not here.
+#
+# Requires a source with the tunnel-aware launcher (feature/finance-rl-grpo or
+# later); the v1.1.1 release cannot launch off-cluster over ssh_tunnel.
+#
+# Build from the repo root, on a committed tree (.baked_commit records HEAD).
+# .dockerignore drops cache/, .venv and secrets; .git is kept for hatch-vcs
+# versioning, then squashed to a single history-free commit so the image ships
+# no repo history. Single-arch, host platform; see docker_instructions.md for
+# multi-arch:
+#   docker build -f dockerfiles/Dockerfile.nvflow -t nvflow-client:v1.1.2 .
+#
+# Usage: see docs/remote-launch.md.
+# =============================================================================
+
+ARG PYTHON_VERSION=3.12
+# Pin the multi-arch Ubuntu 24.04 manifest so a rebuild cannot silently move to
+# a new OS release. The previous floating python:3.12-slim tag moved to Debian
+# 13 and introduced 17 CRITICAL + 40 HIGH OS-package findings per architecture.
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+
+# --- builder: resolve the venv (build tools stay out of the final image) -----
+FROM ${UBUNTU_IMAGE} AS builder
+ARG PYTHON_VERSION
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_INSTALL_DIR=/usr/local/bin \
+    UV_CACHE_DIR=/opt/uv-cache \
+    UV_PYTHON_PREFERENCE=only-system
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        "python${PYTHON_VERSION}" "python${PYTHON_VERSION}-venv" \
+        git curl ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv on a system path (not /root/.local) so it survives enroot's $HOME remap.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+COPY . /opt/nvflow
+WORKDIR /opt/nvflow
+# Record the baked commit for provenance, and hide it from git so the baked tree
+# stays clean (nemo-run packages via `git archive` of HEAD regardless).
+RUN git rev-parse HEAD > /opt/nvflow/.baked_commit 2>/dev/null || echo unknown > /opt/nvflow/.baked_commit && \
+    echo '.baked_commit' >> /opt/nvflow/.git/info/exclude
+
+# --frozen pins to the committed uv.lock; --no-dev skips the dev group (debugger).
+RUN uv venv .venv --python "$(command -v python${PYTHON_VERSION})" && \
+    uv sync --frozen --no-dev
+# Strip the vendored wandb "core" Go binary. wandb arrives transitively via
+# nemo-skills, but the launcher never calls wandb.init()/sync (only the Python
+# API is imported), so wandb-core is dead weight that vendors Go stdlib/grpc/
+# x-crypto CVEs (e.g. CVE-2025-68121, CVE-2026-33186) and dominates image scans.
+# Deleting the binary keeps the wandb Python package importable for nemo-skills.
+# Strip Ray's bundled Java jar (site-packages/ray/jars/ray_dist.jar). Ray arrives
+# transitively via nemo-skills; the launcher drives Ray purely through the Python
+# Ray Jobs API, so the Java jar is dead weight carrying the jackson-databind HIGH
+# CVEs (CVE-2026-54512 / CVE-2026-54513) plus other vendored Java libs
+# (guava/gson/jaxb). Removing the whole jars/ dir clears them without affecting Ray.
+RUN rm -rf /opt/uv-cache && \
+    rm -f /opt/nvflow/.venv/lib/python*/site-packages/wandb/bin/wandb-core && \
+    rm -rf /opt/nvflow/.venv/lib/python*/site-packages/ray/jars && \
+    find /opt/nvflow -depth -type d -name __pycache__ -exec rm -rf {} + && \
+    find /opt/nvflow -type f -name '*.pyc' -delete
+# Fail-fast: Ray must still import after the jar strip (Python Ray Jobs API intact).
+RUN /opt/nvflow/.venv/bin/python -c "import ray; print('ray OK after jar strip:', ray.__version__)"
+
+# Ship a history-free repo. hatch-vcs versioning already ran during `uv sync`
+# (static nvflow/_version.py written above), and nemo-run only needs
+# `git archive HEAD` (current tree) -- a distributed image must not carry repo
+# history. Replace the full .git with a single snapshot commit that reproduces
+# the EXACT original tracked set: capture `git ls-files` first, then re-add it
+# with --force so tracked-but-gitignored files (e.g. recipes/finance/data/
+# __init__.py, which drives stage auto-discovery) are preserved. Plain
+# `git add -A` respects .gitignore and would silently drop them, changing what
+# `git archive HEAD` ships to the compute nodes. The assertion guards this.
+RUN cd /opt/nvflow && \
+    git ls-files -z > /tmp/tracked && \
+    rm -rf .git && \
+    git init -q -b main && \
+    git -c user.email=release@nvidia.com -c user.name=nvflow add --pathspec-from-file=/tmp/tracked --pathspec-file-nul --force && \
+    git -c user.email=release@nvidia.com -c user.name=nvflow commit -q -m "nvflow baked release snapshot" && \
+    git ls-files -z | sort -z > /tmp/after && sort -z /tmp/tracked > /tmp/before && \
+    cmp -s /tmp/before /tmp/after && echo "snapshot tree == original tracked set" && \
+    rm -f /tmp/tracked /tmp/before /tmp/after
+
+# --- final: slim runtime = base + venv + source(.git snapshot) + launcher ------
+FROM ${UBUNTU_IMAGE}
+ARG PYTHON_VERSION
+ARG CA_CERTIFICATES_VERSION=20260601~24.04.1
+ARG GIT_VERSION=1:2.43.0-1ubuntu7.3
+ARG OPENSSH_CLIENT_VERSION=1:9.6p1-3ubuntu13.18
+ARG PYTHON_DEB_VERSION=3.12.3-1ubuntu0.15
+ARG RSYNC_VERSION=3.2.7-1ubuntu1.5
+LABEL org.opencontainers.image.title="nvflow-client" \
+      org.opencontainers.image.description="NVFlow launcher (nflow CLI) for airgap use"
+
+# Launcher runtime deps: git (nemo-run `git archive`), openssh-client (ssh_tunnel),
+# rsync (code sync to job_dir), ca-certificates, and the interpreter backing the
+# copied venv. Pin the security-updated Ubuntu packages: if an exact version
+# leaves the archive, fail the build for an intentional refresh instead of
+# silently accepting a vulnerable package set.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        "python${PYTHON_VERSION}=${PYTHON_DEB_VERSION}" \
+        "git=${GIT_VERSION}" \
+        "openssh-client=${OPENSSH_CLIENT_VERSION}" \
+        "rsync=${RSYNC_VERSION}" \
+        "ca-certificates=${CA_CERTIFICATES_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+# ssh_tunnel host-key handling. nemo-run authenticates the tunnel via paramiko
+# (given the key explicitly), but then rsyncs code with plain `ssh -i <key>`,
+# which reads known_hosts from $HOME/.ssh — NOT from the mounted /opt/ssh. On a
+# fresh container $HOME/.ssh is empty, so rsync dies with "Host key verification
+# failed". Point ssh at the *mounted* known_hosts and auto-accept a first-ever
+# connect (written back to the mounted dir, so it persists) — no manual priming.
+# System-wide via the ssh_config Include, so it holds for any HOME/uid, enroot or
+# docker, on-cluster or off. Deliberately no IdentityFile here: nemo-run passes
+# -i explicitly, and this stays agnostic to the user's key name.
+RUN printf 'Host *\n    UserKnownHostsFile /opt/ssh/known_hosts\n    StrictHostKeyChecking accept-new\n' \
+        > /etc/ssh/ssh_config.d/10-nvflow-tunnel.conf
+
+COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=builder /opt/nvflow /opt/nvflow
+
+# System gitconfig (not /root, which enroot remaps) so `git archive` doesn't trip
+# git's "dubious ownership" guard when the container runs as a mapped uid.
+RUN git config --system --add safe.directory /opt/nvflow
+
+# enroot ignores ENV PATH; symlink the nflow console script onto the default PATH.
+RUN ln -sf /opt/nvflow/.venv/bin/nflow /usr/local/bin/nflow
+
+# UV_OFFLINE + UV_NO_SYNC: `uv run nflow` runs in the baked venv with no network
+# and no pre-run sync (a sync would try to fetch the skipped dev group and fail).
+# NEMO_SKILLS_DISABLE_UNCOMMITTED_CHANGES_CHECK: the image bakes a fixed committed
+# snapshot; nemo-run packages HEAD via `git archive`, so its uncommitted-changes
+# gate is a false positive here (build artifacts like the venv make the tree look
+# dirty). Disabling it lets the launcher package the baked commit unattended.
+ENV VIRTUAL_ENV=/opt/nvflow/.venv \
+    PATH=/opt/nvflow/.venv/bin:/usr/local/bin:$PATH \
+    NEMO_SKILLS_CONFIG_DIR=/opt/nvflow/cluster_configs \
+    UV_CACHE_DIR=/tmp/uv-cache \
+    UV_OFFLINE=1 \
+    UV_NO_SYNC=1 \
+    NEMO_SKILLS_DISABLE_UNCOMMITTED_CHANGES_CHECK=1
+
+WORKDIR /opt/nvflow

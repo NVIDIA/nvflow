@@ -26,7 +26,7 @@
   server_gpus: null
   server_nodes: null
   extra_args: >-
-    ++prompt_config=/workspace/nvflow/recipes/finance/prompts/sec_judge.yaml
+    ++prompt_config=nvflow/recipes/finance/prompts/sec_judge.yaml
     ++inference.temperature=0.0
     ++inference.tokens_to_generate=8192
     ++generation_key=judgement
@@ -41,7 +41,7 @@ judge: *judge_reasoning
   server_gpus: null
   server_nodes: null
   extra_args: >-
-    ++prompt_config=/workspace/nvflow/recipes/finance/prompts/sec_judge_strict.yaml
+    ++prompt_config=nvflow/recipes/finance/prompts/sec_judge_strict.yaml
     ++inference.temperature=0.0
     ++inference.tokens_to_generate=8192
     ++generation_key=judgement
@@ -74,7 +74,7 @@ benchmarks:
 # Shared Settings
 # ============================================================================
 
-datasets_dir: /workspace/nvflow/recipes/finance/datasets
+datasets_dir: /workspace/outputs/finance/eval-datasets
 
 # All eval deps are in the nemo-skills container
 installation_command: "true"
@@ -92,6 +92,6 @@ stages:
     # finance_agent dataset prep disabled (benchmark disabled above).
     # Re-add finance_agent to this list when the benchmark is re-enabled.
     dataset_names: [secque, financebench]
-    output_dir: /workspace/nvflow/recipes/finance/datasets
+    output_dir: /workspace/outputs/finance/eval-datasets
     stage_kwargs:
       installation_command: "true"

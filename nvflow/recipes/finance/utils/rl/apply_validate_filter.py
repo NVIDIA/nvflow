@@ -18,14 +18,27 @@
 Reads the parsed JSONL produced by ``parse_validate_responses.py`` and
 splits it into two streams by the ``validate_tag`` field:
 
-- Records with ``validate_tag == keep_tag`` (default ``"VALID"``) go to
-  the kept output (normally ``final_result.jsonl``), which
-  ``data_transformation`` reads next.
-- Records with other tags go to the dropped output for audit.
+- Records with ``validate_tag == keep_tag`` (default ``"VALID"``) emit the
+  *original* SDG record (looked up by ``problem`` in the raw SDG JSONL)
+  to the kept output (normally ``final_result.jsonl``), which
+  ``data_transformation`` reads next.  validate_questions is a pure
+  row-filter: kept output bytes match the SDG input bytes for those rows.
+- Records with other tags go to the dropped output for audit, with the
+  nemo-skills "pollution" fields stripped.
 
 A stats JSON is also written with total / kept / dropped counts, the
 drop rate, and a non-fatal ``high_drop_warning`` flag.  Mirrors the SDG
 ``apply_answer_filter.py`` pattern.
+
+``raw_sdg_path`` is REQUIRED.  An older code path used to fall back to
+emitting the LLM-mutated record (with pollution stripped) when no SDG
+file was provided, but that path produced rows whose ``reasoning_content``
+came from the LLM provider rather than the SDG -- ``data_transformation``
+rejects those.  The fallback was unreachable in practice (the only
+caller, ``validate_questions.py``, has always passed ``--raw_sdg_source``)
+so it was removed in S1.  The CLI now requires ``--raw_sdg_source`` and
+the function raises :class:`MissingSdgRecordError` when a VALID row's
+``problem`` is absent from the SDG file (a clear caller-side bug).
 """
 
 import argparse
@@ -34,17 +47,14 @@ from pathlib import Path
 import orjson
 
 from nvflow.utils import setup_logger
+from nvflow.utils.jsonl import iter_jsonl, write_jsonl, write_stats_json
 
 logger = setup_logger(__name__)
 
-WRITE_BUFFER_SIZE = 1000
-
 # Non-SDG fields injected by nemo-skills generate() + the LLM provider +
-# our parse step.  Stripped before writing so the output preserves the
-# raw SDG schema (validate_questions is a pure row-filter).
-# ``reasoning_content`` is NOT here -- it's a legitimate SDG field that
-# gets overwritten by the LLM; the restore in apply_validate_filter puts
-# the SDG-original value back, so we must not strip it.
+# our parse step.  Stripped from the dropped audit stream so it stays
+# readable; the kept stream emits original SDG bytes verbatim and so
+# never sees pollution at all.
 _STRIP_FIELDS = frozenset(
     {
         "generation",  # LLM classifier "Reason: ... Answer: VALID" text
@@ -70,6 +80,20 @@ def _strip_pollution(row: dict) -> dict:
     return row
 
 
+class MissingSdgRecordError(KeyError):
+    """Raised when a kept row's ``problem`` is absent from the raw SDG file.
+
+    Indicates an inconsistency between the parsed Phase 2 JSONL and the
+    SDG file the caller pointed at -- e.g., the SDG file was regenerated
+    after Phase 1 ran, or the wrong ``raw_sdg_source`` was passed.
+
+    The historical code path silently emitted the LLM-mutated row when
+    this happened, producing data that ``data_transformation`` then
+    rejected with an opaque downstream error.  Failing fast here pins
+    the diagnostic to the apply step where the inconsistency originated.
+    """
+
+
 def _load_raw_sdg_records(raw_sdg_path: str) -> dict[str, bytes]:
     """Build ``{problem -> original_record_bytes}`` from the raw SDG file.
 
@@ -77,22 +101,29 @@ def _load_raw_sdg_records(raw_sdg_path: str) -> dict[str, bytes]:
     identical to input records, just fewer of them.  We index original
     records by ``problem`` so that apply_validate_filter can emit the
     original record (unchanged) for each VALID verdict.
+
+    The stored bytes are the stripped line contents WITHOUT a trailing
+    newline -- ``write_jsonl`` adds the line terminator on flush.
     """
     problem_to_record: dict[str, bytes] = {}
+    # ``yield_error`` so we silently skip malformed lines (matches the
+    # historical behaviour) without giving up the raw bytes for valid
+    # rows. Re-open the file in raw byte mode to recover the source bytes
+    # for each yielded row, since iter_jsonl only yields the parsed dict.
     with open(raw_sdg_path, "rb") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        for raw_line in f:
+            stripped = raw_line.strip()
+            if not stripped:
                 continue
             try:
-                obj = orjson.loads(line)
+                obj = orjson.loads(stripped)
             except orjson.JSONDecodeError:
                 continue
             problem = obj.get("problem")
             if not problem:
                 continue
             if problem not in problem_to_record:
-                problem_to_record[problem] = line
+                problem_to_record[problem] = stripped
     return problem_to_record
 
 
@@ -101,28 +132,32 @@ def apply_validate_filter(
     output_kept: str,
     output_dropped: str,
     stats_file: str,
+    raw_sdg_path: str,
     keep_tag: str = "VALID",
     high_drop_threshold: float = 0.20,
-    raw_sdg_path: str | None = None,
 ) -> dict:
     """Split records by ``validate_tag`` into kept / dropped streams.
 
     Args:
         input_file: JSONL with ``validate_tag`` field on each row.
         output_kept: JSONL receiving ``keep_tag`` records (default VALID).
+            Each kept row is the ORIGINAL SDG record bytes -- pure row-filter.
         output_dropped: JSONL receiving all other records, with
-            ``_llm_drop_reason`` annotated.
+            ``_llm_drop_reason`` annotated and pollution fields stripped.
         stats_file: JSON with counts and drop-rate warning flag.
+        raw_sdg_path: Path to the raw SDG JSONL file. Required.  Records
+            are indexed by ``problem`` so the kept stream emits SDG-original
+            bytes byte-for-byte (preserves the schema and ``reasoning_content``
+            that ``data_transformation`` requires).
         keep_tag: tag value to keep (default ``"VALID"``).
         high_drop_threshold: fraction above which ``high_drop_warning``
             is set in the stats file (default 0.20).
-        raw_sdg_path: Optional path to the raw SDG JSONL file used to
-            restore ``reasoning_content`` per record (see
-            :func:`_load_raw_sdg_reasoning` for rationale).  When provided,
-            the field is overwritten with the SDG-original value before
-            the pollution strip, guaranteeing SDG-schema-faithful output.
-            Recommended for GRPO (``dataset_transformer`` requires a
-            non-empty ``reasoning_content`` on single-seed SDG records).
+
+    Raises:
+        MissingSdgRecordError: A kept (VALID) row's ``problem`` is absent
+            from the SDG file.  Always a caller bug (mismatched
+            ``raw_sdg_path``) -- fail fast rather than silently emitting
+            LLM-mutated bytes.
 
     Returns:
         The stats dict that was written to ``stats_file``.
@@ -135,55 +170,39 @@ def apply_validate_filter(
     num_original_used = 0
     num_original_missing = 0
 
-    problem_to_record: dict[str, bytes] | None = None
-    if raw_sdg_path:
-        logger.info("Loading raw SDG records from %s", raw_sdg_path)
-        problem_to_record = _load_raw_sdg_records(raw_sdg_path)
-        logger.info("  %d unique problems loaded from raw SDG", len(problem_to_record))
+    logger.info("Loading raw SDG records from %s", raw_sdg_path)
+    problem_to_record = _load_raw_sdg_records(raw_sdg_path)
+    logger.info("  %d unique problems loaded from raw SDG", len(problem_to_record))
 
-    kept_buffer: list[bytes] = []
-    dropped_buffer: list[bytes] = []
-
-    with (
-        open(input_file, "rb") as reader,
-        open(output_kept, "wb") as kept_writer,
-        open(output_dropped, "wb") as dropped_writer,
-    ):
-        for line in reader:
-            line = line.strip()
-            if not line:
-                continue
-
+    with write_jsonl(output_kept) as kept_writer, write_jsonl(output_dropped) as dropped_writer:
+        for row, parse_exc, _raw_line in iter_jsonl(input_file, on_error="yield_error"):
             num_total += 1
 
-            try:
-                row = orjson.loads(line)
-            except orjson.JSONDecodeError as exc:
+            if parse_exc is not None:
                 # Parse error on a row that's already supposed to be
                 # post-parse.  Count as a drop with a clear reason.
                 num_dropped += 1
-                dropped_buffer.append(
-                    orjson.dumps(
-                        {
-                            "_llm_drop_reason": "malformed_parsed_json",
-                            "_llm_drop_error": str(exc),
-                        }
-                    )
+                dropped_writer.write(
+                    {
+                        "_llm_drop_reason": "malformed_parsed_json",
+                        "_llm_drop_error": str(parse_exc),
+                    }
                 )
                 continue
 
-            # Resolve the original SDG record for this problem.  When
-            # raw_sdg_path is provided, the output is the ORIGINAL record
-            # (unchanged) -- validate_questions is a pure row-filter.
-            # When not provided, fall back to stripping nemo-skills
-            # pollution from the generate() output (legacy behavior).
-            original_record_bytes: bytes | None = None
-            if problem_to_record is not None:
-                original_record_bytes = problem_to_record.get(row.get("problem", ""))
-                if original_record_bytes is not None:
-                    num_original_used += 1
-                else:
-                    num_original_missing += 1
+            assert row is not None  # narrow for type-checkers in yield_error mode
+
+            # Per-row SDG lookup.  We do this for EVERY row (not just kept
+            # ones) so ``num_original_records_used`` reports a Phase 1 / Phase 2
+            # problem-key consistency check: a non-zero gap between this and
+            # the post-parse-error row count is a strong signal that the SDG
+            # file the caller pointed at doesn't match the Phase 1 inputs.
+            problem = row.get("problem", "")
+            original_record_bytes = problem_to_record.get(problem)
+            if original_record_bytes is not None:
+                num_original_used += 1
+            else:
+                num_original_missing += 1
 
             tag = row.get("validate_tag")
             if row.get("validate_parse_failed"):
@@ -196,29 +215,20 @@ def apply_validate_filter(
                 # (it's not in _STRIP_FIELDS -- it's audit metadata on the
                 # dropped-only stream, fine to keep).
                 row["_llm_drop_reason"] = "missing_validate_tag"
-                dropped_buffer.append(orjson.dumps(_strip_pollution(row)))
+                dropped_writer.write(_strip_pollution(row))
             elif tag == keep_tag:
+                if original_record_bytes is None:
+                    raise MissingSdgRecordError(
+                        f"VALID row's problem {problem!r} not found in {raw_sdg_path}; "
+                        "the raw SDG file is inconsistent with the parsed Phase 2 input. "
+                        "Check that --raw_sdg_source points at the SDG file Phase 1 was run on."
+                    )
                 num_kept += 1
-                if original_record_bytes is not None:
-                    kept_buffer.append(original_record_bytes)
-                else:
-                    kept_buffer.append(orjson.dumps(_strip_pollution(row)))
+                kept_writer.write(original_record_bytes)
             else:
                 num_dropped += 1
                 row["_llm_drop_reason"] = f"tag={tag}"
-                dropped_buffer.append(orjson.dumps(_strip_pollution(row)))
-
-            if len(kept_buffer) >= WRITE_BUFFER_SIZE:
-                kept_writer.write(b"\n".join(kept_buffer) + b"\n")
-                kept_buffer.clear()
-            if len(dropped_buffer) >= WRITE_BUFFER_SIZE:
-                dropped_writer.write(b"\n".join(dropped_buffer) + b"\n")
-                dropped_buffer.clear()
-
-        if kept_buffer:
-            kept_writer.write(b"\n".join(kept_buffer) + b"\n")
-        if dropped_buffer:
-            dropped_writer.write(b"\n".join(dropped_buffer) + b"\n")
+                dropped_writer.write(_strip_pollution(row))
 
     drop_rate = num_dropped / num_total if num_total else 0.0
     high_drop_warning = drop_rate > high_drop_threshold
@@ -229,7 +239,18 @@ def apply_validate_filter(
         "num_dropped": num_dropped,
         "num_missing_tag": num_missing_tag,
         "num_parse_failed_kept_as_valid": num_parse_failed,
+        # Counts every row whose problem WAS found in the SDG file (kept
+        # or dropped).  Together with num_original_records_missing the
+        # totals add up to num_total - num_malformed_post_parse.
         "num_original_records_used": num_original_used,
+        # Counts every row whose problem was NOT found in the SDG file.
+        # In the validate_questions stage path this is always 0 because
+        # for VALID rows a miss raises MissingSdgRecordError; for
+        # dropped rows the SDG file is consistent in practice.  Kept as
+        # a real counter (rather than hardcoded 0) so this still works
+        # as a Phase 1 / Phase 2 input-consistency metric for callers
+        # other than the VALID-only short-circuit (e.g., audit tools
+        # invoking apply_validate_filter with a non-VALID keep_tag).
         "num_original_records_missing": num_original_missing,
         "drop_rate": round(drop_rate, 6),
         "keep_tag": keep_tag,
@@ -241,8 +262,10 @@ def apply_validate_filter(
         "raw_sdg_path": raw_sdg_path,
     }
 
-    with open(stats_file, "wb") as stats_writer:
-        stats_writer.write(orjson.dumps(stats, option=orjson.OPT_INDENT_2))
+    # Atomic write: a crash mid-write would otherwise leave a truncated
+    # stats_file on disk and surprise downstream tools that consume it
+    # (or, in resume scenarios, treat its existence as "prior run done").
+    write_stats_json(stats_file, stats)
 
     logger.info("validate filter summary")
     logger.info(f"  total:        {num_total}")
@@ -252,10 +275,7 @@ def apply_validate_filter(
         logger.info(f"  missing tag (dropped): {num_missing_tag}")
     if num_parse_failed:
         logger.info(f"  parse-failures kept as VALID (recall bias): {num_parse_failed}")
-    if problem_to_record is not None:
-        logger.info(
-            f"  original records used: {num_original_used}  missing: {num_original_missing}"
-        )
+    logger.info(f"  original records used: {num_original_used}  missing: {num_original_missing}")
     if high_drop_warning:
         logger.warning(
             "drop rate %.2f%% exceeds threshold %.2f%% -- inspect %s before proceeding",
@@ -304,12 +324,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--raw_sdg_source",
-        default=None,
+        required=True,
         help=(
-            "Optional directory of the raw SDG JSONL.  When set, restores "
-            "reasoning_content per record (nemo-skills' generate() overwrites "
-            "it with the LLM provider's reasoning, which dataset_transformer "
-            "rejects)."
+            "Directory of the raw SDG JSONL.  Required: kept records emit "
+            "the original SDG bytes verbatim (preserves reasoning_content, "
+            "key ordering, and float formatting that data_transformation "
+            "expects)."
         ),
     )
     parser.add_argument(
@@ -319,16 +339,14 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    raw_sdg_path = (
-        str(Path(args.raw_sdg_source) / args.raw_sdg_filename) if args.raw_sdg_source else None
-    )
+    raw_sdg_path = str(Path(args.raw_sdg_source) / args.raw_sdg_filename)
 
     apply_validate_filter(
         args.input_file,
         args.output_kept,
         args.output_dropped,
         args.stats_file,
+        raw_sdg_path=raw_sdg_path,
         keep_tag=args.keep_tag,
         high_drop_threshold=args.high_drop_threshold,
-        raw_sdg_path=raw_sdg_path,
     )

@@ -69,6 +69,7 @@ def aggregate(
     rollout_dir: str,
     output_dir: str,
     output_filename: str = "difficulty.jsonl",
+    expected_seeds: int | None = None,
 ) -> None:
     rollout_path = Path(rollout_dir)
     out = Path(output_dir)
@@ -78,6 +79,25 @@ def aggregate(
     rollout_files = [
         f for f in rollout_files if "_chunk_" not in f.name and not f.name.endswith("-async")
     ]
+
+    # Validate expected seed count BEFORE any processing.  This is the
+    # second line of defense against the silent-success cascade -- the
+    # cluster's default Slurm dep type is afterany (see
+    # cluster_configs/template-slurm.yaml note on dependency_type), so a
+    # FAILED upstream merge does not stop this aggregate from running.
+    # When --expected-seeds is plumbed through (build_aggregate_cmd
+    # always passes p.num_random_seeds), a missing seed surfaces as a
+    # loud RuntimeError instead of silently shrinking num_seeds in
+    # metrics.json.  Default None preserves back-compat for any
+    # external caller that invokes aggregate_seeds without the flag.
+    if expected_seeds is not None and len(rollout_files) != expected_seeds:
+        found_names = sorted(f.name for f in rollout_files)
+        raise RuntimeError(
+            f"Expected {expected_seeds} per-seed rollout files in {rollout_dir!r}, "
+            f"found {len(rollout_files)}: {found_names}. Upstream merge likely "
+            "failed for one or more seeds -- check Slurm logs for FAILED "
+            "merge-rsN jobs."
+        )
 
     if not rollout_files:
         logger.warning("No rollout files found.")
@@ -300,5 +320,21 @@ if __name__ == "__main__":
         default="difficulty.jsonl",
         help="Filename for the per-question reward stats JSONL (default: difficulty.jsonl).",
     )
+    parser.add_argument(
+        "--expected-seeds",
+        type=int,
+        default=None,
+        help=(
+            "Validate that exactly N per-seed rollout files were found.  "
+            "Raises RuntimeError on mismatch.  Plumbed through by "
+            "build_aggregate_cmd as num_random_seeds; omit for back-compat "
+            "with callers that don't enforce a seed count."
+        ),
+    )
     args = parser.parse_args()
-    aggregate(args.rollout_dir, args.output_dir, output_filename=args.output_filename)
+    aggregate(
+        args.rollout_dir,
+        args.output_dir,
+        output_filename=args.output_filename,
+        expected_seeds=args.expected_seeds,
+    )

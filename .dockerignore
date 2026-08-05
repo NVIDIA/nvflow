@@ -1,0 +1,41 @@
+# Build context excludes for dockerfiles/Dockerfile.nvflow (COPY . -> /opt/nvflow).
+# The client image bakes the source + a fresh uv venv. We KEEP .git in the context
+# (hatch-vcs versioning needs it at build); the image then squashes it to a single
+# history-free snapshot commit (nemo-run only needs `git archive HEAD`). We drop
+# everything heavy, generated, or secret. Other NVFlow Dockerfiles clone their
+# sources (they do not COPY this context), so these excludes are safe for them.
+
+# Prebuilt/host venv (the image builds its own) and uv cache
+.venv/
+**/.venv/
+.uv-cache/
+uv-cache/
+
+# Huge untracked local caches / outputs (cache/ is tens of GB)
+cache/
+outputs/
+htmlcov/
+
+# Python/pytest/tooling artifacts
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor/local backups. Scope to cluster-config backups only -- a bare *.bak*
+# would also drop TRACKED dataset files (e.g. datasets/finance_agent/*.bak),
+# which then show up as phantom deletions and mark the baked tree dirty.
+cluster_configs/*.bak*
+*~
+
+# Secrets / personal cluster config (gitignored; must never be baked into an image)
+cluster_configs/my_cluster.yaml
+**/*.env
+.env
+
+# Container image artifacts that should never enter the context
+*.sqsh
+*.tar
+*.tar.gz

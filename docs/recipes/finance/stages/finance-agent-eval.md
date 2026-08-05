@@ -2,14 +2,12 @@
 
 > **Status:** finance_agent evaluation is currently disabled in `eval/base.yaml` pending further validation. The configuration below is preserved for re-enablement.
 
-Technical reference for the finance-agent evaluation stages (vals-ai/finance-agent benchmark).
-
-> **Note:** Finance agent evaluation is now integrated into the main eval workflow. The `finance_agent` benchmark is defined in `workflows/eval/base.yaml` and runs alongside SEC-QUE and FinanceBench. See [Eval Workflow](../workflows/05-eval.md) for usage.
+Technical reference for the finance-agent evaluation stages (vals-ai/finance-agent benchmark). The stage config is defined in `workflows/eval/base.yaml` but is **currently commented out** (see status above); the reference below applies once it is re-enabled. See [Eval Workflow](../workflows/05-eval.md) for the active benchmarks (SEC-QUE, FinanceBench).
 
 ## Quick Navigation
 
 - [prepare_data](#prepare_data)
-- [agent-gpt-oss-120b](#agent-gpt-oss-120b)
+- [Agent eval configuration](#agent-eval-configuration)
 - [Common Agent Parameters](#common-agent-parameters)
 
 ---
@@ -21,7 +19,7 @@ Technical reference for the finance-agent evaluation stages (vals-ai/finance-age
 
 ### Purpose
 
-The shared `prepare_data` stage now downloads **all** benchmark datasets including `finance_agent`. The `finance_agent` dataset is configured in `workflows/eval/base.yaml` under `benchmarks`.
+The shared `prepare_data` stage downloads the **enabled** benchmark datasets (`secque`, `financebench`). `finance_agent` is currently excluded from `dataset_names` in `workflows/eval/base.yaml`; re-add it there when the benchmark is re-enabled.
 
 ### Finance Agent Dataset
 
@@ -52,13 +50,13 @@ ${output_dir}/
 
 ---
 
-## agent-gpt-oss-120b
-
-**Registry:** `recipe="finance"`, `workflow="eval"`, `stage="agent-gpt-oss-120b"`
+## Agent eval configuration
 
 ### Purpose
 
-Evaluate GPT-OSS-120B as a **multi-turn agent** on the finance-agent benchmark. Uses GENERATION_MODULE from the dataset (`agent_gen`) to run the agent loop with tool calls (Tavily web search, SEC EDGAR, HTML parsing).
+Evaluate a model as a **multi-turn agent** on the finance-agent benchmark, using the dataset's GENERATION_MODULE (`agent_gen`) to run the agent loop with tool calls (Tavily web search, SEC EDGAR, HTML parsing).
+
+Eval stages are derived from the `models:` keys in `eval/*.yaml`, so there is no dedicated agent stage to enable — you add a model entry. The block below is a worked example using GPT-OSS-120B; it is not shipped in any config.
 
 ### Key Differences from Standard Eval
 
@@ -71,12 +69,12 @@ Evaluate GPT-OSS-120B as a **multi-turn agent** on the finance-agent benchmark. 
 | max_turns | N/A | 50 |
 | max_concurrent_requests | Parallel | 1 (sequential per question) |
 
-### Configuration (from eval/base.yaml benchmarks section)
+### Example model entry
 
 ```yaml
-agent-gpt-oss-120b:
+agent-gpt-oss-120b:   # example name; choose your own
   benchmarks: [finance_agent]
-  datasets_dir: /workspace/nvflow/recipes/finance/datasets
+  datasets_dir: /workspace/outputs/finance/eval-datasets
   judge: *judge_finance_strict
   installation_command: "pip install -q model-library==0.1.8 func-timeout backoff tavily compute-eval @ git+..."
   extra_args: >-
@@ -101,7 +99,7 @@ agent-gpt-oss-120b:
 ### Resources
 
 - **GPUs:** 8 (120B model)
-- **Judge:** GPT-5.1 via OpenAI API (external)
+- **Judge:** `gpt-5-mini` via OpenAI API (external)
 - **Tools:** Tavily API (web search), compute-eval for tool execution
 - **Runtime:** Longer than single-turn (multi-turn + tool calls)
 
@@ -114,7 +112,7 @@ agent-gpt-oss-120b:
 | Parameter | Description |
 |-----------|-------------|
 | `installation_command` | Pip install model-library, func-timeout, tavily, compute-eval |
-| `judge` | `judge_finance_strict` (GPT-5.1, sec_judge_strict.yaml) |
+| `judge` | `judge_finance_strict` (`gpt-5-mini`, sec_judge_strict.yaml) |
 | `extra_args.max_turns` | Max agent turns per question (default: 50) |
 | `extra_args.max_concurrent_requests` | 1 (sequential to avoid API rate limits) |
 | `rollouts.extra_args.prompt_format` | `openai` (OpenAI function-calling format) |
@@ -122,7 +120,7 @@ agent-gpt-oss-120b:
 ### Judge (judge_finance_strict)
 
 Strict finance-domain judge matching vals-ai/finance-agent's judge_new.py:
-- **Model:** GPT-5.1
+- **Model:** `gpt-5-mini`
 - **Prompt:** `sec_judge_strict.yaml` (domain tolerance rules, few-shot examples)
 - **Temperature:** 0.0
 - **Skip extraction:** Yes (judgement only)
@@ -156,7 +154,7 @@ models:
     gpus: 2
     nodes: 1
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.tokens_to_generate=32768
       ++inference.temperature=0.0
     server_args: "--max-model-len 65536 --async-scheduling"
@@ -174,7 +172,7 @@ ls outputs/finance/sap-500/workflow-1-baseline-eval/baselines/gpt-oss-120b/eval-
 cat outputs/finance/sap-500/workflow-1-baseline-eval/baselines/gpt-oss-120b/eval-results/finance_agent/metrics.json | jq .
 
 # Check prepared dataset
-ls /workspace/nvflow/recipes/finance/datasets/finance_agent/
+ls /workspace/outputs/finance/eval-datasets/finance_agent/
 ```
 
 ---
@@ -199,4 +197,4 @@ ls /workspace/nvflow/recipes/finance/datasets/finance_agent/
 
 ---
 
-See [Finance Agent Benchmark](../workflows/06-finance-agent-eval.md) for an overview, or [Eval Workflow](../workflows/05-eval.md) for full usage examples and configuration.
+See [Eval Workflow](../workflows/05-eval.md) for full usage examples and configuration.

@@ -216,8 +216,10 @@ containers:
   # Required
   nemo-skills: /path/to/containers/nemo-skills.sqsh
   vllm: /path/to/containers/vllm.sqsh
+  vllm-grpo: /path/to/containers/vllm-grpo.sqsh   # GRPO rollouts / judge
   sglang: /path/to/containers/sglang.sqsh
-  nemo-rl: /path/to/containers/nemo-rl.sqsh
+  nemo-rl: /path/to/containers/nemo-rl.sqsh       # SFT/GRPO training
+  nemo-gym: /path/to/containers/nemo-gym.sqsh     # CPU Gym-only GRPO stages
 ```
 
 **Details:**
@@ -237,33 +239,39 @@ Maps host file system paths to container paths.
 ```yaml
 mounts:
   - <CLUSTER_PATH_TO_HF_MODELS>:/hf_models   # HuggingFace models
-  - <CLUSTER_PATH_TO_WORKSPACE>:/workspace   # Your workspace
+  - <CLUSTER_PATH_TO_WORKSPACE_DATA>:/workspace   # Writable data dir (outputs + cache)
   # Add more mounts as needed:
   # - /lustre/data:/data
 ```
 
 **Format:** `<host_path>:<container_path>`
 
+> **`/workspace` holds writable data, not source code.** Recipe code and
+> checked-in assets (prompts, dataset descriptors, Gym overlays) ship to workers
+> via the nemo-run packaged snapshot at `/nemo_run/code` (also the job's working
+> directory), so the nvflow repo is **not** mounted. Point `/workspace` at a
+> dedicated writable data directory holding `/workspace/outputs/**` (stage
+> outputs, checkpoints, SEC cache, eval-datasets) and `/workspace/cache/**`
+> (`HF_HOME`) — not your repo checkout. On an on-cluster launcher (no
+> `ssh_tunnel`), keep the launcher's cwd at the repo root so resume/skip
+> detection can map `/workspace/outputs/...` back to the host outputs dir.
+
 **Common mounts:**
 
 | Host Path | Container Path | Purpose |
 |-----------|----------------|---------|
-| Your workspace directory | `/workspace` | Code, configs, outputs |
+| Writable data directory | `/workspace` | Outputs, checkpoints, caches (code ships via `/nemo_run/code`) |
 | Shared model storage | `/hf_models` | Pre-trained models |
 | Root Lustre | `/lustre` | Access entire shared filesystem |
 | Dataset directory | `/data` | Training/evaluation datasets |
 
-### Do NOT bind-mount NeMo-RL / NeMo-Gym source over the image paths
+### NeMo-RL / NeMo-Gym: trainer image and Gym source
 
-The self-sufficient `nvflow-nemo-rl` image (built from [`dockerfiles/Dockerfile.nemo-rl`](../dockerfiles/Dockerfile.nemo-rl)) already contains:
+SFT and GRPO `training` run on the `nvflow-nemo-rl` image, built from [`dockerfiles/Dockerfile.nemo-rl`](../dockerfiles/Dockerfile.nemo-rl). It bakes the Gym source and one venv per Gym component, so nothing is resolved at job runtime and **no Gym mount is required**.
 
-- NeMo-RL source at `/opt/NeMo-RL` (and `/opt/nemo-rl` lowercase alias)
-- NeMo-Gym at `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym` (branch `ude/finance-sec-search-v2`)
-- A pre-built `.venv` symlinked across all 6 Gym components
+The Gym-only GRPO stages (`prepare_data`, `prefetch_cache`, `collect_rollouts`, `compute_rewards`) run on the CPU-only `nvflow-nemo-gym` image, also with baked venvs (`&gym_install_cpu` in `base.yaml`).
 
-GRPO stages call `installation_command: source /opt/NeMo-RL/3rdparty/Gym-workspace/Gym/.venv/bin/activate`. Bind-mounting a host source tree at `/opt/NeMo-RL` or `/opt/NeMo-RL/3rdparty/Gym-workspace/Gym` **shadows the baked `.venv`** and breaks `prepare_data`, `collect_rollouts`, `compute_rewards`, and `training` with `No such file or directory`.
-
-The overlay mounts in `template-slurm.yaml` are commented out for exactly this reason. Only uncomment them if you're deliberately iterating on NeMo-RL / Gym source against a host `.venv` you've built to be ABI-compatible with the image. In that dev-mode case you must also set `NRL_FORCE_REBUILD_VENVS=true` (see [Environment Variables](#environment-variables) below) -- which requires internet, so it can only be used on a connected node.
+Do not bind-mount Gym or NeMo-RL source over the image in production — it shadows the baked tree and invalidates the container fingerprint, forcing a runtime rebuild. To iterate on Gym source in dev mode, mount your clone at `/opt/nemo-rl/3rdparty/Gym-workspace/Gym` and leave `UV_OFFLINE` unset so the editable install can resolve. See [`docs/development/nemo-rl-gym.md`](development/nemo-rl-gym.md).
 
 ### Model-Specific Cluster Configs
 
@@ -272,14 +280,14 @@ Some models require additional cluster-level differences (e.g. different timeout
 | Cluster Config | Used By | Notes |
 |----------------|---------|-------|
 | `my_cluster.yaml` | Qwen3, Gemma3 (dense models) | Default for all standard models |
-| `my_cluster_nemotron.yaml` | Nemotron-3-Nano (MoE) | Use only if Nemotron needs different mounts/env -- the self-sufficient `nvflow-nemo-rl` image now handles MoE without a host overlay |
+| `my_cluster_nemotron.yaml` | Nemotron-3-Nano (MoE) | Use only if Nemotron needs different mounts/env -- the `nemo-rl` image handles MoE without a NeMo-RL source overlay |
 
 **How it works:**
 - `base.yaml` (SFT workflow) sets `cluster: my_cluster` as the default
 - A model config can override with `cluster: my_cluster_nemotron`
 - Keep both configs in sync when making infrastructure changes
 
-> **Note:** Previous versions of this guide recommended a NeMo-RL host overlay (`/path/to/RL:/opt/NeMo-RL`) for Nemotron-3-Nano MoE support. With the self-sufficient `nvflow-nemo-rl` image that overlay is no longer required and would shadow the baked `.venv`. See the [SFT Workflow Guide](recipes/finance/workflows/04-sft.md) for the current setup.
+> **Note:** No NeMo-RL or Gym source overlay is mounted by default. Nemotron-3-Nano MoE support needs no host overlay, and both `nemo-rl` and `nemo-gym` ship with Gym baked in. See the [SFT Workflow Guide](recipes/finance/workflows/04-sft.md) for the current setup.
 
 ---
 
@@ -345,12 +353,10 @@ env_vars:
   - HF_HUB_OFFLINE=1
   - HF_DATASETS_OFFLINE=1
   - TRANSFORMERS_OFFLINE=1
-  - UV_OFFLINE=true
+  # - UV_OFFLINE=true              # keep unset to allow runtime uv builds; set only for strict airgap
   - TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
   - TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
   - TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
-  # NeMo-RL / GRPO dev-mode only (do NOT enable in self-sufficient mode)
-  # - NRL_FORCE_REBUILD_VENVS=true
   # API keys (keep secret, don't commit to git!)
   - HF_TOKEN=hf_...
   - OPENAI_API_KEY=sk-...
@@ -377,18 +383,20 @@ These variables prevent the runtime from making outbound network calls and from 
 | `HF_HUB_OFFLINE` | `1` | Disables HuggingFace Hub network access (model + tokenizer downloads) |
 | `HF_DATASETS_OFFLINE` | `1` | Disables `datasets` network access |
 | `TRANSFORMERS_OFFLINE` | `1` | Disables `transformers` network access. `huggingface_hub` treats this as equivalent to `HF_HUB_OFFLINE=1` |
-| `UV_OFFLINE` | `true` | Prevents `uv` from resolving / downloading packages or Python interpreters at runtime. Keep this set **always** -- containers ship with frozen venvs |
+| `UV_OFFLINE` | *unset* | Global flag; **left unset** so components beyond the baked set can be built on demand (see [trainer image and Gym source](#nemo-rl--nemo-gym-trainer-image-and-gym-source)). All GRPO/SFT venvs are baked, so nothing is built at runtime in practice. eval / SDG / SFT never invoke `uv` |
 | `TIKTOKEN_CACHE_DIR` | `/opt/tiktoken_cache` | Points `tiktoken` at the cache baked into the images |
 | `TIKTOKEN_RS_CACHE_DIR` | `/opt/tiktoken_cache` | Points the Rust `tiktoken-rs` client at the cache (used by `openai_harmony`) |
 | `TIKTOKEN_ENCODINGS_BASE` | `/opt/tiktoken_cache` | Required for `openai_harmony` to load `HARMONY_GPT_OSS` offline |
 
-> **One-time connected-node stages:** A few stages (`download_sec_filings`, `create_seed_data`, eval `prepare_data`, GRPO `prepare_data` with `should_download: true`) need internet on first run to pull benchmark/seed datasets. For those submissions, **temporarily comment out** `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, and `TRANSFORMERS_OFFLINE`. Keep `UV_OFFLINE=true` set in all cases. See [INSTALL.md → One-Time Connected-Node Stages](../INSTALL.md#one-time-connected-node-stages-datasets).
+> **One-time connected-node stages:** A few stages (`download_sec_filings`, `create_seed_data`, eval `prepare_data`, GRPO `prepare_data` with `should_download: true`) need internet on first run to pull benchmark/seed datasets. For those submissions, **temporarily comment out** `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, and `TRANSFORMERS_OFFLINE`. See [INSTALL.md → One-Time Connected-Node Stages](../INSTALL.md#one-time-connected-node-stages-datasets).
 
-#### NeMo-RL / GRPO Variables (Dev Mode Only)
+#### NeMo-RL / GRPO training venv
 
-| Variable | Value | Purpose |
-|----------|-------|---------|
-| `NRL_FORCE_REBUILD_VENVS` | `true` | **Dev mode only.** Forces Ray workers to rebuild their virtual environments from the mounted NeMo-RL source tree instead of reusing cached venvs. Requires internet (uses `uv` to resolve packages) -- **do not enable in self-sufficient production**. Only relevant when you've bind-mounted a host NeMo-RL / Gym source clone over `/opt/NeMo-RL` and want Ray workers to pick up the new source |
+GRPO `training` runs on the `nemo-rl` image, which bakes Gym and one venv per Gym component. Nothing is built at runtime: NeMo-RL matches `/opt/nemo_rl_container_fingerprint` and reuses the baked venvs. Do not bind-mount Gym or NeMo-RL source over the image -- that shadows the baked tree, invalidates the fingerprint, and forces a rebuild. The Gym-only stages run on the self-contained `nvflow-nemo-gym` image, also with baked venvs.
+
+`UV_OFFLINE` is left unset so components outside the baked set can still be built on demand. Note the consequence: a fingerprint miss will silently rebuild over the cluster proxy rather than fail, so verify airgap behaviour by checking training logs for venv-build activity, not by the job succeeding. eval / SDG / SFT never invoke `uv`.
+
+See [trainer image and Gym source](#nemo-rl--nemo-gym-trainer-image-and-gym-source) and [`docs/development/nemo-rl-gym.md`](development/nemo-rl-gym.md).
 
 #### API Keys (Secrets)
 

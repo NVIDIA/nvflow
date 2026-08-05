@@ -4,4 +4,6 @@ finance_sec_search_resources_server:
   resources_servers:
     finance_sec_search:
       cache_dir: /workspace/outputs/finance/sap-500/workflow-5-grpo/cache/finance_sec_search
+      # Re-enable cache for training (Gym #1540 defaults it off for eval); avoids live sec.gov timeouts.
+      use_cache: true
       sec_dump_path: /workspace/outputs/finance/sap-500/workflow-2-download-sec/step-0-download/data

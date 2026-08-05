@@ -282,7 +282,7 @@ stages:
       financebench:
         seeds: 5
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++chat_template_kwargs.enable_thinking=true
       ++inference.temperature=1.0
       ++inference.top_p=1.0

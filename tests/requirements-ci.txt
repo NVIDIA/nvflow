@@ -1,0 +1,18 @@
+# Lightweight test environment, shared by .gitlab-ci.yml and
+# .github/workflows/unit-tests.yml so the two pipelines cannot drift.
+#
+# Installed alongside the project itself (`uv pip install -e . --no-deps`),
+# which keeps out the heavy core stack (nemo-skills, torch, ~200 packages).
+# Tests that genuinely need nemo-skills call pytest.importorskip and are
+# skipped in both pipelines; they run in the full-deps environment instead.
+#
+# Add new test-only dependencies here, not to an individual CI file.
+pytest>=9.0.3
+pytest-cov>=4.1.0
+pytest-timeout>=2.2.0
+PyYAML
+omegaconf
+rich
+orjson
+pandas
+pyarrow

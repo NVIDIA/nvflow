@@ -159,6 +159,7 @@ presets:
         # --- Compute / precision ------------------------------------------
         apply_rope_fusion: true
         bias_activation_fusion: true
+        use_fused_weighted_squared_relu: false
         defer_fp32_logits: true
         layernorm_epsilon: 1e-6
 

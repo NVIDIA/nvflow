@@ -39,18 +39,21 @@ model_output_dir: ${base_output_dir}/qwen3_4b
 # GPT-OSS-120B as dedicated judge (MoE, fits on 2 GPUs).
 _judge_vllm: &judge_vllm
   model_path: /hf_models/openai/gpt-oss-120b
-  num_gpus: 2
+  num_gpus: 4               # whole node: GB200 QOS enforces a gpu:4 per-job minimum
   server_nodes: 1
   max_model_len: 32768
   async_scheduling: true
   uses_reasoning_parser: true
+  # Disable FlashInfer all-reduce fusion (fixed-name localhost IPC workspace) to
+  # avoid an "Address already in use" collision when a judge co-locates with a
+  # policy TP server. Matches nemotron_nano_30b_a3b.yaml.
+  compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'
 
 # Per-environment sequence length for equiv/mcqa (finance_sec_search uses 131K model default)
 _env_seq_len_32k: 32768
 
 _training_policy_32k: &training_policy_32k
   max_total_sequence_length: ${_env_seq_len_32k}
-  hf_config_overrides: null   # No YaRN needed at 32K (native context is 40960)
   megatron_cfg:
     context_parallel_size: 1  # No CP needed at 32K (within native 40960 context)
   generation:
@@ -72,8 +75,8 @@ environments:
     raw_train_data: ${base_output_dir}/step-0-validate-questions/finance_sec_search
     config_paths:
       - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
-      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
-      - /workspace/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_demo.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_demo.yaml
     policy_vllm:
       num_gpus: 4               # 4 GPUs doubles KV cache for 131K context concurrency
       max_model_len: 131072     # Extended via YaRN (native 40960); multi-turn tool calls need >40K
@@ -117,6 +120,9 @@ stages:
         # are applied automatically via model overlay directories at launch time.
         # See hf_config_overrides above and create_overlay.py in lib/rl/.
         reasoning_parser: qwen3
+        # Match nemotron_nano_30b_a3b.yaml: disable FlashInfer all-reduce fusion to
+        # avoid the localhost IPC workspace collision when policy + judge co-locate.
+        compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'
 
   # --------------------------------------------------------------------------
   # Compute Rewards: re-judge with GPT-OSS-120B (optional)
@@ -190,13 +196,28 @@ stages:
     base_model: ${hf_model_path}
     server_type: vllm
     gpus: 4
+    # Local vLLM judge (keeps the quick-start air-gapped; production GRPO
+    # configs inherit the gpt-5 judge from workflows/eval/base.yaml).
+    judge:
+      model: /hf_models/openai/gpt-oss-120b
+      server_type: vllm
+      server_address: null
+      server_gpus: 4          # whole node: GB200 QOS enforces a gpu:4 per-job minimum
+      server_nodes: 1
+      server_args: "--max-model-len 32768 --async-scheduling"
+      extra_args: >-
+        ++prompt_config=nvflow/recipes/finance/prompts/sec_judge.yaml
+        ++inference.temperature=0.0
+        ++inference.tokens_to_generate=8192
+        ++generation_key=judgement
+        ++skip_extraction=True
     benchmarks:
       secque:
         seeds: 5
       financebench:
         seeds: 5
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.temperature=0.6
       ++inference.top_p=0.95
       ++inference.top_k=20

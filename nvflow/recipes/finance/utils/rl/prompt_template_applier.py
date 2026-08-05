@@ -50,7 +50,6 @@ Usage::
 """
 
 import argparse
-import json
 import random
 import sys
 from dataclasses import dataclass, field
@@ -60,8 +59,15 @@ from pathlib import Path
 import yaml
 
 from nvflow.utils import setup_logger
+from nvflow.utils.jsonl import iter_jsonl, write_jsonl
 
 logger = setup_logger(__name__)
+
+# Long-form date format used for ``current_date`` rendered into prompts,
+# matching vals-ai/finance-agent eval's "February 23, 2022" style.
+# Note: %d is zero-padded ("April 07, 2025") which matches eval's strftime
+# output; relying on %-d is non-portable across libc.
+_LONG_DATE_FMT = "%B %d, %Y"
 
 
 def load_prompt_template(template_path: str) -> dict:
@@ -154,29 +160,32 @@ class DateResolver:
             accession_to_filing_date[str(accession)] = str(filing_date)[:10]
 
         problem_to_accession: dict[str, str] = {}
-        with open(raw_sdg_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                problem = obj.get("problem")
-                file_path0 = obj.get("file_path0", "")
-                if not problem or not file_path0:
-                    continue
-                parts = file_path0.split("/")
-                if len(parts) < 4:
-                    continue
-                problem_to_accession.setdefault(problem, parts[3])
+        # Malformed lines are silently skipped to match historical behaviour
+        # -- this is a metadata-extraction pass, not the canonical SDG ingest.
+        for obj in iter_jsonl(raw_sdg_path, on_error="skip"):
+            problem = obj.get("problem")
+            file_path0 = obj.get("file_path0", "")
+            if not problem or not file_path0:
+                continue
+            parts = file_path0.split("/")
+            if len(parts) < 4:
+                continue
+            problem_to_accession.setdefault(problem, parts[3])
 
         self._accession_to_filing_date = accession_to_filing_date
         self._problem_to_accession = problem_to_accession
         self._jitter_min_days = jitter_min_days
         self._jitter_max_days = jitter_max_days
-        self._fallback = fallback_current_date
+        # Normalize fallback once: emit long-form (e.g. "April 07, 2025") so
+        # success + fallback paths both match vals-ai/finance-agent eval's
+        # date style.  If the operator supplied a non-ISO string, keep it
+        # as-is rather than crashing.
+        try:
+            self._fallback = datetime.strptime(fallback_current_date, "%Y-%m-%d").strftime(
+                _LONG_DATE_FMT
+            )
+        except ValueError:
+            self._fallback = fallback_current_date
 
     @property
     def num_accessions(self) -> int:
@@ -200,7 +209,7 @@ class DateResolver:
             return self._fallback, "fallback"
         seed = record.get("uuid") or problem
         delta = random.Random(seed).randint(self._jitter_min_days, self._jitter_max_days)
-        return (filing_date + timedelta(days=delta)).strftime("%Y-%m-%d"), "resolved"
+        return (filing_date + timedelta(days=delta)).strftime(_LONG_DATE_FMT), "resolved"
 
 
 @dataclass
@@ -280,16 +289,22 @@ def process_file(
     ``date_resolver`` is ``None`` (dynamic-date resolution disabled)."""
     stats = ProcessFileStats()
 
-    with open(input_path) as fin, open(output_path, "w") as fout:
-        for line_num, line in enumerate(fin, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as e:
-                logger.warning("Skipping malformed JSON at %s:%d: %s", input_path, line_num, e)
-                stats.errors.append({"file": str(input_path), "line": line_num, "error": str(e)})
+    # ``yield_error`` keeps the historical behaviour of skipping malformed
+    # JSON lines while logging + recording them in the per-file errors
+    # stream.  Line numbering is preserved via ``enumerate`` so operators
+    # can grep the source file directly using the line stamp in
+    # ``errors.jsonl``.
+    with write_jsonl(output_path) as fout:
+        for line_num, (record, parse_exc, _raw_line) in enumerate(
+            iter_jsonl(input_path, on_error="yield_error"), 1
+        ):
+            if parse_exc is not None:
+                logger.warning(
+                    "Skipping malformed JSON at %s:%d: %s", input_path, line_num, parse_exc
+                )
+                stats.errors.append(
+                    {"file": str(input_path), "line": line_num, "error": str(parse_exc)}
+                )
                 continue
 
             current_date: str | None = None
@@ -311,7 +326,7 @@ def process_file(
             else:
                 result["expected_answer"] = generation
 
-            fout.write(json.dumps(result, ensure_ascii=False) + "\n")
+            fout.write(result)
             stats.processed += 1
 
     return stats
@@ -361,7 +376,11 @@ def main() -> int:
     parser.add_argument(
         "--fallback_current_date",
         default="2025-04-07",
-        help="Date used when parquet lookup misses (default: 2025-04-07 matching eval template).",
+        help=(
+            "Date used when parquet lookup misses (default: 2025-04-07 matching eval). "
+            "Accepts YYYY-MM-DD on input; internally normalized to eval's long-form "
+            "'%%B %%d, %%Y' style (e.g. 'April 07, 2025') before rendering into prompts."
+        ),
     )
     parser.add_argument(
         "--parquet_accession_column",
@@ -427,6 +446,31 @@ def main() -> int:
 
     logger.info("Found %d JSONL file(s)", len(jsonl_files))
 
+    # Remove any stale per-chunk outputs from a previous run before writing
+    # new ones.  Without this, a rerun where the upstream stage produced a
+    # smaller set of chunks (e.g. data_transformation rerun with a smaller
+    # ``--num_chunks``) would silently leave higher-index output chunks on
+    # disk; the downstream ``responses_api_converter`` globs ``*.jsonl`` from
+    # this directory and would mix stale records into the new dataset.
+    # Mirrors the cleanup in ``dataset_transformer.py``.  ``errors.jsonl`` is
+    # explicitly excluded from the sweep: it is conditionally written only
+    # when this run produces errors, and unconditionally deleting it would
+    # erase the prior run's audit trail on a no-error rerun -- operators
+    # use ``errors.jsonl`` to triage flaky inputs across reruns.  Stale
+    # ``errors.jsonl`` entries are harmless to ``responses_api_converter``,
+    # which routes any row missing the ``prompt`` field into its own skipped
+    # stream rather than the canonical output.
+    expected_outputs = {fpath.name for fpath in jsonl_files}
+    stale_outputs = sorted(
+        p
+        for p in output_dir.glob("*.jsonl")
+        if p.name not in expected_outputs and p.name != "errors.jsonl"
+    )
+    for stale in stale_outputs:
+        stale.unlink()
+    if stale_outputs:
+        logger.info(f"Removed {len(stale_outputs):,} stale chunk file(s) from previous run")
+
     total = ProcessFileStats()
     for fpath in jsonl_files:
         out_path = output_dir / fpath.name
@@ -447,9 +491,9 @@ def main() -> int:
 
     if total.errors:
         errors_path = output_dir / "errors.jsonl"
-        with open(errors_path, "w") as ef:
+        with write_jsonl(errors_path) as ef:
             for err in total.errors:
-                ef.write(json.dumps(err) + "\n")
+                ef.write(err)
         logger.warning("Errors: %d -> %s", len(total.errors), errors_path)
 
     logger.info("")

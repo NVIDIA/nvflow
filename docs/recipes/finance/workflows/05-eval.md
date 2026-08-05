@@ -36,6 +36,8 @@ Standalone Baselines                  └─────────────
 └──────────────────────┘
 ```
 
+> **Offline clusters:** `prepare_data` downloads the benchmark datasets from HuggingFace, so temporarily clear `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE` and `TRANSFORMERS_OFFLINE` for its first run, then restore them. The datasets persist and are reused afterwards. See [Offline runtime](../troubleshooting.md#offline-runtime).
+
 ## Configuration
 
 **Directory:** `workflows/eval/`
@@ -51,7 +53,8 @@ Checkpoint evaluation is configured directly in the training configs:
 |------|-------------|
 | `sft/qwen3_4b.yaml` | `stages.eval` with `eval_steps: [10]` |
 | `sft/qwen3_14b.yaml` | `stages.eval` with `eval_steps: [2600, 5000, 7408]` |
-| `grpo/qwen3_4b.yaml` | `stages.eval` with `eval_steps: [20]` |
+| `grpo/qwen3_4b.yaml` (equivalence, FSDP) | `stages.eval` with `eval_steps: [20]` |
+| `grpo/qwen3_4b_finsec.yaml` (finance_sec_search, Megatron) | `stages.eval` with `eval_steps: [20]` |
 
 ## Usage
 
@@ -94,7 +97,8 @@ Configured in `eval/base.yaml`, shared across all evaluation contexts:
 
 - **SEC-QUE**: SEC filing comprehension (565 samples)
 - **FinanceBench**: Financial question answering (150 samples)
-- **finance_agent**: Multi-turn agentic financial QA from [vals-ai/finance-agent](https://github.com/vals-ai/finance-agent) (50 samples)
+
+`finance_agent` (multi-turn agentic financial QA from [vals-ai/finance-agent](https://github.com/vals-ai/finance-agent)) is **disabled** — `eval/base.yaml` sets it to `null` pending validation of the multi-turn tool-calling path. See [finance-agent-eval](../stages/finance-agent-eval.md) to re-enable it.
 
 ## Eval Stage Configuration (in Training YAMLs)
 
@@ -105,12 +109,12 @@ stages:
   eval:
     eval_steps: [1000, 3000, 5000]
     checkpoint_path: ${directories.step-4-training}/model-name
-    format: megatron        # Use "fsdp" for GRPO demo, "megatron" for GRPO production
+    format: megatron        # Match the checkpoint's training backend: "fsdp" or "megatron"
     baseline_model: /hf_models/Qwen/Qwen3-14B
     server_type: vllm
     gpus: 1
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.temperature=0.6
       ++inference.top_p=0.95
       ++inference.top_k=20
@@ -170,12 +174,12 @@ stages:
   eval:
     eval_steps: [100, 500, 1000]
     checkpoint_path: ${directories.step-4-training}/model-my-model-name
-    format: megatron        # Use "fsdp" for GRPO demo checkpoints
+    format: megatron        # Match the checkpoint's training backend: "fsdp" or "megatron"
     baseline_model: /hf_models/MyOrg/MyModel
     server_type: vllm
     gpus: 1
     inference_args: >-
-      ++prompt_config=/workspace/nvflow/recipes/finance/prompts/secque_template.yaml
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
     server_args: "--max-model-len 40960"
 ```
 

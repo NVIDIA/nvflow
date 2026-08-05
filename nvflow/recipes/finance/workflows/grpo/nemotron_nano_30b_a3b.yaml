@@ -1,0 +1,489 @@
+# ============================================================================
+# Nemotron 3 Nano 30B-A3B GRPO Training Configuration (MoE, DG SDG)
+# ============================================================================
+# GRPO RL training for Nemotron 3 Nano 30B-A3B (Mixture of Experts) using
+# Document-Grounded SDG hard_rl_data from SAP-500.
+#
+# Same MoE architecture as Qwen3-30B-A3B (128 experts, top-k=8).
+# Shares data prep stages 0-4 with qwen3_30b_a3b.yaml.
+# Separate model_output_dir for rollouts, training, and eval.
+#
+# Usage:
+#   uv run nflow run collect_rollouts --config .../nemotron_nano_30b_a3b.yaml -e finance_sec_search
+#   uv run nflow run training --config .../nemotron_nano_30b_a3b.yaml -e finance_sec_search
+# ============================================================================
+
+# Inherit base GRPO workflow
+_base_: base.yaml
+
+# Data scope: SAP-500 DG SDG data
+data_root: /workspace/outputs/finance/sap-500
+
+# Model identity (define once, reference everywhere via ${hf_model_path})
+hf_model_path: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+
+# Model-specific output directory (stages 5-9: rollouts, compute_rewards,
+# train_validation_split, training, eval write here).  Stages 0-4 (incl.
+# prepare_data) write under ${base_output_dir} and are SHARED across output
+# dirs, so changing this only affects step-5+ (cheap -- no data re-prep).
+# Canonical production dir (verified empty 2026-05-30) -- the full chain
+# (rollouts -> filter -> training -> eval) lives here, and under the cumulative
+# Option-1 plan the rollout dir grows in-place (36K -> 72K -> 108K ...) via
+# resume; see the rollout block below.  The validated eval-parity smoke output
+# stays isolated at .../nemotron_nano_30b_a3b_smoke.
+model_output_dir: ${base_output_dir}/nemotron_nano_30b_a3b
+
+# Same pipeline as base.yaml -- listed here because YAML lists fully replace
+# (not merge) when inherited via _base_, so we must re-declare.
+pipeline_stages:
+  - validate_questions
+  - data_transformation
+  - apply_prompt_template
+  - convert_to_responses_api
+  - prepare_data
+  - prefetch_cache
+  - collect_rollouts
+  - train_validation_split
+  - training
+  - eval
+
+# ============================================================================
+# Shared Anchors (define once, reuse across stages)
+# ============================================================================
+# GPT-OSS-120B as dedicated judge (MoE). TP=1: the ~63GB MXFP4 weights fit a
+# single 80GB H100. Validated on the May 29 smoke -- the judge ran at ~2% KV,
+# Running ~0-1 reqs (it is invoked once per completed sample), so TP=2 was
+# heavily over-provisioned. TP=1 halves judge GPUs AND keeps the het-job
+# single-node (policy TP4 + judge TP1 = 5 GPUs / 1 node -> easy to schedule).
+_judge_vllm: &judge_vllm
+  model_path: /hf_models/openai/gpt-oss-120b
+  num_gpus: 1
+  gpu_memory_utilization: 0.95
+  server_nodes: 1
+  max_model_len: 32768
+  async_scheduling: true
+  uses_reasoning_parser: true
+  # Disable the FlashInfer all-reduce fusion pass (emits --compilation-config).
+  # Prevents the fixed-name localhost IPC workspace collision when this judge
+  # TP2 server co-locates on a node with a policy TP4 server. See the policy
+  # block under collect_rollouts for the full rationale.
+  compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'
+
+# Per-environment sequence length for equiv/mcqa (finance_sec_search uses 131K model default)
+_env_seq_len_32k: 32768
+
+# Training sequence length -- single source of truth. Referenced via
+# ${_train_seq_len} by the 5 training-side fields that must stay equal:
+# max_total_sequence_length, generation.max_new_tokens, vllm_cfg.max_model_len,
+# sequence_packing.train_mb_tokens, sequence_packing.logprob_mb_tokens.
+_train_seq_len: 49152   # REFERENCE-MATCH (grpo_nanov3 = 49152). Was 131072 (OOM'd at train step).
+
+_training_policy_32k: &training_policy_32k
+  max_total_sequence_length: ${_env_seq_len_32k}
+  hf_config_overrides: null   # No YaRN needed at 32K (native context is 40960)
+  megatron_cfg:
+    context_parallel_size: 2  # CP=4 is for 131K; CP=2 sufficient for 32K
+  generation:
+    vllm_cfg:
+      max_model_len: ${_env_seq_len_32k}
+  sequence_packing:
+    train_mb_tokens: ${_env_seq_len_32k}
+    logprob_mb_tokens: ${_env_seq_len_32k}
+
+# No YaRN needed for Nemotron Nano — model supports 131K natively
+# (unlike Qwen3 which requires YaRN to extend beyond 40960)
+
+# DG SDG data path (shared across equivalence_llm_judge and finance_sec_search)
+_dg_sdg_data: &dg_sdg_data /workspace/outputs/finance/sap-500/workflow-3-document-grounded-sdg
+
+# ============================================================================
+# Environment Overrides
+# ============================================================================
+# answer_prefix: null for all environments.
+# DG SDG `answer` field has no "Answer:" prefix. The full answer text
+# (1-2K chars) serves as the GOLD reference, enabling partial rewards
+# from the 3-point finance judges. Revisit if training a non-thinking model.
+environments:
+  equivalence_llm_judge:
+    raw_train_data: *dg_sdg_data
+    answer_prefix: null
+    judge_vllm: *judge_vllm
+    training_policy: *training_policy_32k
+  mcqa:
+    training_repeat: 2
+    training_policy: *training_policy_32k
+  finance_sec_search:
+    # IMPORTANT: raw_train_data points at the validate_questions output,
+    # NOT the raw SDG.  The validate_questions stage reads from *dg_sdg_data
+    # (via stages.validate_questions.source_data below) and writes the
+    # filtered dataset to ${directories.step-0-validate-questions}/finance_sec_search/.
+    # data_transformation then reads via this path as it always has.
+    # If validate_questions is removed from pipeline_stages, revert this to
+    # *dg_sdg_data.
+    raw_train_data: ${directories.step-0-validate-questions}/finance_sec_search
+    config_paths:
+      - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_env.yaml
+      - /nemo_run/code/nvflow/recipes/finance/workflows/grpo/overlays/finance_sec_search_sap500.yaml
+    policy_vllm:
+      # DP dropped: a May 29 smoke showed DP2xTP4 gave ~0% throughput gain
+      # (workload is client/agentic-bound, not policy-GPU-bound). Stay at TP4xDP1.
+      num_gpus: 4
+      max_model_len: 131072
+    judge_vllm: *judge_vllm
+
+# ============================================================================
+# Model-Specific Stage Overrides
+# ============================================================================
+
+stages:
+
+  # --------------------------------------------------------------------------
+  # Validate Questions: GPT-OSS-120B pre-filter
+  # --------------------------------------------------------------------------
+  # Always invoke with `-e finance_sec_search` — the SEC-filings rubric doesn't
+  # apply to equivalence_llm_judge / mcqa question distributions.
+  #
+  # stage_kwargs goes straight to nemo_skills.pipeline.cli.generate(), so keys
+  # must match its signature (model / server_gpus / server_args / ...).  Do NOT
+  # spread the _judge_vllm anchor here — its keys (model_path / num_gpus /
+  # max_model_len / ...) are rejected by generate().
+  validate_questions:
+    source_data: *dg_sdg_data
+    stage_kwargs:
+      model: /hf_models/openai/gpt-oss-120b
+      server_type: vllm
+      server_gpus: 4
+      server_nodes: 1
+      # Single chunk: 10K dryrun extrapolates to ~42-90 min for the full
+      # ~379K prefiltered records on one 4-GPU server, well under the
+      # 4h Slurm timeout.  Runs 1 job instead of 8 = 1/8 the cluster
+      # GPU-hour footprint with a moderate wall-clock tradeoff.
+      # If resilience against a single-job timeout becomes a concern,
+      # bump num_chunks to 2-4 as a middle ground.
+      num_chunks: 1
+      # Concurrency lever is --max-num-seqs (vLLM's 1024 default was the
+      # binding cap in dryrun measurements); --max-num-batched-tokens
+      # is slack for prefill bursts.  Both are scheduler-only, no
+      # quality impact.
+      server_args: >-
+        --max-model-len 65536
+        --async-scheduling
+        --reasoning-parser openai_gptoss
+        --max-num-batched-tokens 32768
+        --max-num-seqs 4096
+    # No stage-level inline_args override here -- we inherit base.yaml's
+    # default (reasoning_effort=high, tokens_to_generate=8192,
+    # max_concurrent_requests=2048) which has no max_samples cap, so the
+    # LLM processes every prefiltered record.
+
+  # --------------------------------------------------------------------------
+  # Rollout Collection: Nemotron-Nano-30B-A3B configuration
+  # --------------------------------------------------------------------------
+  # ROLLOUT ↔ TRAINING ALIGNMENT CONTRACT
+  # --------------------------------------------------------------------------
+  # The rollout policy vLLM and the training policy vLLM serve the SAME
+  # model and consume the SAME generated text, so the parser settings
+  # must match end-to-end.  Concretely, these rollout `policy_vllm`
+  # keys must agree with the corresponding training keys under
+  # `stages.training.overrides.policy.generation.vllm_cfg`:
+  #
+  #   rollout policy_vllm                 training vllm_cfg
+  #   --------------------                --------------------------------
+  #   reasoning_parser    <==>            http_server_serving_chat_kwargs.reasoning_parser
+  #   tool_call_parser    <==>            http_server_serving_chat_kwargs.tool_parser
+  #
+  # If these drift, the policy logprobs computed during rollout are based
+  # on a different decomposition of the model's output than what the
+  # trainer sees -- silently degrading the GRPO signal (e.g., reasoning
+  # tags leaking into the answer field, missed tool calls in
+  # finance_sec_search).  Eval's `--reasoning-parser` should also match
+  # for benchmark numbers to reflect training behaviour.
+  #
+  # When adding a new model, copy this block from the matching model
+  # (don't copy from a different family) and update both parsers in
+  # lockstep with the training overrides below.
+  collect_rollouts:
+    rollout:
+      # 36K REWARD-PROFILING RUN (120-GPU cap, ~16h wall).
+      # Layout: 8 seeds x 3 chunks = 24 het-jobs submitted at once; each job =
+      # policy TP4 (4 GPU) + judge TP1 (1 GPU) = 5 GPU -> 24 x 5 = 120 GPU peak.
+      # Throughput ceiling = 24 servers x ~750 rollouts/hr = ~18,000 rollouts/hr
+      # = ~2,250 samples/hr (8 rollouts/sample). 36K samples x 8 = 288K rollouts
+      # -> ~16h wall.
+      # Chunk sizing: 36K / 3 chunks = 12K samples/chunk -> each (seed,chunk) job
+      # grinds 12K rollouts = ~16h of compute. dependent_jobs: 3 chains 4 jobs
+      # (4 x 4h = 16h) per (seed,chunk) so the chunk can finish under the 4h
+      # per-job SLURM limit. The chain is resume-safe: once a chunk's .done
+      # exists, later chained jobs exit immediately (cost nothing). If a chunk
+      # falls short, re-run with a higher dependent_jobs -- resume skips done
+      # rows and continues the incomplete chunk.
+      # The 36K is the first contiguous slice of the seed-42-shuffled input, so
+      # it is a representative uniform random subset (trainable on its own).
+      #
+      # CUMULATIVE GROWTH (Option 1): to add another 36K later, scale BOTH knobs
+      # together so chunk_size (= max_num_samples / num_chunks) stays 12000:
+      #     36K  -> max_num_samples 36000,  num_chunks 3
+      #     72K  -> max_num_samples 72000,  num_chunks 6
+      #     108K -> max_num_samples 108000, num_chunks 9   (and so on)
+      # Re-run in this SAME dir: resume skips the already-.done chunks (their
+      # row-slices are byte-identical because chunk_size is unchanged) and
+      # submits only the 3 NEW chunks x 8 seeds = 24 jobs (stays at 120 GPU).
+      # Merge/aggregate/filter auto-rebuild over the cumulative set -> train.jsonl
+      # grows in place. DELETE NOTHING and keep rerun_done false; the per-seed
+      # merge .done is auto-invalidated by collect_rollouts.
+      # INVARIANT: never change num_chunks without keeping chunk_size = 12000,
+      # or existing .done chunks would skip with shifted slices (row gaps).
+      num_random_seeds: 8
+      num_chunks: 3
+      dependent_jobs: 3
+      max_num_samples: 36000
+      num_samples_in_parallel: 512
+      starting_seed: 0
+      policy_vllm:
+        model_path: ${hf_model_path}
+        num_gpus: 4                # TP = 4 (one node, 4 GPUs)
+        server_nodes: 1
+        # Max concurrent sequences in vLLM.  Reduced from 512 → 448 to
+        # prevent KV cache saturation on heavy data (seed 0 hit 100% KV
+        # sustained at 512, dropping prefix cache to 11% and throughput
+        # by ~30%).  At 448 the steady-state KV stays ≤87% with no
+        # throughput penalty (GPU is not the bottleneck).
+        max_num_seqs: 448
+        # To scale with data parallelism (multi-node vLLM):
+        #   data_parallel_size: 2      # DP replicas; increase with server_nodes + num_samples_in_parallel
+        #   data_parallel_backend: ray  # multi-node DP via Ray
+        # Note: for agentic workloads (multi-turn tool use), DP>1 may not
+        # improve throughput — the bottleneck is client-side orchestration,
+        # not GPU inference.
+        # Reasoning + tool parsers MUST match the training-side
+        # http_server_serving_chat_kwargs below (deepseek_r1 / qwen3_coder
+        # for Nemotron-Nano-30B-A3B).  See ALIGNMENT CONTRACT above.
+        reasoning_parser: deepseek_r1
+        # Override base.yaml's default `tool_call_parser: hermes` -- Nemotron-Nano
+        # emits tool calls in qwen3_coder format, hermes parser would silently
+        # drop multi-turn tool invocations in finance_sec_search.
+        tool_call_parser: qwen3_coder
+        # Disable the FlashInfer all-reduce fusion pass (emits --compilation-config).
+        # The pass allocates a fixed-name localhost IPC workspace; when this
+        # policy TP4 server co-locates on a node with another seed's judge TP2
+        # server (SLURM packing), the loser hits `[Errno 98] Address already in
+        # use`, leaving TP ranks inconsistent -> shm_broadcast hang -> ~600s NCCL
+        # watchdog kill. Skipping the pass keeps all ranks consistent regardless
+        # of co-location. (Confirmed fix on the qwen3_30b_a3b smoke.)
+        compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'
+
+  # --------------------------------------------------------------------------
+  # Train/Validation Split: curriculum ordering for GRPO
+  # --------------------------------------------------------------------------
+  # Sort train.jsonl by offline difficulty (easy-to-hard) instead of shuffling.
+  # Early training steps see high-reward prompts → strong GRPO gradients.
+  train_validation_split:
+    sort_by: "difficulty_profile.avg_reward"
+    sort_order: "desc"
+
+  # --------------------------------------------------------------------------
+  # Training: Nemotron 3 Nano 30B-A3B GRPO configuration (Megatron, MoE)
+  # --------------------------------------------------------------------------
+  # data_source_dir and dependencies are inherited from base.yaml
+  # (step-7-train-validation-split / [train_validation_split]) since we use
+  # the default post-rollout split.  Only model-specific fields below.
+  training:
+    model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    hf_checkpoint_path: ${hf_model_path}
+
+    # Megatron backend required for MoE expert parallelism
+    backend: megatron
+
+    # PRODUCTION, 128 GPU (DP=2): TP(2) x CP(16) x PP(2) = 64 -> DP = 128/64 = 2.
+    total_gpus: 128
+    dependent_jobs: 4   # chain 5 jobs (~50 steps, ~10-12 checkpoints from step_30)
+
+    wandb_mode: online
+
+    preset: "grpo-base"
+
+    overrides:
+      data:
+        shuffle: false
+
+      grpo:
+        num_prompts_per_step: 128             # PRODUCTION (global batch = 128 * 16 = 2048)
+        num_generations_per_prompt: 16        # nano-v3 ref (was 8); KEEP (GRPO group size)
+        max_num_epochs: 1
+        max_num_steps: 300                    # production (preset default 1000000)
+        val_period: 10
+        val_at_start: true
+        val_at_end: true
+        val_batch_size: 256                   # nano-v3 ref
+        num_val_generations_per_prompt: 4     # nano-v3 ref
+        overlong_filtering: true              # nano-v3 ref (preset default false)
+        seq_logprob_error_threshold: 2        # nano-v3 ref (preset default null)
+        use_dynamic_sampling: false           # follow ref (was true)
+        batch_multiplier: 1                   # follow ref (was 2)
+
+      # Loss: canonical Nano-v3 recipe -- token-level GRPO + importance-sampling
+      # correction + on-policy KL approximation + DAPO asymmetric clip.
+      # Adopted from RL/examples/nemo_gym/grpo_nanov3.yaml (matches
+      # nemo-rl-internal ultra-v3-posttraining). Replaces the prior GSPO setup.
+      loss_fn:
+        token_level_loss: true
+        sequence_level_importance_ratios: false
+        ratio_clip_min: 0.2
+        ratio_clip_max: 0.28
+        use_on_policy_kl_approximation: true
+        use_importance_sampling_correction: true
+        kl_input_clamp_value: null
+        kl_output_clamp_value: null
+
+      checkpointing:
+        metric_name: "val:total_reward/mean"   # nano-v3 ref (preset uses val:accuracy)
+        keep_top_k: 20                         # retain more checkpoints (frequent saves)
+        save_period: 5                         # save every 5 steps -> caps work-loss on a mid-run crash
+        checkpoint_must_save_by: "00:03:30:00"
+
+      policy:
+        tokenizer:
+          name: ${stages.training.hf_checkpoint_path}
+        # Nano supports 131K natively — no YaRN needed
+        hf_config_overrides: {}
+        max_total_sequence_length: ${_train_seq_len}
+        generation_batch_size: 64              # nano-v3 ref (preset=32)
+        generation:
+          port_range_low: 11001
+          port_range_high: 15000
+          max_new_tokens: ${_train_seq_len}
+          vllm_cfg:
+            async_engine: true
+            tensor_parallel_size: 4
+            gpu_memory_utilization: 0.5
+            max_model_len: ${_train_seq_len}
+            enforce_eager: false
+            use_deep_gemm: false
+            expose_http_server: true
+            http_server_serving_chat_kwargs:
+              enable_auto_tools: true
+              tool_parser: qwen3_coder
+              reasoning_parser: nano_v3
+            reasoning_parser_plugin: /opt/nemo-rl/nemo_rl/models/generation/vllm/reasoning_parsers/nano_v3_reasoning_parser.py
+          vllm_kwargs:
+            compilation_config:
+              use_inductor: false
+              backend: eager
+            mamba_ssm_cache_dtype: float32
+        train_global_batch_size: 2048          # PRODUCTION = 128 prompts * 16 gens (nano-v3 ref)
+
+        # Megatron parallelism for MoE (128 GPU, PRODUCTION, DP=2):
+        # TP=2, CP=16, PP=2, EP=16, ETP=1  (CP=16 shards the 48K sequence to 3072 tok/rank;
+        # EP=16 halves expert memory/rank for the 80GB H100 optimizer-step OOM).
+        # - Dense  DP  = 128 / (TP*CP*PP)  = 128/64 = 2
+        # - Expert EDP = 128 / (ETP*EP*PP) = 128/32 = 4  (experts/rank: 128/EP16 = 8)
+        megatron_cfg:
+          tensor_model_parallel_size: 2
+          pipeline_model_parallel_size: 2
+          context_parallel_size: 16
+          expert_model_parallel_size: 16
+          expert_tensor_parallel_size: 1
+          sequence_parallel: true
+          activation_checkpointing: true
+          empty_unused_memory_level: 2
+          moe_token_dispatcher_type: alltoall
+          freeze_moe_router: true
+          bias_activation_fusion: false
+          defer_fp32_logits: true
+          moe_router_dtype: fp32
+          moe_router_load_balancing_type: none   # "seq_aux_loss" causes logprob divergence
+          moe_router_bias_update_rate: 1.0e-3
+          moe_router_enable_expert_bias: true
+          moe_permute_fusion: true               # ~20% training perf
+          moe_enable_deepep: false
+          moe_aux_loss_coeff: 0.0
+          moe_shared_expert_overlap: false
+          moe_per_layer_logging: true
+          track_moe_metrics: true
+          apply_rope_fusion: true
+          gradient_accumulation_fusion: false
+          env_vars:                              # NCCL flags for 16-node CP-ring stability
+            NCCL_CUMEM_ENABLE: '0'
+            NCCL_NET_GDR_LEVEL: '0'              # stage CP-ring transport through host mem (fixes 16-node hang)
+            NCCL_NVLS_ENABLE: '0'
+            NCCL_DEBUG: INFO
+            NCCL_DEBUG_SUBSYS: INIT,NET,ALLOC,TUNING
+          optimizer:
+            optimizer: adam
+            lr: 3.0e-6
+            min_lr: 3.0e-6
+            weight_decay: 0.0
+            bf16: true
+            fp16: false
+            params_dtype: float32
+            adam_beta1: 0.9
+            adam_beta2: 0.999
+            adam_eps: 1.0e-8
+            clip_grad: 1.0
+            use_distributed_optimizer: true      # shards optimizer state across DP ranks
+            use_precision_aware_optimizer: true   # reduced-precision optimizer state (TE)
+            optimizer_cpu_offload: true          # PRODUCTION: offload optimizer to CPU (fits 80GB H100)
+            optimizer_offload_fraction: 1.0
+          scheduler:
+            start_weight_decay: 0.0
+            end_weight_decay: 0.0
+            weight_decay_incr_style: constant
+            lr_decay_style: constant
+            lr_decay_iters: null
+            lr_warmup_iters: 10
+            lr_warmup_init: 3.0e-7
+          distributed_data_parallel_config:
+            grad_reduce_in_fp32: false
+            overlap_grad_reduce: true
+            overlap_param_gather: true
+            average_in_collective: false
+            use_custom_fsdp: false
+            data_parallel_sharding_strategy: optim_grads_params
+
+        sequence_packing:
+          enabled: true
+          train_mb_tokens: ${_train_seq_len}   # = max_total_sequence_length
+          logprob_mb_tokens: ${_train_seq_len}
+
+        logprob_chunk_size: 2048
+        # = TP(2)*CP(16)*2 = 64 (grpo_nanov3 formula). Hardcoded because nflow
+        # lacks the ${mul:} resolver the reference uses; update if TP or CP change.
+        make_sequence_length_divisible_by: 64
+        max_grad_norm: 1.0
+        offload_optimizer_for_logprob: false
+        optimizer: null                        # remove FSDP optimizer (megatron uses megatron_cfg.optimizer)
+        scheduler: null                        # remove FSDP scheduler (megatron uses megatron_cfg.scheduler)
+
+      # Logger
+      logger:
+        wandb:
+          name: "grpo-nemotron-nano-30b-a3b"
+
+  # --------------------------------------------------------------------------
+  # Stage 9: Evaluate Checkpoints - Qwen3-30B-A3B GRPO
+  # --------------------------------------------------------------------------
+  # Stage 9: Evaluate Checkpoints - Nemotron 3 Nano 30B-A3B
+  # --------------------------------------------------------------------------
+  eval:
+    eval_steps: [20]
+    checkpoint_path: ${directories.step-8-training}
+    eval_output_dir: ${directories.step-9-eval}/finance_sec_search
+    base_output_dir: ${model_output_dir}
+    format: megatron
+    base_model: ${hf_model_path}
+    server_type: vllm
+    gpus: 4
+    benchmarks:
+      secque:
+        seeds: 5
+      financebench:
+        seeds: 5
+    inference_args: >-
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
+      ++inference.temperature=0.6
+      ++inference.top_p=0.95
+      ++inference.top_k=20
+      ++inference.tokens_to_generate=16384
+      ++chat_template_kwargs.enable_thinking=true
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser deepseek_r1 --tensor-parallel-size 4"

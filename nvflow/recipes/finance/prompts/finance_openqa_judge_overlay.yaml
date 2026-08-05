@@ -16,7 +16,7 @@
 #   nemo_gym_config_paths:
 #     - responses_api_models/vllm_model/configs/vllm_model.yaml
 #     - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
-#     - /workspace/nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
+#     - nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
 #
 # Prompt file: finance_openqa_judge.txt (same directory)
 # Adapted from: nvflow/recipes/finance/prompts/sec_judge.yaml
@@ -35,4 +35,4 @@
 equivalence_llm_judge:
   resources_servers:
     equivalence_llm_judge:
-      judge_prompt_template_fpath: /workspace/nvflow/recipes/finance/prompts/finance_openqa_judge.txt
+      judge_prompt_template_fpath: /nemo_run/code/nvflow/recipes/finance/prompts/finance_openqa_judge.txt

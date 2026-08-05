@@ -42,11 +42,11 @@ from nvflow.lib.rl.helpers import (
     build_judge_nemo_gym_config,
     build_vllm_server_args,
     determine_judge_mode,
+    launcher_is_remote,
     log_judge_details,
     resolve_host_path,
     validate_judge_config,
 )
-from nvflow.lib.vllm_compat import get_server_entrypoint
 
 
 @dataclass
@@ -153,6 +153,7 @@ class GRPOStage(BaseStage):
             config_paths.extend(env_cfg.get("config_paths", []))
         nemo_gym = merged.setdefault("env", {}).setdefault("nemo_gym", {})
         nemo_gym["config_paths"] = config_paths
+        # Reuse baked Gym venvs if present, else build once (skip_venv_if_present).
         nemo_gym["skip_venv_if_present"] = True
 
         if config.get("training_datasets"):
@@ -415,8 +416,7 @@ class GRPOStage(BaseStage):
             server_args = build_vllm_server_args(vllm_overrides)
 
             host_file = f"{output_dir}/judge_host.txt"
-            ep = get_server_entrypoint()  # WORKAROUND(vllm-0.17-hermes, harmony-aarch64)
-            serve_cmd = f"python3 {ep}"
+            serve_cmd = "python3 -m nemo_skills.inference.server.serve_vllm"
             vllm_cmd = (
                 f"{serve_cmd}"
                 f"    --model {judge_vllm_cfg['model_path']}"
@@ -589,9 +589,9 @@ class GRPOStage(BaseStage):
         cmd = (
             f"{NRL_PYTHON_PREAMBLE} && "
             f"{config_snippet} && "
-            f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/NeMo-RL && "
+            f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/nemo-rl && "
             f"echo 'Starting training' && "
-            f"$NRL_PYTHON /opt/NeMo-RL/examples/nemo_gym/run_grpo_nemo_gym.py "
+            f"$NRL_PYTHON /opt/nemo-rl/examples/nemo_gym/run_grpo_nemo_gym.py "
             f"  --config {config_path}"
             f"  ++policy.model_name={hf_model}"
             f"  ++cluster.gpus_per_node={prepared.num_gpus}"
@@ -603,7 +603,7 @@ class GRPOStage(BaseStage):
 
         if prepared.backend == "megatron":
             cmd += " ++policy.dtensor_cfg.enabled=false ++policy.megatron_cfg.enabled=true"
-            cmd += " ++policy.optimizer=None ++policy.dynamic_batching.enabled=false"
+            cmd += " ++policy.optimizer=null ++policy.dynamic_batching.enabled=false"
         else:
             cmd += " ++policy.dtensor_cfg.enabled=true ++policy.megatron_cfg.enabled=false"
 
@@ -677,6 +677,11 @@ class GRPOStage(BaseStage):
                         num_nodes=prepared.num_nodes,
                         cluster_config=cluster_config,
                         with_ray=True,
+                        # Forward the cluster's Ray template (e.g. ray_enroot.sub.j2)
+                        # so SLURM 25.x uses the enroot-compatible head/worker
+                        # launch; without this nemo-run defaults to ray.sub.j2 and
+                        # the Ray head container never becomes ready.
+                        ray_template=cluster_config.get("ray_template"),
                         sbatch_kwargs=sbatch_kwargs,
                         installation_command=config.get("installation_command"),
                         partition=partition,
@@ -748,13 +753,18 @@ class GRPOStage(BaseStage):
                     'echo "[nvflow] Judge host=$JH, waiting for /health..."; '
                     'while ! curl -sf "http://$JH/health" >/dev/null 2>&1; do sleep 15; done; '
                     'echo "[nvflow] Judge healthy, monitoring started"; '
+                    # Tolerance raised from 3x60s (~3min) to 30x120s (~60min): the judge is only
+                    # needed during rollout collection, NOT during the (long) logprob/train phase.
+                    # A transient blip or a scheduler preemption of the idle judge during that phase
+                    # must NOT tear training down before it completes the step and checkpoints. If the
+                    # judge is genuinely gone for ~60min, then shut down (step-2 rollouts can't score).
                     "F=0; "
                     "while true; do "
-                    "  sleep 60; "
+                    "  sleep 120; "
                     '  if ! curl -sf "http://$JH/health" >/dev/null 2>&1; then '
                     "    F=$((F+1)); "
-                    '    echo "[nvflow] Judge health check failed ($F/3)"; '
-                    "    [ $F -ge 3 ] && { "
+                    '    echo "[nvflow] Judge health check failed ($F/30)"; '
+                    "    [ $F -ge 30 ] && { "
                     '      echo "[nvflow] Judge unreachable, triggering shutdown..."; '
                     f"      touch {log_dir}/ENDED; "
                     "      return; }; "
@@ -775,6 +785,11 @@ class GRPOStage(BaseStage):
                     num_nodes=prepared.num_nodes,
                     cluster_config=cluster_config,
                     with_ray=True,
+                    # Forward the cluster's Ray template (e.g. ray_enroot.sub.j2)
+                    # so SLURM 25.x uses the enroot-compatible head/worker launch;
+                    # without this nemo-run defaults to ray.sub.j2 and the Ray head
+                    # container never becomes ready.
+                    ray_template=cluster_config.get("ray_template"),
                     sbatch_kwargs=sbatch_kwargs,
                     installation_command=config.get("installation_command"),
                     partition=partition,
@@ -825,7 +840,15 @@ class GRPOStage(BaseStage):
         prefix = cluster_config.get("job_name_prefix", "")
         account = cluster_config.get("account", "")
         partition = cluster_config.get("cpu_partition") or cluster_config.get("partition", "batch")
-        host_log_dir = resolve_host_path(f"{prepared.output_dir}/training-logs")
+        remote = launcher_is_remote(cluster_config)
+        if remote:
+            from nemo_skills.pipeline.utils import get_unmounted_path
+
+            host_log_dir = get_unmounted_path(
+                cluster_config, f"{prepared.output_dir}/training-logs"
+            )
+        else:
+            host_log_dir = resolve_host_path(f"{prepared.output_dir}/training-logs")
         log_file = f"{host_log_dir}/judge-cleanup-%j.log"
 
         for pair_idx in range(num_pairs):
@@ -867,22 +890,33 @@ class GRPOStage(BaseStage):
             )
 
             try:
-                result = subprocess.run(
-                    ["sbatch"],
-                    input=sbatch_script,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if result.returncode == 0:
+                if remote:
+                    # Off-cluster: submit over the ssh tunnel (the launch host has
+                    # no local sbatch).  Feed the script via heredoc on stdin --
+                    # the same way `sbatch` reads a script piped to it.
+                    from nemo_skills.pipeline.utils.cluster import get_tunnel
+
+                    heredoc = f"sbatch <<'NVFLOW_SBATCH_EOF'\n{sbatch_script}\nNVFLOW_SBATCH_EOF\n"
+                    res = get_tunnel(cluster_config).run(heredoc, hide=True, warn=True)
+                    rc = getattr(res, "exited", getattr(res, "return_code", 1))
+                    out, err = res.stdout, res.stderr
+                else:
+                    result = subprocess.run(
+                        ["sbatch"],
+                        input=sbatch_script,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    rc, out, err = result.returncode, result.stdout, result.stderr
+                if rc == 0:
                     console.detail(
                         f"Judge cleanup (pair {pair_idx})",
-                        f"submitted ({result.stdout.strip()}), depends on grpo job {slurm_job_id}",
+                        f"submitted ({out.strip()}), depends on grpo job {slurm_job_id}",
                     )
                 else:
                     console.warning(
-                        f"Failed to submit judge cleanup for pair {pair_idx}: "
-                        f"{result.stderr.strip()}"
+                        f"Failed to submit judge cleanup for pair {pair_idx}: {err.strip()}"
                     )
             except Exception as e:
                 console.warning(f"Could not submit judge cleanup for pair {pair_idx}: {e}")

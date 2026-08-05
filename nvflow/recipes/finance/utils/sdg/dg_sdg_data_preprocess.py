@@ -43,6 +43,7 @@ from typing import Any
 # External dependencies
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+from nvflow.lib.sdg.document_grounded.sampling import load_distribution, weighted_random_choice
 from nvflow.utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -404,6 +405,11 @@ def generate_header_info(html_path: Path) -> str:
             ticker = parts[idx - 1]
             year = parts[idx + 1]
             form = "10-Q"
+        elif "8-K" in parts:
+            idx = parts.index("8-K")
+            ticker = parts[idx - 1]
+            year = parts[idx + 1]
+            form = "8-K"
         else:
             return f"File: {html_path.name}"
         return f"{ticker} {form} form for fiscal year {year}, file: {html_path.name}"
@@ -477,8 +483,17 @@ def run_chunking(
         return output_dir
 
     total_chunks = 0
+    skipped = 0
     for html_file in html_files:
         rel_parent = html_file.parent.relative_to(input_dir)
+        # Resume support: if this HTML was already chunked in a previous (e.g.
+        # timed-out) run, its output dir exists and is non-empty -- skip the
+        # expensive parse/tokenize. Chunks are written sequentially, so at most
+        # the single file interrupted mid-write last time may be slightly short.
+        chunk_dir = output_dir / rel_parent / html_file.stem
+        if chunk_dir.is_dir() and any(chunk_dir.iterdir()):
+            skipped += 1
+            continue
         chunks_created = process_html_file(
             html_file,
             encoder=encoder,
@@ -489,7 +504,12 @@ def run_chunking(
         )
         total_chunks += chunks_created
 
-    logger.info("Processed %d file(s), created %d chunk(s)", len(html_files), total_chunks)
+    logger.info(
+        "Processed %d file(s) (skipped %d already-chunked), created %d chunk(s)",
+        len(html_files) - skipped,
+        skipped,
+        total_chunks,
+    )
     return output_dir
 
 
@@ -503,13 +523,16 @@ def get_relative_path(full_path: str, start_path: str) -> str:
     return os.path.relpath(full_path, start_path)
 
 
-def generate_chunk_lists(chunk_dir: Path, csv_output_dir: Path) -> Path:
+def generate_chunk_lists(chunk_dir: Path, csv_output_dir: Path, forms: list[str] = None) -> Path:
     """Generate CSV file lists from chunked files."""
+    if forms is None:
+        forms = ["10-K", "10-Q"]
+
     logger.info("Generating chunk lists from %s to %s", chunk_dir, csv_output_dir)
 
     os.makedirs(csv_output_dir, exist_ok=True)
 
-    result: dict[str, dict[str, list[dict[str, str]]]] = {"10-K": {}, "10-Q": {}}
+    result: dict[str, dict[str, list[dict[str, str]]]] = {f: {} for f in forms}
     input_root = str(chunk_dir)
 
     if not os.path.exists(input_root):
@@ -521,7 +544,7 @@ def generate_chunk_lists(chunk_dir: Path, csv_output_dir: Path) -> Path:
         if not os.path.isdir(company_path):
             continue
 
-        for form_type in ["10-K", "10-Q"]:
+        for form_type in forms:
             form_path = os.path.join(company_path, form_type)
             if not os.path.exists(form_path):
                 continue
@@ -593,7 +616,7 @@ def generate_chunk_lists(chunk_dir: Path, csv_output_dir: Path) -> Path:
                             result[form_type][item].append(chunk_data)
 
     # Write CSVs
-    for form_type in ["10-K", "10-Q"]:
+    for form_type in forms:
         for item, chunks in result[form_type].items():
             csv_filename = f"{form_type.lower().replace('-', '')}_{item}.csv"
             csv_path = os.path.join(csv_output_dir, csv_filename)
@@ -619,31 +642,6 @@ def generate_chunk_lists(chunk_dir: Path, csv_output_dir: Path) -> Path:
 # =============================================================================
 # Part 3: Generate JSONL Data (from dg_sdg_10k.py / dg_sdg_10q.py)
 # =============================================================================
-
-
-def load_distribution(distribution_path: str) -> dict[str, int]:
-    """Load distribution file into a dictionary."""
-    if not HAS_PANDAS:
-        # Fallback to csv module
-        dist = {}
-        with open(distribution_path) as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                dist[row["item_section"]] = int(row["count"])
-        return dist
-
-    df = pd.read_csv(distribution_path)
-    return {row["item_section"]: row["count"] for _, row in df.iterrows()}
-
-
-def weighted_random_choice(distribution_dict: dict[str, int]) -> str:
-    """Choose an item based on weighted distribution."""
-    items = sorted(distribution_dict.keys())
-    weights = [distribution_dict[item] for item in items]
-    total_weight = sum(weights)
-    if total_weight == 0:
-        return random.choice(items)
-    return random.choices(items, weights=weights, k=1)[0]
 
 
 def generate_jsonl_data(
@@ -1084,7 +1082,17 @@ def generate_jsonl_data(
 
     item_prefix = "Item " if form_type == "10-K" else ""
 
-    with open(output_file, "w", encoding="utf-8") as out_f:
+    # Write to a temp sibling, then atomically replace -- the generic dg-sdg
+    # preprocess stage (dg_sdg_preprocess.py) skips re-sampling on resume when
+    # this exact final path already exists and is non-empty. Writing directly
+    # to output_file would let a killed/timed-out job (OOM, 24h Slurm wall-time
+    # -- see the sap-500 8-K volume note) leave a truncated-but-non-empty file
+    # that the skip check mistakes for a complete sample, silently feeding a
+    # short/corrupt corpus into the entire downstream Q-gen pipeline forever
+    # (no error raised). Atomic replace guarantees the final path only ever
+    # holds a fully-written file.
+    tmp_output_file = output_file.with_suffix(output_file.suffix + ".tmp")
+    with open(tmp_output_file, "w", encoding="utf-8") as out_f:
         for result in company1_result:
             if "item_section1" not in result:
                 company_name = result["company_name"]
@@ -1215,6 +1223,8 @@ def generate_jsonl_data(
                     + "\n"
                 )
 
+    os.replace(tmp_output_file, output_file)
+
     logger.info(
         "Written %d records to %s", len(company1_result) + len(company2_result), output_file
     )
@@ -1235,10 +1245,15 @@ def run_full_preprocess(
     total_samples: int = 150000,
     max_skip_count: int = 20000,
     seed: int = 42,
+    forms: list[str] = None,
 ):
     """Run the full preprocessing pipeline."""
+    if forms is None:
+        forms = ["10-K", "10-Q"]
+
     logger.info("=" * 60)
     logger.info("SEC Data Preprocessing Pipeline")
+    logger.info("Forms: %s", ", ".join(forms))
     logger.info("=" * 60)
 
     # Step 1: Chunk HTML files
@@ -1248,6 +1263,7 @@ def run_full_preprocess(
         output_dir=chunk_output_dir,
         max_tokens=max_tokens,
         overlap_tokens=overlap_tokens,
+        filings=forms,
     )
 
     # Step 2: Generate CSV file lists
@@ -1255,37 +1271,32 @@ def run_full_preprocess(
     generate_chunk_lists(
         chunk_dir=chunk_output_dir,
         csv_output_dir=csv_output_dir,
+        forms=forms,
     )
 
-    # Step 3: Generate JSONL data for both 10-K and 10-Q
+    # Step 3: Generate JSONL data for each requested form type. Each form needs
+    # matching {form}_1company_distribution.csv / {form}_2company_distribution.csv
+    # under distribution_dir; forms without them are skipped (logged) by
+    # generate_jsonl_data.
     jsonl_output_dir = output_dir / "jsonl"
 
-    total_10k = generate_jsonl_data(
-        chunk_dir=chunk_output_dir,
-        csv_dir=csv_output_dir,
-        distribution_dir=distribution_dir,
-        output_dir=jsonl_output_dir,
-        form_type="10-K",
-        total_samples=total_samples,
-        max_skip_count=max_skip_count,
-        seed=seed,
-    )
-
-    total_10q = generate_jsonl_data(
-        chunk_dir=chunk_output_dir,
-        csv_dir=csv_output_dir,
-        distribution_dir=distribution_dir,
-        output_dir=jsonl_output_dir,
-        form_type="10-Q",
-        total_samples=total_samples,
-        max_skip_count=max_skip_count,
-        seed=seed,
-    )
+    per_form_totals: dict[str, int] = {}
+    for form_type in forms:
+        per_form_totals[form_type] = generate_jsonl_data(
+            chunk_dir=chunk_output_dir,
+            csv_dir=csv_output_dir,
+            distribution_dir=distribution_dir,
+            output_dir=jsonl_output_dir,
+            form_type=form_type,
+            total_samples=total_samples,
+            max_skip_count=max_skip_count,
+            seed=seed,
+        )
 
     logger.info("=" * 60)
     logger.info("Preprocessing Complete!")
-    logger.info("  10-K samples: %d", total_10k)
-    logger.info("  10-Q samples: %d", total_10q)
+    for form_type, n in per_form_totals.items():
+        logger.info("  %s samples: %d", form_type, n)
     logger.info("  Output directory: %s", output_dir)
     logger.info("=" * 60)
 
@@ -1331,11 +1342,22 @@ def parse_args():
         help="Maximum number of skipped samples before stopping (default: 20000)",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+    parser.add_argument(
+        "--forms",
+        type=str,
+        default="10-K 10-Q",
+        help=(
+            "Space-separated SEC form types to process (default: '10-K 10-Q'). "
+            "Each form needs matching {form}_1company/2company_distribution.csv "
+            "under --distribution_dir (e.g. 8-K -> 8k_*.csv)."
+        ),
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    forms = [f for f in args.forms.split() if f]
     run_full_preprocess(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
@@ -1345,4 +1367,5 @@ if __name__ == "__main__":
         total_samples=args.total_samples,
         max_skip_count=args.max_skip_count,
         seed=args.seed,
+        forms=forms,
     )

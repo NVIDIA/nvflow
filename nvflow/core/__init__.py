@@ -14,12 +14,30 @@
 #
 """Core infrastructure for workflow orchestration."""
 
+from typing import TYPE_CHECKING, Any
+
 from nvflow.core import console
 from nvflow.core.base_stage import BaseStage
 from nvflow.core.stage_registry import StageRegistry
-from nvflow.core.workflow_runner import WorkflowRunner
+
+if TYPE_CHECKING:
+    from nvflow.core.workflow_runner import WorkflowRunner
 
 __all__ = ["BaseStage", "StageRegistry", "WorkflowRunner", "console"]
+
+
+def __getattr__(name: str) -> Any:
+    # WorkflowRunner pulls in omegaconf, which is absent from minimal worker
+    # containers (e.g. the SAM localization image). Those workers import only
+    # leaf helper modules under nvflow.recipes, and recipe auto-discovery
+    # touches this package -- so importing WorkflowRunner eagerly here would
+    # crash them with ModuleNotFoundError. Resolve it lazily instead.
+    if name == "WorkflowRunner":
+        from nvflow.core.workflow_runner import WorkflowRunner
+
+        return WorkflowRunner
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Note: nemo-skills functions are imported directly in stage files when needed:
 # from nemo_skills.pipeline.cli import generate, run_cmd, wrap_arguments

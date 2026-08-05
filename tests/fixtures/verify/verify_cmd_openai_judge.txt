@@ -1,0 +1,91 @@
+set -e
+
+OUTPUT_DIR="/out/verify"
+GYM_PATH="/opt/Gym"
+UV_VENV_DIR="/opt/Gym"
+INPUT_FILE="/in/rollouts/output-rs0.jsonl"
+OUTPUT_FILE="/out/verify/rejudge/output-rs0.jsonl"
+DONE_FILE="/out/verify/rejudge/output-rs0.jsonl.done"
+CONFIG_PATHS="vllm.yaml,env.yaml,overlay.yaml"
+NUM_PARALLEL="8"
+JOB_LABEL="rejudge_rs0"
+ENVIRONMENT_NAME="finance_env"
+
+mkdir -p "$OUTPUT_DIR/logs" "$OUTPUT_DIR/rejudge"
+
+find_free_port() {
+    python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()"
+}
+
+HEAD_SERVER_PORT=$(find_free_port)
+
+NG_RUN_PID=""
+
+cleanup() {
+    echo ""
+    echo "[Cleanup] Shutting down NeMo-Gym servers ..."
+    [ -n "$NG_RUN_PID" ] && kill $NG_RUN_PID 2>/dev/null && wait $NG_RUN_PID 2>/dev/null || true
+}
+trap cleanup EXIT
+
+wait_for_server() {
+    local url="$1" name="$2" pid="$3" max_attempts="$4" log="$5"
+    echo "  Waiting for $name at $url ..."
+    for i in $(seq 1 $max_attempts); do
+        if curl -s -m 5 "$url" > /dev/null 2>&1; then
+            echo "  $name ready after $((i * 5))s"
+            return 0
+        fi
+        if ! kill -0 $pid 2>/dev/null; then
+            echo "ERROR: $name died. Check $log"
+            exit 1
+        fi
+        sleep 5
+    done
+    echo "ERROR: $name did not start within $((max_attempts * 5))s"
+    exit 1
+}
+
+echo "============================================================"
+echo "Compute Rewards (re-judge)  [$JOB_LABEL]"
+echo "============================================================"
+echo "Input file:   $INPUT_FILE"
+echo "Output file:  $OUTPUT_FILE"
+echo "Judge mode:   openai"
+echo "Environment:  $ENVIRONMENT_NAME"
+echo "============================================================"
+
+cd "$GYM_PATH"
+
+echo ""
+echo "[Step 1/2] Starting NeMo-Gym servers ..."
+gym env start "+config_paths=[$CONFIG_PATHS]" \
+    "+policy_model.responses_api_models.vllm_model.base_url=http://localhost:0/v1" \
+    "+policy_model.responses_api_models.vllm_model.api_key=EMPTY" \
+    "+policy_model.responses_api_models.vllm_model.model=unused" \
+    "+head_server.host=127.0.0.1" \
+    "+head_server.port=$HEAD_SERVER_PORT" \
+    "+skip_venv_if_present=true" \
+    "+uv_venv_dir=$UV_VENV_DIR" \
+    "+judge_model.responses_api_models.openai_model.base_url=https://api.openai.com/v1" \
+    "+judge_model.responses_api_models.openai_model.api_key_env_var=OPENAI_API_KEY" \
+    "+judge_model.responses_api_models.openai_model.model=gpt-4o-mini" \
+    "+finance_env.resources_servers.finance_env.judge_model_server.name=judge_model" \
+    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &
+NG_RUN_PID=$!
+
+wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" $NG_RUN_PID 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log"
+
+echo ""
+echo "[Step 2/2] Re-judging rollouts ..."
+PYTHONPATH=/nemo_run/code python3 -m nvflow.lib.rl.verify_worker \
+    "$INPUT_FILE" \
+    "$OUTPUT_FILE-async" \
+    "127.0.0.1" \
+    "$HEAD_SERVER_PORT" \
+    "$ENVIRONMENT_NAME" \
+    "$NUM_PARALLEL"
+
+mv "$OUTPUT_FILE-async" "$OUTPUT_FILE"
+touch "$DONE_FILE"
+echo "Done [$JOB_LABEL]. Cleanup via trap."

@@ -1,0 +1,269 @@
+set -e
+
+OUTPUT_DIR=/out/rollout
+GYM_PATH=/opt/Gym
+UV_VENV_DIR=/opt/Gym
+MODEL_PATH=/hf_models/Qwen/Qwen3-30B-A3B
+AGENT_NAME=finance_agent
+INPUT_DATA=/data/train.jsonl
+OUTPUT_FILE=/out/rollout/rs0/chunk_0.jsonl
+DONE_FILE=/out/rollout/rs0/chunk_0.jsonl.done
+CONFIG_PATHS=vllm.yaml,env.yaml,overlay.yaml
+NUM_PARALLEL=512
+JOB_LABEL=rs0_chunk0
+VLLM_URL="http://policy:8000/v1"
+JUDGE_URL="http://judge:8001/v1"
+CHUNK_ID=0
+NUM_CHUNKS=8
+
+mkdir -p "$OUTPUT_DIR/logs"
+
+find_free_port() {
+    python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()"
+}
+
+NG_RUN_PID=""
+
+cleanup() {
+    local _nvflow_exit=$?
+    echo ""
+    echo "[Cleanup] Shutting down NeMo-Gym servers ..."
+    # Suppress stderr via ``2>&-`` (close fd) instead of
+    # ``2>/dev/null`` so the cleanup trap stays quiet even if
+    # the container's /dev/null disappeared mid-script -- which
+    # is exactly what happened in the Nemotron-Nano smoke run
+    # where pyxis tore down the container while bash was still
+    # in the cleanup path, producing ``/dev/null: No such file
+    # or directory`` noise on top of the original failure.
+    [ -n "$NG_RUN_PID" ] && kill $NG_RUN_PID 2>&- && wait $NG_RUN_PID 2>&- || true
+    # Best-effort merge of .prev into -async.  On success, finalize already
+    # merged and removed .prev so this block is a no-op.  On failure/kill,
+    # this is a first attempt; the self-heal at next startup is the guarantee.
+    # Chain with && so .prev is NEVER deleted unless the merge succeeds.
+    if [ -n "$ASYNC_FILE" ] && [ -f "$ASYNC_FILE.prev" ] && [ "${PREV_MERGED:-0}" -eq 0 ]; then
+        echo "[Cleanup] Restoring previous results into -async for resume ..."
+        cat "$ASYNC_FILE.prev" > "$ASYNC_FILE.restored" \
+            && { [ ! -f "$ASYNC_FILE" ] || cat "$ASYNC_FILE" >> "$ASYNC_FILE.restored"; } \
+            && mv -f "$ASYNC_FILE.restored" "$ASYNC_FILE" \
+            && rm -f "$ASYNC_FILE.prev" \
+            || echo "[Cleanup] WARNING: merge failed — self-heal will recover on next start"
+    fi
+    if [ $_nvflow_exit -ne 0 ]; then
+        echo "[nvflow] Client exited with code $_nvflow_exit — cancelling job ${SLURM_JOB_ID}"
+        scancel "${SLURM_JOB_ID}" 2>&- || kill 0 2>&- || true
+    fi
+}
+trap cleanup EXIT
+
+wait_for_server() {
+    local url="$1" name="$2" pid="$3" max_attempts="$4" log="$5"
+    echo "  Waiting for $name at $url ..."
+    for i in $(seq 1 $max_attempts); do
+        if curl -s -m 5 "$url" > /dev/null 2>&1; then
+            echo "  $name ready after $((i * 5))s"
+            return 0
+        fi
+        if ! kill -0 $pid 2>/dev/null; then
+            echo "ERROR: $name died. Check $log"
+            exit 1
+        fi
+        sleep 5
+    done
+    echo "ERROR: $name did not start within $((max_attempts * 5))s"
+    exit 1
+}
+
+echo "============================================================"
+echo "Rollout Collection  [$JOB_LABEL]"
+echo "============================================================"
+echo "Model:       $MODEL_PATH"
+echo "Agent:       $AGENT_NAME"
+echo "Input data:  $INPUT_DATA"
+echo "Output file: $OUTPUT_FILE"
+echo "Policy URL:  $VLLM_URL"
+[ -n "$JUDGE_URL" ] && echo "Judge URL:   $JUDGE_URL"
+echo "============================================================"
+if [ -f "$DONE_FILE" ]; then
+    echo "Chunk already complete (.done exists) — skipping."
+    exit 0
+fi
+
+echo ""
+echo "[Step 1/3] Waiting for vLLM servers ..."
+wait_for_server "http://policy:8000/v1/models" "Policy vLLM" $$ 400 /dev/null
+wait_for_server "http://judge:8001/v1/models" "Judge vLLM" $$ 400 /dev/null
+
+CHUNK_INPUT=""
+if [ $NUM_CHUNKS -gt 1 ]; then
+    echo ""
+    echo "[Step 1a] Extracting chunk slice ..."
+    TOTAL_LINES=$(wc -l < "$INPUT_DATA")
+    EFFECTIVE=$TOTAL_LINES
+    MAX_SAMPLES=0
+    if [ $MAX_SAMPLES -gt 0 ] && [ $MAX_SAMPLES -lt $TOTAL_LINES ]; then
+        EFFECTIVE=$MAX_SAMPLES
+    fi
+    CHUNK_SIZE=$(( (EFFECTIVE + NUM_CHUNKS - 1) / NUM_CHUNKS ))
+    START_LINE=$(( CHUNK_ID * CHUNK_SIZE + 1 ))
+    END_LINE=$(( (CHUNK_ID + 1) * CHUNK_SIZE ))
+    [ $END_LINE -gt $EFFECTIVE ] && END_LINE=$EFFECTIVE
+    CHUNK_INPUT="$OUTPUT_DIR/chunk_input_chunk$CHUNK_ID.jsonl"
+    head -n $END_LINE "$INPUT_DATA" | tail -n +$START_LINE > "$CHUNK_INPUT"
+    echo "  Chunk $CHUNK_ID/$NUM_CHUNKS: lines $START_LINE-$END_LINE ($((END_LINE - START_LINE + 1)) samples)"
+    INPUT_DATA="$CHUNK_INPUT"
+fi
+ASYNC_FILE="$OUTPUT_FILE-async"
+(
+  # Case A: output exists without .done → restore to -async
+  if [ -f "$OUTPUT_FILE" ] && [ ! -f "$DONE_FILE" ]; then
+      echo "[Self-heal] Output file exists without .done — restoring to -async ..."
+      mv -f "$OUTPUT_FILE" "$ASYNC_FILE"
+  fi
+
+  # Case B: orphaned .prev → merge into -async
+  if [ -f "$ASYNC_FILE.prev" ]; then
+      echo "[Self-heal] Found orphaned .prev — merging into -async ..."
+      PREV_LINES=$(wc -l < "$ASYNC_FILE.prev")
+      ASYNC_LINES=0
+      [ -f "$ASYNC_FILE" ] && ASYNC_LINES=$(wc -l < "$ASYNC_FILE")
+      cat "$ASYNC_FILE.prev" > "$ASYNC_FILE.healed"
+      [ -f "$ASYNC_FILE" ] && cat "$ASYNC_FILE" >> "$ASYNC_FILE.healed"
+      mv -f "$ASYNC_FILE.healed" "$ASYNC_FILE" && rm -f "$ASYNC_FILE.prev"
+      MERGED_LINES=$(wc -l < "$ASYNC_FILE")
+      echo "  Recovered $PREV_LINES (prev) + $ASYNC_LINES (async) = $MERGED_LINES total rows"
+  fi
+
+  # Case C: clean up orphaned temp files from prior crash
+  rm -f "$ASYNC_FILE.healed" "$ASYNC_FILE.restored" "$ASYNC_FILE.merged"
+) || echo "[Self-heal] WARNING: recovery failed — continuing with available data"
+REMAINING_INPUT="$OUTPUT_DIR/remaining_input_chunk$CHUNK_ID.jsonl"
+
+if ! PYTHONPATH=/nemo_run/code python3 -m nvflow.lib.rl.resume_filter "$ASYNC_FILE" "$INPUT_DATA" "$REMAINING_INPUT" 0; then
+    echo "ERROR: resume_filter failed" >&2
+    exit 1
+fi
+
+if [ -f "$ASYNC_FILE" ] && [ ! -s "$REMAINING_INPUT" ]; then
+    echo "All rows already completed in -async -- finalizing."
+    cp -f "$ASYNC_FILE" "$OUTPUT_FILE"
+    touch "$DONE_FILE"
+    PREV_MERGED=1
+    rm -f "$ASYNC_FILE" "$ASYNC_FILE.prev"
+    echo "Done [$JOB_LABEL]."
+    exit 0
+fi
+
+HEAD_SERVER_PORT=$(find_free_port)
+
+cd "$GYM_PATH"
+
+echo ""
+echo "[Step 2/3] Starting NeMo-Gym servers ..."
+gym env start "+config_paths=[$CONFIG_PATHS]" \
+    "+policy_model.responses_api_models.vllm_model.base_url=$VLLM_URL" \
+    "+policy_model.responses_api_models.vllm_model.api_key=EMPTY" \
+    "+policy_model.responses_api_models.vllm_model.model=$MODEL_PATH" \
+    "+head_server.host=127.0.0.1" \
+    "+head_server.port=$HEAD_SERVER_PORT" \
+    "+port_range_low=1024" \
+    "+port_range_high=8999" \
+    "+skip_venv_if_present=true" \
+    "+uv_venv_dir=$UV_VENV_DIR" \
+    "+judge_model.responses_api_models.vllm_model.entrypoint=app.py" \
+    "+judge_model.responses_api_models.vllm_model.base_url=http://judge:8001/v1" \
+    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &
+NG_RUN_PID=$!
+
+wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" $NG_RUN_PID 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log"
+
+echo ""
+echo "[Step 3/3] Collecting rollouts ..."
+# Back up previous partial results before `gym eval run` clears the file.
+ASYNC_BACKUP=""
+PREV_MERGED=0
+if [ -s "$ASYNC_FILE" ]; then
+    ASYNC_BACKUP="$ASYNC_FILE.prev"
+    cp "$ASYNC_FILE" "$ASYNC_BACKUP"
+fi
+# Ensure clean slate for first attempt.  Prior data is safe in .prev.
+# Stale materialized_inputs from a prior Slurm job would cause
+# resume_from_cache to load wrong task indexes.
+rm -f "$ASYNC_FILE"
+MATERIALIZED="$(dirname "$ASYNC_FILE")/$(basename "$ASYNC_FILE" .jsonl-async)_materialized_inputs.jsonl"
+rm -f "$MATERIALIZED"
+# Retry loop: the vLLM tokenizer race condition (RuntimeError: Already
+# borrowed) can crash the client on the initial request burst.  Retrying
+# after a short delay shifts the timing and almost always succeeds.
+# resume_from_cache=true ensures retries skip completed samples.
+_NVFLOW_MAX_RETRIES=3
+_NVFLOW_RETRY_DELAY=15
+_NVFLOW_EXIT=0
+for _attempt in $(seq 1 $_NVFLOW_MAX_RETRIES); do
+    # Guard: truncate corrupted last line from SIGKILL mid-write
+    if [ -f "$ASYNC_FILE" ] && [ -s "$ASYNC_FILE" ]; then
+        if [ "$(tail -c 1 "$ASYNC_FILE" | xxd -p)" != "0a" ]; then
+            head -n -1 "$ASYNC_FILE" > "$ASYNC_FILE.truncated" \
+                && mv -f "$ASYNC_FILE.truncated" "$ASYNC_FILE" \
+                || rm -f "$ASYNC_FILE.truncated"
+            echo "[nvflow] Truncated corrupted last line from $ASYNC_FILE"
+        fi
+    fi
+    set +e
+    gym eval run --no-serve \
+        ${AGENT_NAME:++agent_name=$AGENT_NAME} \
+        +input_jsonl_fpath=$REMAINING_INPUT \
+        +output_jsonl_fpath=$ASYNC_FILE \
+        +num_repeats=1 \
+        +resume_from_cache=true \
+        +num_samples_in_parallel=$NUM_PARALLEL \
+        +head_server.host=127.0.0.1 \
+        +head_server.port=$HEAD_SERVER_PORT \
+        +responses_create_params.max_output_tokens=32768 \
+        +responses_create_params.temperature=1.0
+    _NVFLOW_EXIT=$?
+    set -e
+    [ $_NVFLOW_EXIT -eq 0 ] && break
+    # F6: `gym eval run` can exit non-zero AFTER all rollouts
+    # have already been written to ASYNC_FILE -- the gym's
+    # post-collection aggregate_metrics call returned 500 in the
+    # Nemotron-Nano smoke run, killing the process at 99% even
+    # though all 1000 rollouts were on disk.  Retrying in that
+    # state is wasteful (re-runs everything) and dangerous if the
+    # container FS is being torn down (we hit
+    # ``/usr/bin/sleep: No such file or directory`` then).  If
+    # ASYNC_FILE has at least as many rows as REMAINING_INPUT, we
+    # already have what we need; declare success and let finalize
+    # do its job.
+    if [ -f "$ASYNC_FILE" ] && [ -s "$ASYNC_FILE" ]; then
+        _async_rows=$(wc -l < "$ASYNC_FILE" 2>&- || echo 0)
+        _input_rows=$(wc -l < "$REMAINING_INPUT" 2>&- || echo 0)
+        if [ "$_input_rows" -gt 0 ] && [ "$_async_rows" -ge "$_input_rows" ]; then
+            echo "[nvflow] gym eval run exited $_NVFLOW_EXIT but $ASYNC_FILE has $_async_rows/$_input_rows rows -- treating as complete (post-collection error in gym, rollouts intact)."
+            _NVFLOW_EXIT=0
+            break
+        fi
+    fi
+    if [ $_attempt -lt $_NVFLOW_MAX_RETRIES ]; then
+        echo "[nvflow] gym eval run exited $_NVFLOW_EXIT (attempt $_attempt/$_NVFLOW_MAX_RETRIES). Retrying in ${_NVFLOW_RETRY_DELAY}s ..."
+        sleep $_NVFLOW_RETRY_DELAY
+        _NVFLOW_RETRY_DELAY=$((_NVFLOW_RETRY_DELAY * 2))
+    fi
+done
+if [ $_NVFLOW_EXIT -ne 0 ]; then
+    echo "[nvflow] gym eval run failed after $_NVFLOW_MAX_RETRIES attempts."
+    exit $_NVFLOW_EXIT
+fi
+
+# Merge previous partial results with new results.
+if [ -n "$ASYNC_BACKUP" ] && [ -f "$ASYNC_BACKUP" ]; then
+    cat "$ASYNC_BACKUP" "$ASYNC_FILE" > "$ASYNC_FILE.merged"
+    mv -f "$ASYNC_FILE.merged" "$ASYNC_FILE"
+    PREV_MERGED=1
+    rm -f "$ASYNC_BACKUP"
+fi
+cp -f "$ASYNC_FILE" "$OUTPUT_FILE"
+touch "$DONE_FILE"
+# Safe to clean up — .done exists, chunk won't be rescheduled.
+rm -f "$ASYNC_FILE" "$REMAINING_INPUT"
+[ -n "$CHUNK_INPUT" ] && rm -f "$CHUNK_INPUT"
+echo "Done [$JOB_LABEL]. Cleanup via trap."

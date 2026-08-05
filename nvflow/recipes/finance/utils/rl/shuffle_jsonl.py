@@ -32,7 +32,10 @@ Usage::
         --random_seed 42
 """
 
+from __future__ import annotations
+
 import argparse
+import os
 import random
 import sys
 from pathlib import Path
@@ -42,8 +45,23 @@ from nvflow.utils import setup_logger
 logger = setup_logger(__name__)
 
 
-def shuffle_file(input_file: str, random_seed: int) -> int:
-    """Shuffle the JSONL file at ``input_file`` in place.
+def shuffle_file(input_file: str | Path, random_seed: int) -> int:
+    """Shuffle the JSONL file at ``input_file`` in place, atomically.
+
+    Crash semantics: writes the shuffled content to ``{path}.tmp`` and
+    then renames it over ``{path}`` via :func:`os.replace`.  POSIX
+    guarantees the rename is atomic on the same mount, so a process
+    killed at any point sees one of two states:
+
+      1. Original ``train.jsonl`` is fully intact (rename did not
+         happen yet).
+      2. Shuffled ``train.jsonl`` is fully written (rename completed).
+
+    Without this, an interrupted in-place rewrite would leave a
+    partially-written ``train.jsonl`` -- step-5 ``collect_rollouts``
+    would silently consume the corrupted file (``iter_jsonl`` drops
+    the cut-off last record), giving an off-by-N rollout count that
+    is invisible without manual auditing.
 
     Uses a deterministic seed so reruns produce the same order.  Reads
     the full file into memory (jsonl is line-oriented so this is safe
@@ -52,17 +70,30 @@ def shuffle_file(input_file: str, random_seed: int) -> int:
     """
     path = Path(input_file)
     if not path.exists():
-        logger.error("Input file does not exist: %s", path)
-        sys.exit(1)
+        raise FileNotFoundError(f"Input file does not exist: {path}")
 
-    with open(path, "rb") as f:
+    with path.open("rb") as f:
         lines = f.readlines()
 
     rng = random.Random(random_seed)
     rng.shuffle(lines)
 
-    with open(path, "wb") as f:
-        f.write(b"".join(lines))
+    # Sibling tmp file (same directory) -- ``os.replace`` is atomic
+    # only when source and destination share a mount point.
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        with tmp_path.open("wb") as f:
+            f.write(b"".join(lines))
+        os.replace(tmp_path, path)
+    except BaseException:
+        # Clean up the tmp file on any failure path (KeyboardInterrupt,
+        # disk-full IOError, etc.) so reruns start from a clean state.
+        # ``replace`` is the last operation, so if we got here either
+        # the write or the replace failed -- in both cases the original
+        # ``path`` is still untouched and the tmp may be partial.
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
     return len(lines)
 
@@ -78,7 +109,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    n = shuffle_file(args.input_file, args.random_seed)
+    try:
+        n = shuffle_file(args.input_file, args.random_seed)
+    except FileNotFoundError as e:
+        logger.error("%s", e)
+        return 1
     logger.info("Shuffled %d rows with seed=%d -> %s", n, args.random_seed, args.input_file)
     return 0
 

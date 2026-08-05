@@ -66,7 +66,7 @@ Evaluate three baseline models on finance benchmarks to understand pre-fine-tuni
 uv run nflow list-stages --config nvflow/recipes/finance/workflows/eval/demo.yaml
 ```
 
-1. `prepare_data` — Prepare benchmark datasets (SecQUE, FinanceBench) into `nvflow/recipes/finance/datasets/`
+1. `prepare_data` — Prepare benchmark datasets (SecQUE, FinanceBench) into `outputs/finance/eval-datasets/`
 2. `qwen3-4b` — Evaluate Qwen3-4B on SecQUE and FinanceBench
 3. `gemma-3-4b-it` — Evaluate Gemma 3 4B IT on SecQUE and FinanceBench
 4. `gpt-oss-20b` — Evaluate GPT-OSS 20B on SecQUE and FinanceBench
@@ -80,12 +80,12 @@ uv run nflow run prepare_data --config nvflow/recipes/finance/workflows/eval/dem
 
 Verify the data is ready (expect ~565 SecQUE and ~150 FinanceBench examples):
 ```bash
-wc -l nvflow/recipes/finance/datasets/secque/eval.jsonl nvflow/recipes/finance/datasets/financebench/eval.jsonl
+wc -l outputs/finance/eval-datasets/secque/eval.jsonl outputs/finance/eval-datasets/financebench/eval.jsonl
 ```
 
 **prepare_data output:**
 ```
-nvflow/recipes/finance/datasets/       # shared across workflows
+outputs/finance/eval-datasets/   # shared across workflows
 ├── secque/
 │   └── eval.jsonl
 ├── financebench/
@@ -156,6 +156,17 @@ Qwen3-4B and GPT-OSS 20B leverage reasoning (thinking mode and Harmony format re
 
 Download 10-K and 10-Q filings for 7 demo companies from SEC EDGAR. The download utility is built into nvflow and uses the `edgartools` library to fetch filings and extract sections.
 
+> **Required first:** SEC EDGAR rejects requests that don't identify the caller, and the config ships with placeholders. Edit the `demo` stage in `nvflow/recipes/finance/workflows/download_sec_filings.yaml` before running — there is no command-line override:
+>
+> ```yaml
+> stages:
+>   demo:
+>     sec_identity_email: your.email@company.com
+>     sec_identity_company: YourCompany
+> ```
+>
+> See the [SEC Fair Access Policy](https://www.sec.gov/os/accessing-edgar-data).
+
 **Preview stages:**
 ```bash
 uv run nflow list-stages --config nvflow/recipes/finance/workflows/download_sec_filings.yaml
@@ -205,6 +216,19 @@ outputs/finance/demo/workflow-2-download-sec/
 > Config: `template-based-sdg-demo.yaml` | Output: `outputs/finance/demo/workflow-3-template-based-sdg/`
 
 Generate financial Q&A pairs using the template-based SDG workflow.
+
+> **Required first:** `create_seed_data` reaches both SEC EDGAR and HuggingFace, so before running:
+>
+> 1. Set your SEC identity in `nvflow/recipes/finance/workflows/sdg/template-based-sdg.yaml` (inherited by the demo config, and shipped with placeholders):
+>
+>    ```yaml
+>    stages:
+>      create_seed_data:
+>        sec_identity_email: your.email@company.com
+>        sec_identity_company: YourCompany
+>    ```
+>
+> 2. Temporarily clear `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE` and `TRANSFORMERS_OFFLINE` in your cluster config, since the seed dataset is pulled from HuggingFace. Re-enable them afterwards. See [Offline runtime](troubleshooting.md#offline-runtime).
 
 **Preview stages:**
 ```bash
@@ -277,7 +301,7 @@ uv run nflow list-stages --config nvflow/recipes/finance/workflows/sft/qwen3_4b.
 
 **Pre-check:** If you skipped Step 1 (baseline eval), ensure benchmark datasets exist:
 ```bash
-wc -l nvflow/recipes/finance/datasets/secque/eval.jsonl nvflow/recipes/finance/datasets/financebench/eval.jsonl
+wc -l outputs/finance/eval-datasets/secque/eval.jsonl outputs/finance/eval-datasets/financebench/eval.jsonl
 # Expected: 565 secque + 150 financebench
 ```
 
@@ -398,7 +422,7 @@ Stage 7 (`collect_rollouts`) includes automatic sub-jobs:
 
 **Pre-check:** If you skipped Step 1 (baseline eval), ensure benchmark datasets exist:
 ```bash
-wc -l nvflow/recipes/finance/datasets/secque/eval.jsonl nvflow/recipes/finance/datasets/financebench/eval.jsonl
+wc -l outputs/finance/eval-datasets/secque/eval.jsonl outputs/finance/eval-datasets/financebench/eval.jsonl
 # Expected: 565 secque + 150 financebench
 ```
 
@@ -449,7 +473,7 @@ uv run nflow run collect_rollouts --config nvflow/recipes/finance/workflows/grpo
 # Post-rollout train/val split (CPU)
 uv run nflow run train_validation_split --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e finance_sec_search
 
-# Training (Megatron, 64 GPUs — uses separate config for YaRN + CP=4)
+# Training (Megatron, 16 GPUs — uses separate config for YaRN + CP=8)
 uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
 ```
 
@@ -468,7 +492,7 @@ squeue --me
 # Rollout logs (one per seed per environment)
 tail -f outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-5-collect-rollouts/*/logs/*.log
 # Training logs
-tail -f outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-7-training/*/grpo-qwen3-4b-*/training-logs/ray-*-job.log
+tail -f outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-8-training/*/grpo-qwen3-4b-*/training-logs/ray-*-job.log
 ```
 
 **Verify rollouts (both environments):**
@@ -494,10 +518,10 @@ ls outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-8-training/equivalence_llm
 ls outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-8-training/finance_sec_search/grpo-qwen3-4b-*/checkpoints/
 ```
 
-**Verify evaluation:**
+**Verify evaluation** (results are per-environment, matching the training checkpoints):
 ```bash
-cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-8-eval/step-20/eval-results/secque/metrics.json
-cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-8-eval/step-20/eval-results/financebench/metrics.json
+cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-9-eval/finance_sec_search/step-20/eval-results/secque/metrics.json
+cat outputs/finance/demo/workflow-5-grpo/qwen3_4b/step-9-eval/finance_sec_search/step-20/eval-results/financebench/metrics.json
 ```
 
 **Output:**
@@ -544,10 +568,16 @@ outputs/finance/demo/workflow-5-grpo/
 │   │           ├── checkpoints/
 │   │           └── training-logs/
 │   └── step-9-eval/
-│       └── step-20/
-│           └── eval-results/
-│               ├── secque/metrics.json
-│               └── financebench/metrics.json
+│       ├── equivalence_llm_judge/      # Per-env results
+│       │   └── step-20/
+│       │       └── eval-results/
+│       │           ├── secque/metrics.json
+│       │           └── financebench/metrics.json
+│       └── finance_sec_search/
+│           └── step-20/
+│               └── eval-results/
+│                   ├── secque/metrics.json
+│                   └── financebench/metrics.json
 ```
 
 > **Per-environment training:** Each environment produces a separate model checkpoint. To train a single combined model on both environments, omit `-e` in the training command.
@@ -578,50 +608,8 @@ outputs/finance/demo/workflow-5-grpo/
 
 ## Troubleshooting
 
-<details>
-<summary><b>Download fails with "SEC rate limit"</b></summary>
+See the comprehensive **[Finance Recipe Troubleshooting](troubleshooting.md)** guide for issues across all workflows (SEC rate limits, missing `sec_metadata.parquet`, jobs not starting, eval metrics `N/A`, `Address already in use`, offline-runtime errors, resuming interrupted runs, and more).
 
-SEC EDGAR has rate limits. The downloader includes automatic throttling, but if you hit limits:
-- Wait 10 minutes and retry
-- Ensure `sec_identity_email` is valid in cluster config
-
-</details>
-
-<details>
-<summary><b>"File not found: sec_metadata.parquet"</b></summary>
-
-Download stage may not have completed. Check logs:
-```bash
-ls outputs/finance/demo/workflow-2-download-sec/download-logs/
-```
-
-</details>
-
-<details>
-<summary><b>SFT job not starting</b></summary>
-
-Check SLURM queue and partition availability:
-```bash
-squeue --me
-sinfo -p interactive
-```
-
-</details>
-
-<details>
-<summary><b>Eval metrics show "N/A"</b></summary>
-
-Ensure the `checkpoint_path` in your SFT/GRPO config's `stages.eval` section matches your actual training output directory.
-
-</details>
-
-<details>
-
-<summary><b>vLLM server crashes with "Address already in use"</b></summary>
-
-Simply re-run the failed stage. The pipeline will retry only the chunks that did not complete.
-
-</details>
 ---
 
 [Workflow Documentation](workflows/) | [Stage Reference](stages/) | [Main README](README.md)

@@ -1,0 +1,69 @@
+# HopChain image filtering workflow
+# This workflow is intentionally separate from the SDG workflow because it runs
+# at a different scale and produces reusable filtered-image artifacts.
+
+recipe: multimodal
+
+workflow:
+  name: "hopchain_image_filter"
+  type: "image_filter"
+  description: "Filter candidate HopChain images before SDG synthesis"
+
+cluster: my_cluster
+
+model_profiles:
+  qwen:
+    model: qwen3.5-397b-a17b
+    server_type: sglang
+    server_gpus: 8
+    server_nodes: 2
+    server_args: >-
+      --model-path /hf_models/Qwen/Qwen3.5-397B-A17B
+      --served-model-name qwen3.5-397b-a17b
+      --context-length 131072
+      --tp 16
+      --ep-size 16
+      --trust-remote-code
+      --reasoning-parser qwen3
+      --mem-fraction-static 0.80
+      --chunked-prefill-size 4096
+    max_image_dimension: 2048
+    tokens_to_generate: 16384
+    max_concurrent_requests: 64
+    time_min: 120
+    use_base64_images: true
+
+# Run from the repository root. Machine-specific mounts, partitions, and
+# container paths belong in cluster_configs/my_cluster.yaml.
+project_root: ${oc.env:PWD}
+base_data_dir: ${project_root}/outputs/hopchain
+execution_id: full
+
+cluster_config_dir: ${project_root}/cluster_configs
+image_filter_data_dir: ${base_data_dir}/image_filter
+
+directories:
+  image-filter: ${image_filter_data_dir}/execution/${execution_id}/image-filter
+
+pipeline_stages:
+  - image_filter
+
+stages:
+  image_filter:
+    image_directories:
+      - directory: ${project_root}/data/images
+        recursive: true
+    output_dir: ${directories.image-filter}
+    project_root: ${project_root}
+    cluster_config_dir: ${cluster_config_dir}
+    prompt_file: nvflow/recipes/multimodal/prompts/hopchain_image_filter.txt
+    model_config: ${model_profiles.qwen}
+    min_complexity_score: 4
+    allowed_quality_ratings:
+      - High
+      - Medium
+    temperature: 0.0
+    top_p: 1.0
+    tokens_to_generate: 16384
+    num_chunks: 6
+    dependencies: []

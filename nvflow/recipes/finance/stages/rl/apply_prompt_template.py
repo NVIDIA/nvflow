@@ -27,6 +27,7 @@ written to ``{output_dir}/{env_name}/``.
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.cli_cmd import build_python_cmd
 
 
 @StageRegistry.register(recipe="finance", workflow="grpo", stage="apply_prompt_template")
@@ -51,6 +52,7 @@ class ApplyPromptTemplateStage(BaseStage):
         environments = resolve_environments(config)
         base_input_dir = config["input_dir"]
         base_output_dir = config["output_dir"]
+        container = config["container"]
 
         # Dynamic current_date knobs (all optional -- feature activates only
         # when sec_metadata_parquet is set in config).
@@ -105,6 +107,7 @@ class ApplyPromptTemplateStage(BaseStage):
                 fallback_current_date=fallback_current_date,
                 parquet_accession_column=parquet_accession_column,
                 parquet_filing_date_column=parquet_filing_date_column,
+                container=container,
                 cluster=cluster,
                 expname=f"{expname}-{env_name}",
                 run_after=run_after,
@@ -125,34 +128,41 @@ class ApplyPromptTemplateStage(BaseStage):
         fallback_current_date: str,
         parquet_accession_column: str,
         parquet_filing_date_column: str,
+        container: str,
         cluster: str,
         expname: str,
         run_after: list[str] | None,
     ) -> None:
         from nemo_skills.pipeline.cli import run_cmd, wrap_arguments
 
-        cmd = (
-            f"python -m nvflow.recipes.finance.utils.rl.prompt_template_applier "
-            f"    '{input_dir}' '{output_dir}' "
-            f"    --prompt_template '{prompt_template}'"
-        )
+        # ``prompt_template_applier`` takes ``input_dir`` and
+        # ``output_dir`` positionally, then optional flags.
+        flag_kwargs: dict[str, str | int | float] = {
+            "prompt_template": prompt_template,
+        }
         if answer_prefix:
-            cmd += f" --answer_prefix '{answer_prefix}'"
+            flag_kwargs["answer_prefix"] = answer_prefix
         if sec_metadata_parquet:
-            cmd += (
-                f" --sec_metadata_parquet '{sec_metadata_parquet}'"
-                f" --raw_sdg_source_dir '{raw_sdg_source_dir}'"
-                f" --raw_sdg_filename '{raw_sdg_filename}'"
-                f" --jitter_min_days {jitter_min_days}"
-                f" --jitter_max_days {jitter_max_days}"
-                f" --fallback_current_date '{fallback_current_date}'"
-                f" --parquet_accession_column '{parquet_accession_column}'"
-                f" --parquet_filing_date_column '{parquet_filing_date_column}'"
-            )
+            flag_kwargs["sec_metadata_parquet"] = sec_metadata_parquet
+            flag_kwargs["raw_sdg_source_dir"] = raw_sdg_source_dir
+            flag_kwargs["raw_sdg_filename"] = raw_sdg_filename
+            flag_kwargs["jitter_min_days"] = jitter_min_days
+            flag_kwargs["jitter_max_days"] = jitter_max_days
+            flag_kwargs["fallback_current_date"] = fallback_current_date
+            flag_kwargs["parquet_accession_column"] = parquet_accession_column
+            flag_kwargs["parquet_filing_date_column"] = parquet_filing_date_column
+
+        cmd = build_python_cmd(
+            "nvflow.recipes.finance.utils.rl.prompt_template_applier",
+            input_dir,
+            output_dir,
+            **flag_kwargs,
+        )
 
         run_cmd(
             ctx=wrap_arguments(cmd),
             cluster=cluster,
+            container=container,
             num_gpus=0,
             log_dir=f"{output_dir}/logs",
             expname=expname,
@@ -163,7 +173,7 @@ class ApplyPromptTemplateStage(BaseStage):
 
     def validate_config(self, config: dict[str, Any]) -> None:
         """Check that all required fields are present."""
-        for field in ("input_dir", "output_dir"):
+        for field in ("input_dir", "output_dir", "container"):
             if not config.get(field):
                 raise ValueError(f"'{field}' is required in apply_prompt_template config")
         if not config.get("environments"):

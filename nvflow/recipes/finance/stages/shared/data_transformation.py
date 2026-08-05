@@ -25,6 +25,7 @@ and ``output_file`` from config (SFT single-dataset mode).
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.cli_cmd import build_python_cmd
 
 
 @StageRegistry.register(recipe="finance", workflow="sft", stage="data_transformation")
@@ -156,34 +157,45 @@ class DataTransformationStage(BaseStage):
     ) -> None:
         from nemo_skills.pipeline.cli import run_cmd, wrap_arguments
 
-        input_files_str = " ".join(f"'{f}'" for f in input_files)
-        cmd = (
-            f"python -m nvflow.recipes.finance.utils.shared.dataset_transformer "
-            f"    {input_files_str} "
-            f"    --output_file '{output_file}'"
-        )
-
-        cmd += f" --source_format {source_format}"
-        cmd += f" --reasoning_mode {reasoning_mode}"
-
+        # ``dataset_transformer`` takes one or more positional input file
+        # paths followed by ``--output_file`` and other flag options.
+        # ``build_python_cmd`` shlex-quotes both positional and flag
+        # values -- this matters for the SFT path too, since SFT shares
+        # this stage and any future config that contains a path with
+        # spaces or shell metacharacters would otherwise produce a
+        # broken Slurm command.
+        flag_kwargs: dict[str, str | int | float] = {
+            "output_file": output_file,
+            "source_format": source_format,
+            "reasoning_mode": reasoning_mode,
+        }
         if num_chunks > 1:
-            cmd += f" --num_chunks {num_chunks}"
+            flag_kwargs["num_chunks"] = num_chunks
 
         filter_outliers = config.get("filter_outliers", False)
         if filter_outliers:
-            cmd += " --filter_outliers"
             filter_config = config.get("filter_config", {})
+            flag_kwargs["context_min_percentile"] = filter_config.get("context_min_percentile", 1.0)
+            flag_kwargs["context_max_percentile"] = filter_config.get(
+                "context_max_percentile", 99.0
+            )
+            flag_kwargs["reasoning_min_percentile"] = filter_config.get(
+                "reasoning_min_percentile", 1.0
+            )
+            flag_kwargs["reasoning_max_percentile"] = filter_config.get(
+                "reasoning_max_percentile", 99.0
+            )
 
-            context_min = filter_config.get("context_min_percentile", 1.0)
-            context_max = filter_config.get("context_max_percentile", 99.0)
-            reasoning_min = filter_config.get("reasoning_min_percentile", 1.0)
-            reasoning_max = filter_config.get("reasoning_max_percentile", 99.0)
+        cmd = build_python_cmd(
+            "nvflow.recipes.finance.utils.shared.dataset_transformer",
+            *input_files,
+            **flag_kwargs,
+        )
 
-            cmd += f" --context_min_percentile {context_min}"
-            cmd += f" --context_max_percentile {context_max}"
-            cmd += f" --reasoning_min_percentile {reasoning_min}"
-            cmd += f" --reasoning_max_percentile {reasoning_max}"
-
+        # Boolean flags (no value) are appended directly; ``build_python_cmd``
+        # cannot express value-less flags through kwargs.
+        if filter_outliers:
+            cmd += " --filter_outliers"
         if config.get("deduplicate_by_uuid", False):
             cmd += " --deduplicate_by_uuid"
 

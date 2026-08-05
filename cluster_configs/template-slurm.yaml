@@ -5,14 +5,15 @@
 #
 # Then update all <PLACEHOLDER> values with your settings.
 #
-# Container versions tested with this release (self-sufficient, no runtime downloads):
-#   nemo-skills: nvflow-nemo-skills (NeMo-Skills @ 0229040)
-#   vllm:        nvflow-vllm (base vllm/vllm-openai v0.18.1, standalone SDG/eval)
-#   vllm-grpo:   nvflow-vllm-grpo (base vllm/vllm-openai v0.17.1, GRPO rollouts/judge)
+# Container versions tested with this release:
+#   nemo-skills: nvflow-nemo-skills (NeMo-Skills @ e06c9b90, tag v1.1.2)
+#   vllm:        nvflow-vllm (base vllm/vllm-openai v0.22.0, standalone SDG/eval)
+#   vllm-grpo:   nvflow-vllm at the v0.20.0 tag (base vllm/vllm-openai v0.20.0, GRPO rollouts/judge)
 #   sglang:      lmsysorg/sglang v0.5.10.post1
-#   nemo-rl:     nvflow-nemo-rl (base nvcr.io/nvidia/nemo-rl:v0.6.0, pre-built venvs + Gym)
+#   nemo-rl:     nvflow-nemo-rl (base nvcr.io/nvidia/nemo-rl v0.7.0; SFT/GRPO trainer, Gym venvs baked)
+#   nemo-gym:    nvflow-nemo-gym (base python:3.12-slim, CPU-only; per-component Gym venvs — DG-SDG gym stages)
 #
-# Reference: https://github.com/NVIDIA/NeMo-Skills
+# Reference: https://github.com/NVIDIA-NeMo/Skills
 
 executor: slurm
 
@@ -80,11 +81,13 @@ extra_sandbox_args:
 # After converting containers to .sqsh format (see INSTALL.md), paste paths here.
 containers:
   # Required containers (self-sufficient — all deps pre-installed, no runtime downloads)
-  nemo-skills: <PATH_TO_CONTAINERS>/nvflow-nemo-skills.sqsh    # Orchestration client (eval, SDG, data prep)
-  vllm: <PATH_TO_CONTAINERS>/nvflow-vllm.sqsh                  # vLLM v0.18.1 standalone (SDG, eval)
-  vllm-grpo: <PATH_TO_CONTAINERS>/nvflow-vllm-grpo.sqsh        # vLLM v0.17.1 standalone (GRPO rollouts, judge)
-  sglang: <PATH_TO_CONTAINERS>/sglang.sqsh                     # sglang inference server (SDG stages 3-5)
-  nemo-rl: <PATH_TO_CONTAINERS>/nvflow-nemo-rl.sqsh            # NeMo-RL v0.6.0 for SFT and GRPO training
+  # setup_containers.sh names each file <yaml-key>-<tag>.sqsh.
+  nemo-skills: <PATH_TO_CONTAINERS>/nemo-skills-v1.1.2.sqsh   # Orchestration client (eval, SDG, data prep)
+  vllm: <PATH_TO_CONTAINERS>/vllm-v0.22.0.sqsh                # vLLM v0.22.0 standalone (SDG, eval)
+  vllm-grpo: <PATH_TO_CONTAINERS>/vllm-grpo-v0.20.0.sqsh      # vLLM v0.20.0 standalone (GRPO rollouts, judge); same image repo as vllm, different tag
+  sglang: <PATH_TO_CONTAINERS>/sglang-v0.5.10.post1.sqsh          # sglang inference server (SDG stages 3-5)
+  nemo-rl: <PATH_TO_CONTAINERS>/nemo-rl-v0.7.0.sqsh               # NeMo-RL v0.7.0 for SFT and GRPO training
+  nemo-gym: <PATH_TO_CONTAINERS>/nemo-gym-0.4.0.sqsh              # CPU-only Gym client for the Gym-only stages (DG-SDG gym stages; no NeMo-RL trainer)
   # Optional containers (not currently used by NVFlow recipes)
   # trtllm: <PATH_TO_CONTAINERS>/trtllm.sqsh
   # megatron: <PATH_TO_CONTAINERS>/megatron.sqsh
@@ -97,17 +100,22 @@ containers:
 # Map cluster paths to container paths
 mounts:
   - <CLUSTER_PATH_TO_HF_MODELS>:/hf_models   # HuggingFace models
-  - <CLUSTER_PATH_TO_WORKSPACE>:/workspace   # Your workspace
+  # /workspace is a WRITABLE DATA dir (outputs + caches) -- NOT the source repo.
+  # Recipe code and checked-in assets (prompts, dataset descriptors, overlays) ship
+  # via the nemo-run packaged snapshot at /nemo_run/code on every worker, so the
+  # repo is never mounted. This mount only needs to hold writable runtime data:
+  #   /workspace/outputs/**            stage outputs, checkpoints, SEC cache, eval-datasets
+  #   /workspace/cache/huggingface     HF_HOME (see env_vars below)
+  # Point it at a dedicated data dir (e.g. a sibling of your repo checkout), not the
+  # checkout itself.
+  - <CLUSTER_PATH_TO_WORKSPACE_DATA>:/workspace   # Writable data dir (outputs + cache)
   # Add more mounts as needed:
   # - /lustre/data:/data
   #
-  # --- NeMo-RL / NeMo-Gym source overlays (dev mode only) ---
-  # The nvflow-nemo-rl container includes NeMo-RL source and pre-built Gym
-  # venvs. Mounting host clones here shadows the container's venvs and
-  # breaks GRPO stages. Only uncomment for local source iteration with
-  # NRL_FORCE_REBUILD_VENVS=true enabled below.
-  # - <PATH_TO_NEMO_RL_CLONE>:/opt/NeMo-RL
-  # - <PATH_TO_GYM_CLONE>:/opt/NeMo-RL/3rdparty/Gym-workspace/Gym
+  # No Gym source mount is needed: the nemo-rl and nemo-gym images both bake
+  # their NeMo-Gym venvs, so nothing is built at job runtime. Bind-mounting a
+  # host clone over /opt/nemo-rl/3rdparty/Gym-workspace/Gym shadows those baked
+  # venvs and breaks the GRPO stages -- do it only for dev-mode work.
 
 # =============================================================================
 # Timeouts (per partition)
@@ -135,13 +143,17 @@ env_vars:
   - VIRTUAL_ENV_PROMPT=  # Unset venv prompt
 
   # --- Offline enforcement (recommended) ---
-  # Prevents accidental network calls at runtime. Containers are self-sufficient.
-  # Clear HF_*_OFFLINE temporarily for one-time stages that download external
-  # data (download_sec_filings, create_seed_data). UV_OFFLINE should stay set.
+  # Prevents accidental network calls at runtime. Clear HF_*_OFFLINE temporarily
+  # for one-time stages that download external data (download_sec_filings,
+  # create_seed_data).
   - HF_HUB_OFFLINE=1
   - HF_DATASETS_OFFLINE=1
   - TRANSFORMERS_OFFLINE=1
-  - UV_OFFLINE=true
+  # UV_OFFLINE: left UNSET (global flag). The images bake every venv they need,
+  # so no stage resolves packages at runtime either way. Leaving it unset keeps
+  # the escape hatch for dev-mode work on components outside the baked set.
+  # Set true only for a strict-airgap cluster.
+  # - UV_OFFLINE=true
 
   # Pre-cached tiktoken encodings (baked into vllm/vllm-grpo containers;
   # set here for uniform coverage across all container types).
@@ -152,10 +164,6 @@ env_vars:
   # Ray worker port range — avoids collisions with OS ephemeral ports.
   - MIN_WORKER_PORT=7000
   - MAX_WORKER_PORT=8000
-
-  # Only enable in dev mode when iterating on NeMo-RL/Gym source overlays.
-  # Forces Ray workers to rebuild venvs from mounted source (requires internet).
-  # - NRL_FORCE_REBUILD_VENVS=true
 
   # API keys (keep these secret, don't commit to git!)
   # - HF_TOKEN=<YOUR_HF_TOKEN>

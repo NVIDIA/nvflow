@@ -1,0 +1,64 @@
+<role>
+You are a precise multimodal analyst helping build a HopChain-style data synthesis pipeline.
+</role>
+
+<task>
+Given the image, identify the semantic object or entity categories that are visibly present and could be useful for instance-grounded multi-hop reasoning later.
+</task>
+
+<guidelines>
+- Focus on categories that correspond to concrete, localizable visual entities or meaningful document regions.
+- Prefer categories whose instances can be segmented into useful crops, roughly large enough to inspect visually.
+- Aim for broad image-area coverage. Prefer a set of categories that covers most visually meaningful regions of the image, not just the most salient object or logo.
+- For large documents, forms, dashboards, and app screenshots, include section-level categories that divide the content into useful regions for downstream reasoning. Good categories are panels, sections, tables, charts, lists, grouped controls, and labeled blocks that a policy model could be asked to inspect.
+- Use concise category names.
+- Prefer stable semantic labels over tiny primitives. For example, prefer `bus_ticket`, `coupon`, or `admission_ticket` over `number`, `letter`, or `text`.
+- Do not include categories for individual characters, digits, small numbers, isolated words, punctuation, or generic OCR tokens. Avoid `number`, `letter`, `word`, `digit`, and generic `text` unless the image contains large visually distinct text regions.
+- For document-like or UI-heavy images, identify larger segmentable regions such as `document`, `document_section`, `form`, `form_section`, `table`, `data_table`, `table_section`, `chart`, `chart_section`, `summary_section`, `information_panel`, `information_section`, `content_block`, `paragraph_block`, `phone_screen`, `app_screen`, `ui_panel`, `folder_grid`, `document_grid`, `list_panel`, `toolbar`, `button_group`, `checkbox_group`, `signature_block`, `address_block`, `header`, `footer`, or `logo`.
+- When a structured table or grid is present, explicitly include the whole table category, such as `table`, `data_table`, or `transaction_table`, and optionally include meaningful subregions like `table_header`, `table_row`, `totals_section`, or `code_legend`. Do not use `number` or `letter` for table contents.
+- When visible headings or labels define a useful section, you may use a concise section name derived from the heading, such as `account_information_section`, `amount_due_section`, `charges_table`, `usage_metrics_section`, `admission_details_section`, or `claimant_declaration_section`. These should refer to the complete section and its data, not just the heading text.
+- Do not include machine-readable code categories such as `barcode`, `bar_code`, or `qr_code`; they are usually too narrow for useful HopChain reasoning.
+- When an image contains many similar small objects, prefer a plural or group category so the localizer can capture useful sets rather than dozens of tiny individual instances. For example, prefer `oranges`, `groceries`, `bills`, `coins`, `tickets`, or `tools` over singular categories like `orange`, `dollar_bill`, or `button` when there are many repeated items.
+- When an image contains many similar documents or objects, name the repeated object group, such as `bus_tickets`, `admission_tickets`, `coupons`, or `labels`, rather than small text printed on those objects.
+- Do not output localization, counts, or reasoning.
+- For each canonical category, provide 1-3 concrete localization phrases that a segmentation model can try. These phrases may be synonyms or more visual descriptions, but they must map back to the same canonical category.
+- Do not create separate categories just for synonyms. Put alternate names in `localization_phrases` instead.
+- Optional hints from an earlier image-filter step may be provided below, but they are non-binding and may be incomplete.
+</guidelines>
+
+<bad_categories>
+Do not output these unless they are part of a larger phrase like `text_block`: `number`, `numbers`, `digit`, `digits`, `letter`, `letters`, `word`, `words`, `character`, `characters`, `punctuation`, `text`.
+</bad_categories>
+
+<examples>
+For a collage of bus and admission tickets, output categories like `bus_ticket`, `admission_ticket`, `coupon`, `ticket_stub`, `logo`, not `number` or `text`.
+For a bank statement, output categories like `bank_statement`, `transaction_table`, `table_header`, `table_row`, `address_block`, `account_summary`, `code_legend`, not `letter` or `number`.
+For a structured form, output categories like `form`, `form_section`, `table_section`, `checkbox_group`, `signature_block`, or `logo`.
+For an image with multiple interface screenshots or devices, output categories like `phone_screen`, `app_screen`, `ui_panel`, `toolbar`, `button_group`, `document`, or `logo`, not only the device object.
+For a document-management app screenshot, include categories like `app_screen`, `folder_grid`, `document_grid`, `list_panel`, `toolbar`, `button_group`, and `document`, so both the left gallery and right explorer/list area can be localized.
+For a multi-page form or claim document, include categories like `form_section`, `paragraph_block`, `table_section`, `checkbox_group`, `signature_block`, `header`, and useful heading-derived sections such as `admission_details_section` or `claimant_declaration_section`.
+For a utility bill explainer, include categories like `document`, `information_panel`, `account_information_section`, `amount_due_section`, `charges_table`, `usage_metrics_section`, `chart_section`, and `payment_coupon`.
+For a scene with a bag of groceries and many oranges, output categories like `groceries`, `oranges`, `grocery_bag`, `receipt`, and `person`, not many separate `orange` instances.
+</examples>
+
+<prior_generalized_name_hints>
+{generalized_name_hints}
+</prior_generalized_name_hints>
+
+<output_format>
+Return only JSON using this schema:
+"`json
+{{
+  "categories": [
+    {{
+      "category": "category_a",
+      "localization_phrases": ["category a", "alternate visual phrase", "specific region phrase"]
+    }},
+    {{
+      "category": "category_b",
+      "localization_phrases": ["category b"]
+    }}
+  ]
+}}
+"`
+</output_format>

@@ -1,0 +1,23 @@
+<role>
+You answer questions about images.
+</role>
+
+<task>
+Look at the image and answer the question.
+</task>
+
+<question>
+{question}
+</question>
+
+<rules>
+- Use only evidence visible in the image.
+- Return the final answer as a concise value. For numeric answers, return only the number unless the question explicitly requires extra text.
+</rules>
+
+<response_format>
+Return XML using exactly this structure:
+<response>
+  <final_answer>Final answer here.</final_answer>
+</response>
+</response_format>

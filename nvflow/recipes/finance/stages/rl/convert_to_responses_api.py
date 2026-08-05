@@ -21,6 +21,7 @@ to ``{output_dir}/{env_name}/final_result.jsonl``.
 from typing import Any
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.cli_cmd import build_python_cmd
 
 
 @StageRegistry.register(recipe="finance", workflow="grpo", stage="convert_to_responses_api")
@@ -82,9 +83,12 @@ class ConvertToResponsesAPIStage(BaseStage):
     ) -> None:
         from nemo_skills.pipeline.cli import run_cmd, wrap_arguments
 
-        cmd = (
-            f"python -m nvflow.recipes.finance.utils.rl.responses_api_converter "
-            f"    '{input_path}' '{output_file}'"
+        # ``responses_api_converter`` takes ``input_path`` and
+        # ``output_file`` positionally, no flag options.
+        cmd = build_python_cmd(
+            "nvflow.recipes.finance.utils.rl.responses_api_converter",
+            input_path,
+            output_file,
         )
 
         run_cmd(

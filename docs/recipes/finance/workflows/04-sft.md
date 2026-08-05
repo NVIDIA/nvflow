@@ -56,11 +56,9 @@ Fine-tune language models on synthetic financial Q&A data generated from SDG wor
             │
             ▼
 ┌─────────────────────────┐
-│ 5. convert_to_messages  │  Conversion: Convert to OpenAI messages format
+│ 5. eval                 │  Evaluation: Score checkpoints on finance benchmarks
 └─────────────────────────┘
 ```
-
-> **Note:** All 6 stages run in the production `qwen3_14b.yaml` configuration. Some stages (`sequence_length_grouping`, `convert_to_messages`) may be optional for custom configurations.
 
 **6 Stages:**
 1. **data_transformation** (Step 0): Convert Q&A format to training format
@@ -68,7 +66,9 @@ Fine-tune language models on synthetic financial Q&A data generated from SDG wor
 3. **train_validation_split** (Step 2): Split into train/validation sets
 4. **sequence_length_grouping** (Step 3): Group by sequence length for efficiency
 5. **training** (Step 4): Fine-tune the model
-6. **convert_to_messages** (Step 5): Convert to message format for chat interfaces
+6. **eval** (Step 5): Evaluate checkpoints on finance benchmarks
+
+> **Qwen3 models add a seventh stage.** `qwen3_14b.yaml` inserts `convert_to_messages` between `training` and `eval` to convert checkpoints to the OpenAI messages format. Other configs, including the `qwen3_4b.yaml` demo, run the six stages above.
 
 **See [technical reference](../stages/sft.md) for detailed stage documentation.**
 

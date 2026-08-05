@@ -1,0 +1,16 @@
+set -e
+echo "Reward Analysis"
+echo "Analyzing rs0 ..."
+PYTHONPATH=/nemo_run/code python3 -m nvflow.recipes.finance.utils.rl.analyze_rollouts \
+    "/out/verify/rejudge/output-rs0.jsonl" \
+    "/out/verify/rejudge/analysis_rs0" \
+    "REWARD RE-COMPUTATION ANALYSIS"
+echo "Analyzing rs1 ..."
+PYTHONPATH=/nemo_run/code python3 -m nvflow.recipes.finance.utils.rl.analyze_rollouts \
+    "/out/verify/rejudge/output-rs1.jsonl" \
+    "/out/verify/rejudge/analysis_rs1" \
+    "REWARD RE-COMPUTATION ANALYSIS"
+echo "Done. Analysis complete."
+echo ""
+echo "To browse re-judged rollouts interactively (in the nemo-gym container):"
+echo "  export PATH=/opt/gym-cli-venv/bin:$PATH && ng_viewer +jsonl_fpath=/out/verify/rejudge/output-rs0.jsonl"

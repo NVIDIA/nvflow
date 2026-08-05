@@ -6,16 +6,15 @@ authors = [
     {name = "Your Team", email = "team@example.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 license = {text = "Apache-2.0"}
 
 dependencies = [
-    # NeMo-Skills for cluster job submission (brings ~200+ dependencies)
-    # This is the core framework we orchestrate - list it first for clarity
-    # Pinned to specific commit for reproducibility (nemo-skills doesn't use version tags)
-    # Pinned on: 2026-05-05 | Commit: 0229040 (consistent with nemo-skills:0229040 container)
-    # To update: Find commit with containers in cluster_configs/example-slurm.yaml
-    "nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@022904023ad7a83a87662a313cf72e7df5891d55",
+    # Core framework we orchestrate (brings ~200+ deps). Pinned to a commit
+    # since nemo-skills has no version tags.
+    # Pinned 2026-08-02 | e06c9b90 (paired with nemo-rl v0.7.0; NVFlow v1.1.2).
+    # Must match NEMO_SKILLS_COMMIT in dockerfiles/Dockerfile.nemo-skills.
+    "nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@e06c9b900177be3f60d6a3f99135bb5de9af9bed",
 
     # Configuration & Workflow
     "omegaconf>=2.3.0",      # YAML config loading with variable interpolation
@@ -27,10 +26,10 @@ dependencies = [
     # Data handling
     "jsonlines>=4.0.0",      # JSONL file reading/writing
 
-    # urllib3>=2.6.3 blocked by torchx<1.27 constraint (via nemo-skills → nemo-run → torchx)
-
-    # Note: Heavy dependencies (torch, transformers, etc.) come from nemo-skills
-    # Actual compute happens on Slurm cluster inside containers
+    # Declared directly ONLY so the CPU-index source below can route it (keeps
+    # CUDA out of the x86_64 client). Floor set for CVE remediation; otherwise
+    # tracks nemo-skills' torch.
+    "torch>=2.13.0",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +46,7 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.7.0",
     "types-PyYAML",
+    "types-requests",
 ]
 
 [project.scripts]
@@ -104,13 +104,48 @@ override-dependencies = [
     # Mirrors the override added in nemo-skills/pyproject.toml (PR #1433),
     # but [tool.uv] from a dep is ignored — overrides must be at the top-level project.
     "httpx[http2]>=0.28.1",
-    "urllib3>=2.6.3",
     # Force minimum versions of transitive deps for security/maintenance updates
-    "cryptography>=47.0.0",
-    "Pillow>=12.2.0",
+    "cryptography>=48.0.1",
+    "Pillow>=12.3.0",
     "Pygments>=2.20.0",
-    "GitPython>=3.1.49",
+    "GitPython>=3.1.52",   # 3.1.50 still resolves vulnerable; fixes land in 3.1.51/3.1.52 (Trivy HIGH)
+    # Nspec CVE remediation (2026-07-09) — long-term fixes
+    # ray[default]>=2.54.0 was previously overridden (removed in 4e1b7ec4 during rebase cleanup).
+    # Restoring at >=2.56.0 to cover both the functional fix (entrypoint_label_selector added
+    # in 2.54.0) and the Nspec CVE recommendation. Without this, nemo-run->torchx pins ray 2.53.0.
+    "ray[default]>=2.56.0",
+    "urllib3>=2.7.0",
+    "transformers>=5.13.0",
+    # CVE floors ported from !188 (litellm capped to 1.84.x to avoid the 1.91.x/aiohttp-4.0.0a1 conflict)
+    # lxml>=6.1.0 clears High CVE-2026-41066 (info disclosure / local file read)
+    "starlette>=1.3.1",
+    "litellm>=1.84.0,<1.85",
+    "lxml>=6.1.0",
+    "gradio>=6.20.0",
 ]
+
+# NSpect/Trivy HIGH CVE floors (2026-07-21) — transitive-only, raise lower bound.
+constraint-dependencies = [
+    "pyjwt>=2.12.0",
+    "python-multipart>=0.0.27",
+    "mcp>=1.28.1",
+    "msgpack>=1.2.1",
+    "nltk>=3.10.0",
+    "aiohttp>=3.13.3",
+    "pyarrow>=23.0.1",
+    "pyasn1>=0.6.4",  # CVE-2026-59886: exact big-integer exponentiation DoS
+    "soupsieve>=2.8.4",
+]
+
+# x86_64 torch from CPU wheels (arm64 PyPI torch is already CPU-only), keeping
+# CUDA runtime out of the amd64 client. explicit = only torch uses this index.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "platform_machine == 'x86_64'" }]
 
 [dependency-groups]
 dev = [

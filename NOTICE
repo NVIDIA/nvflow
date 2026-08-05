@@ -19,7 +19,7 @@ For full license texts, see the links below or the documentation of each
 component.
 
   - nemo-skills (NVIDIA NeMo-Skills)
-    https://github.com/NVIDIA/NeMo-Skills
+    https://github.com/NVIDIA-NeMo/Skills
     License: Apache-2.0
 
   - omegaconf

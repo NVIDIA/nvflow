@@ -1,0 +1,127 @@
+# ============================================================================
+# Finance DG-SDG Pipeline - Demo Configuration
+# ============================================================================
+# Quick E2E demo configuration for testing the full document-grounded pipeline.
+# Uses smaller models, fewer resources, and reduced data volume.
+#
+# Usage:
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/sdg/document-grounded-sdg-demo.yaml
+# ============================================================================
+
+# Inherit production config
+_base_: document-grounded-sdg.yaml
+
+base_data_dir: /workspace/outputs/finance/demo/workflow-2-document-grounded-sdg-demo
+
+# Use demo filings (already downloaded in workflow-0)
+filings_dir: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download
+
+# ============================================================================
+# Demo Stage Overrides - Only override what's different from prod
+# ============================================================================
+stages:
+
+  # --------------------------------------------------------------------------
+  # Stage 0: Preprocess - Fewer samples, smaller chunks
+  # --------------------------------------------------------------------------
+  dg_sdg_preprocess:
+    input_dir: ${filings_dir}/data
+    output_dir: ${base_data_dir}/step-0-preprocess
+    max_tokens: 2000
+    overlap_tokens: 300
+    total_samples: 500
+    max_skip_count: 2000
+    seed: 42
+
+  # --------------------------------------------------------------------------
+  # Stage 1: Q-pipeline - Smaller models, fewer seeds
+  # --------------------------------------------------------------------------
+  generate_verified_questions:
+    question_generation_kwargs:
+      args:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        num_random_seeds: 1
+        num_chunks: 6
+        max_model_len: 16384
+        tensor_parallel_size: 8
+      ctx_args: >-
+        ++prompt_config=nvflow/recipes/finance/prompts/document_grounded_generate_questions.yaml
+        ++inference.temperature=0.9
+        ++inference.top_p=0.9
+
+    question_verify_kwargs:
+      args:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        num_random_seeds: 3
+        # num_chunks: 4 keeps each job under the 4h Slurm wall-time limit.
+        # Q-verify is the largest stage: 1000 questions × 12 verifications/q
+        # = 12,000 records per seed; at ~1.6 s/record one chunk takes ~5.3h
+        # (silent TIMEOUT seen in run 4414738/9/40 → Gotcha #16 in SKILL.md).
+        # 4 chunks × 3,000 records × 1.6s ≈ 80 min per chunk, 3x headroom.
+        num_chunks: 12
+        max_model_len: 16384
+        tensor_parallel_size: 8
+      ctx_args: >-
+        ++prompt_config=nvflow/recipes/finance/prompts/document_grounded_verify_questions.yaml
+        ++inference.temperature=0.1
+        ++inference.top_p=0.1
+
+  # --------------------------------------------------------------------------
+  # Stage 2: A-pipeline - Smaller models, fewer seeds
+  # --------------------------------------------------------------------------
+  generate_answers:
+    answer_preprocess_kwargs:
+      threshold: 0.5
+
+    answer_generation_kwargs:
+      args:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        num_chunks: 12
+        num_random_seeds: 3
+        max_model_len: 16384
+        tensor_parallel_size: 8
+      ctx_args: >-
+        ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
+
+  # --------------------------------------------------------------------------
+  # Stage 3: GenSelect - Smaller model
+  # --------------------------------------------------------------------------
+  gym_genselect_answers:
+    policy_vllm:
+      model_path: /hf_models/openai/gpt-oss-120b
+      num_gpus: 8
+      server_nodes: 1
+      max_model_len: 65536
+      tensor_parallel_size: 8
+    num_chunks: 8
+
+  # --------------------------------------------------------------------------
+  # Stage 4: Evaluate - Fewer seeds, smaller model
+  # --------------------------------------------------------------------------
+  evaluate_answers:
+    policy_vllm:
+      model_path: /hf_models/openai/gpt-oss-120b
+      num_gpus: 8
+      server_nodes: 1
+      max_model_len: 16384
+      tensor_parallel_size: 8
+    num_chunks: 12
+    num_random_seeds: 3
+
+  # --------------------------------------------------------------------------
+  # Stage 5: Aggregate - Match seed count
+  # --------------------------------------------------------------------------
+  aggregate_answers:
+    num_seeds: 3
+
+  # --------------------------------------------------------------------------
+  # Stage 6: Post-process - Same as prod (no model needed)
+  # --------------------------------------------------------------------------
+  dgsdg_post_process:
+    seed: 42
