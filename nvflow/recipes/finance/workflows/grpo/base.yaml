@@ -98,6 +98,7 @@ pipeline_stages:
   - prepare_data                  # Step 4: Run ng_prepare_data (CPU)
   - prefetch_cache                # Pre-warm SEC metadata cache (CPU, optional, no step-N)
   - collect_rollouts              # Step 5: Rollout collection + reward profiling + filter
+  # - evaluate_provenance           # ProvenanceGuard evaluation (opt-in; depends on collect_rollouts)
   # - compute_rewards               # Step 6: Re-judge rollouts with different judge (optional)
   - train_validation_split        # Step 7: Final train/val split on reward-filtered data
   - training                      # Step 8: GRPO training with NeMo-Gym environment
@@ -126,6 +127,7 @@ directories:
   cache-finance-sec-search: ${base_output_dir}/cache/finance_sec_search
   # Model-specific stages (rollouts, training, eval).
   step-5-collect-rollouts: ${model_output_dir}/step-5-collect-rollouts
+  provenanceguard-eval: ${model_output_dir}/provenanceguard-eval
   step-6-compute-rewards: ${model_output_dir}/step-6-compute-rewards
   step-7-train-validation-split: ${model_output_dir}/step-7-train-validation-split
   step-8-training: ${model_output_dir}/step-8-training
@@ -531,6 +533,45 @@ stages:
     # is empty.
     filter:
       min_reward_std: 1e-6  # remove questions with zero reward variance (no GRPO gradient)
+
+  # --------------------------------------------------------------------------
+  # ProvenanceGuard Evaluation  [OPT-IN]
+  # --------------------------------------------------------------------------
+  # Runs ProvenanceGuard Open v1 provenance evaluation on the merged rollout
+  # files produced by collect_rollouts.  Produces sidecar JSONL files
+  # (provenanceguard-rs<seed>.jsonl) with per-row allow/block/unavailable
+  # verdicts, evidence metadata, and extraction errors.
+  #
+  # CPU-only: uses all-MiniLM-L6-v2 (routing) + DeBERTa NLI (lazy-loaded).
+  # Depends only on collect_rollouts.  No downstream dependencies.
+  #
+  # Input:  ${directories.step-5-collect-rollouts}/{env}/rollout/output-rs<seed>.jsonl
+  # Marker:  ${directories.step-5-collect-rollouts}/{env}/rollout/output-rs<seed>.jsonl.done
+  # Output:  ${directories.provenanceguard-eval}/{env}/provenanceguard-rs<seed>.jsonl
+  # Marker:  ${directories.provenanceguard-eval}/{env}/provenanceguard-rs<seed>.jsonl.done
+  #
+  # To enable, uncomment "# - evaluate_provenance" in pipeline_stages above.
+  evaluate_provenance:
+    output_dir: ${directories.provenanceguard-eval}
+    rollouts_dir: ${directories.step-5-collect-rollouts}
+    environments: ${environments}
+    container: "nemo-skills"
+    installation_command: "true"
+    num_gpus: 0
+    # ProvenanceGuard model IDs (lazy-loaded, CPU-only).
+    routing_model: "sentence-transformers/all-MiniLM-L6-v2"
+    nli_model: "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+    routing_model_revision: null
+    nli_model_revision: null
+    # Fixed fail-closed policy: contradiction, neutral, no_source,
+    # protected_value_mismatch always block; model/trace errors => unavailable.
+    # No configurable block_on_* toggles — the policy is fixed by design.
+    evidence_excerpt_length: 500
+    # Seeds dynamically inherited from collect_rollouts rollout settings.
+    starting_seed: ${stages.collect_rollouts.rollout.starting_seed}
+    num_random_seeds: ${stages.collect_rollouts.rollout.num_random_seeds}
+    dependencies:
+      - collect_rollouts
 
   # --------------------------------------------------------------------------
   # Stage 6: Compute Rewards (re-judge rollouts)  [OPTIONAL]
