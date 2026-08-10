@@ -89,6 +89,7 @@ SEC_FILING_URL_RE = re.compile(
 )
 
 
+
 @dataclass(frozen=True)
 class FilingMetadata:
     """SEC filing metadata extracted from sec_filing_search or URL parsing."""
@@ -216,6 +217,21 @@ def _iter_conversation_items(row: dict[str, Any]) -> Iterator[dict[str, Any]]:
             return
 
 
+def _canonicalize_document(document: str | None) -> str | None:
+    """Normalize a document name: strip query/fragment, take basename.
+
+    Ensures URL-derived and metadata-derived document names are identical:
+    ``10-K.htm``, ``10-K.htm?output=1``, and ``10-K.htm#part1`` all
+    yield ``10-K.htm``.
+    """
+    if not document:
+        return None
+    doc = str(document).strip()
+    doc = doc.split("?")[0].split("#")[0]
+    doc = os.path.basename(doc)
+    return doc if doc else None
+
+
 def _extract_filing_metadata(result: Any) -> FilingMetadata:
     """Extract CIK, accession, document, and URL from a sec_filing_search result."""
     if not isinstance(result, dict | list):
@@ -275,9 +291,13 @@ def _extract_filing_metadata(result: Any) -> FilingMetadata:
     if accession:
         accession = _format_accession(str(accession).strip())
     if document:
-        document = str(document).strip()
-        document = document.split("?")[0].split("#")[0]
-        document = os.path.basename(document)
+        document = _canonicalize_document(document)
+
+    if url:
+        url_filing = _extract_filing_from_url(url)
+        cik = cik or url_filing.cik
+        accession = accession or url_filing.accession
+        document = document or url_filing.document
 
     return FilingMetadata(cik=cik, accession=accession, document=document, url=url)
 
@@ -285,7 +305,9 @@ def _extract_filing_metadata(result: Any) -> FilingMetadata:
 def _extract_filing_from_url(url: str) -> FilingMetadata:
     """Parse CIK, accession, and document from a SEC EDGAR Archives URL.
 
-    The CIK in the URL path is zero-padded to 10 digits.
+    The CIK in the URL path is zero-padded to 10 digits.  The document
+    name is canonicalized (query/fragment stripped, basename taken) so
+    that URL-derived and metadata-derived document names are identical.
     """
     match = SEC_FILING_URL_RE.search(url)
     if not match:
@@ -293,7 +315,7 @@ def _extract_filing_from_url(url: str) -> FilingMetadata:
 
     cik = match.group("cik").zfill(10)
     accession_raw = match.group("accession")
-    document = match.group("document")
+    document = _canonicalize_document(match.group("document"))
 
     accession = _format_accession(accession_raw)
     return FilingMetadata(cik=cik, accession=accession, document=document, url=url)
@@ -338,47 +360,97 @@ def _parse_tool_result(raw: Any) -> Any:
     return raw
 
 
-def _is_error_result(parsed: Any) -> bool:
-    """Check if a parsed tool result is an error response.
+def _try_parse_json(text: str) -> Any:
+    """Attempt to parse a string as JSON; return None on failure."""
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
 
-    Rejects:
-      - Dict failures: ``success is False``, ``error``, ``is_error``,
-        or a ``result`` string containing error indicators.
-      - Raw failure strings: ``ERROR`` prefix, traceback.
+
+def _decode_tool_envelope(raw: Any) -> tuple[str | None, str | None]:
+    """Strictly decode a function_call_output envelope for pinned Gym.
+
+    Returns ``(payload, error_reason)``.  On success, ``payload`` is the
+    unwrapped content string and ``error_reason`` is ``None``.  On failure,
+    ``payload`` is ``None`` and ``error_reason`` explains why.
+
+    Accepts:
+      - Pinned Gym envelope: ``{"results": <string>}`` with no top-level
+        ``error`` key, a string payload that does not begin ``ERROR:`` and
+        is not a nested JSON ``{"error": ...}`` payload.
+      - Legacy producer shape: ``{"success": true, "result": <string>}``
+        — accepted only when ``success is True`` plus a string ``result``.
+
+    Rejects (returning ``(None, reason)``):
+      - Top-level agent ``{"error": ...}`` (timeout / exception envelope).
+      - Missing or unknown envelope keys.
+      - Non-string ``results`` / ``result`` payloads.
+      - ``results`` payload beginning ``ERROR:``.
+      - Nested JSON ``{"error": ...}`` inside ``results`` (time-budget /
+        no-company error payloads from the resource server).
+      - Legacy ``success is False`` or missing ``success``.
+      - All raw strings and other non-dict outputs (unstructured).
     """
-    if isinstance(parsed, dict):
-        if parsed.get("error") or parsed.get("is_error"):
-            return True
-        if parsed.get("success") is False:
-            return True
-        result_str = parsed.get("result")
-        if isinstance(result_str, str) and _is_raw_error_string(result_str):
-            return True
+    parsed = _parse_tool_result(raw)
+
+    if not isinstance(parsed, dict):
+        return None, "unstructured output"
+
+    if "error" in parsed:
+        return None, "agent error envelope"
+
+    if "results" in parsed:
+        results = parsed["results"]
+        if not isinstance(results, str):
+            return None, "non-string results payload"
+
+        stripped = results.strip()
+        if stripped.upper().startswith("ERROR:"):
+            return None, "ERROR: payload"
+
+        nested = _try_parse_json(results)
+        if isinstance(nested, dict) and "error" in nested:
+            return None, "nested JSON error payload"
+
+        return results, None
+
+    if "success" in parsed:
+        if parsed["success"] is not True:
+            return None, "legacy shape with success=False"
+        result = parsed.get("result")
+        if not isinstance(result, str):
+            return None, "legacy shape with non-string result"
+        return result, None
+
+    return None, "unknown envelope"
+
+
+def _is_parse_success(payload: str, key: str) -> bool:
+    """Check whether a parse_html_page results payload indicates success.
+
+    In pinned Gym, a successful ``parse_html_page`` returns a results
+    string whose lines include the exact marker (the
+    ``_save_tool_output`` line)::
+
+        SUCCESS: The result has been saved to the data storage under the key: {key}.
+
+    Failed parses return arbitrary ``str(e)`` text without the marker.
+    This function checks for the exact marker on any line, bound to the
+    expected ``key``, so that the ``WARNING:`` overwrite case (which
+    still contains the exact line) is accepted while abbreviated,
+    unrelated, or wrong-key ``SUCCESS:`` strings are rejected.
+    """
+    stripped = payload.strip()
+    if not stripped:
         return False
-    if isinstance(parsed, str):
-        return _is_raw_error_string(parsed)
-    return False
-
-
-def _is_raw_error_string(text: str) -> bool:
-    """Check if a raw string looks like an error, traceback, or failure.
-
-    Rejects strings containing: Error:, Failed, traceback, exception,
-    unavailable, or similar failure indicators from real finance tools.
-    Case-insensitive.
-    """
-    stripped = text.strip()
-    lower = stripped.lower()
-    if lower.startswith("error"):
-        return True
-    if lower.startswith("failed"):
-        return True
-    if "traceback" in lower:
-        return True
-    if "exception" in lower:
-        return True
-    if lower == "unavailable":
-        return True
+    expected = (
+        "SUCCESS: The result has been saved to the data storage "
+        f"under the key: {key}."
+    )
+    for line in stripped.splitlines():
+        if line.strip() == expected:
+            return True
     return False
 
 
@@ -389,13 +461,17 @@ def _build_key_to_filing_map(
 
     Scans for ``sec_filing_search`` / ``edgar_search`` calls (extracts
     filing metadata from arguments and results) and ``parse_html_page``
-    calls (reads the plain ``key`` argument directly).
+    calls (reads the plain ``key`` argument, paired by ``call_id`` to
+    its output).  The key-to-URL mapping is updated only after a strict
+    successful pinned parse output (``SUCCESS:`` marker); failed retries
+    preserve the last successful mapping.
     """
     key_to_url: dict[str, str] = {}
     call_id_to_filing: dict[str, FilingMetadata] = {}
     url_to_filing: dict[str, FilingMetadata] = {}
 
     sec_search_call_ids: set[str] = set()
+    parse_call_ids: dict[str, tuple[str, str]] = {}
 
     for item in items:
         item_type = item.get("type", "")
@@ -414,8 +490,8 @@ def _build_key_to_filing_map(
             args = _parse_tool_arguments(item.get("arguments"))
             url = args.get("url", "")
             key = args.get("key", "")
-            if key and url:
-                key_to_url[key] = url
+            if key and url and call_id:
+                parse_call_ids[call_id] = (key, url)
             continue
 
         if item_type in ("function_call_output", "tool_result"):
@@ -423,27 +499,44 @@ def _build_key_to_filing_map(
                 continue
             if call_id in sec_search_call_ids:
                 existing = call_id_to_filing.get(call_id, FilingMetadata())
-                parsed = _parse_tool_result(item.get("output", item.get("result", "")))
-                if isinstance(parsed, dict | list):
-                    enriched = _extract_filing_metadata(parsed)
-                    if enriched.cik or enriched.accession or enriched.url:
-                        filing = FilingMetadata(
-                            cik=enriched.cik or existing.cik,
-                            accession=enriched.accession or existing.accession,
-                            document=enriched.document or existing.document,
-                            url=enriched.url or existing.url,
-                        )
-                        call_id_to_filing[call_id] = filing
+                raw_output = item.get("output", item.get("result", ""))
+                payload, _error = _decode_tool_envelope(raw_output)
+                if payload is not None:
+                    decoded = _try_parse_json(payload)
+                    if isinstance(decoded, (dict, list)):
+                        enriched = _extract_filing_metadata(decoded)
+                        if enriched.cik or enriched.accession or enriched.url:
+                            filing = FilingMetadata(
+                                cik=enriched.cik or existing.cik,
+                                accession=enriched.accession or existing.accession,
+                                document=enriched.document or existing.document,
+                                url=enriched.url or existing.url,
+                            )
+                            call_id_to_filing[call_id] = filing
                 if call_id in call_id_to_filing:
                     filing = call_id_to_filing[call_id]
                     if filing.url:
                         url_to_filing[filing.url] = filing
+            elif call_id in parse_call_ids:
+                key, url = parse_call_ids[call_id]
+                raw_output = item.get("output", item.get("result", ""))
+                payload, _error = _decode_tool_envelope(raw_output)
+                if payload is not None and _is_parse_success(payload, key):
+                    key_to_url[key] = url
 
     key_to_filing: dict[str, FilingMetadata] = {}
     for key, url in key_to_url.items():
         filing = url_to_filing.get(url)
         if not filing:
             filing = _extract_filing_from_url(url)
+        elif filing.url:
+            url_filing = _extract_filing_from_url(filing.url)
+            filing = FilingMetadata(
+                cik=filing.cik or url_filing.cik,
+                accession=filing.accession or url_filing.accession,
+                document=filing.document or url_filing.document,
+                url=filing.url,
+            )
         key_to_filing[key] = filing
 
     return key_to_filing
@@ -583,22 +676,12 @@ def extract_trace(row: dict[str, Any]) -> TraceExtraction:
             )
             continue
 
-        parsed = _parse_tool_result(result_raw)
-        if _is_error_result(parsed):
+        text, error_reason = _decode_tool_envelope(result_raw)
+        if text is None:
             extraction.extraction_errors.append(
-                f"retrieve_information call {call_id}: error result"
+                f"retrieve_information call {call_id}: {error_reason}"
             )
             continue
-
-        if isinstance(parsed, dict):
-            text = parsed.get("result", parsed.get("retrieval", ""))
-            if isinstance(text, dict):
-                text = json.dumps(text)
-            text = str(text) if text else ""
-        elif isinstance(parsed, str):
-            text = parsed
-        else:
-            text = str(parsed)
 
         if not text.strip():
             extraction.extraction_errors.append(

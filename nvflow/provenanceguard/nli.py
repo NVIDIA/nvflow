@@ -84,23 +84,28 @@ class HFNLI:
         if self._revision:
             kwargs["revision"] = self._revision
 
-        self._tokenizer = AutoTokenizer.from_pretrained(self._model_id, **kwargs)
-        self._model = AutoModelForSequenceClassification.from_pretrained(self._model_id, **kwargs)
-        self._model.eval()
+        # Load into locals first — do not publish _model / _tokenizer /
+        # _label_map until ALL validation succeeds.  This ensures that
+        # a failed duplicate, missing, or incomplete id2label does not
+        # poison state: subsequent evaluations re-attempt loading and
+        # fail again rather than reusing partial/cached state.
+        tokenizer = AutoTokenizer.from_pretrained(self._model_id, **kwargs)
+        model = AutoModelForSequenceClassification.from_pretrained(self._model_id, **kwargs)
+        model.eval()
 
         # Build label map from model config — validate actual label names,
         # never assume arbitrary LABEL_0 ordering.
-        id2label = self._model.config.id2label
-        self._label_map = {}
+        id2label = model.config.id2label
+        label_map: dict[int, str] = {}
         for idx, label in id2label.items():
             normalized = _normalize_nli_label(str(label))
-            self._label_map[int(idx)] = normalized
+            label_map[int(idx)] = normalized
         # Validate exact unique label set: exactly 3 labels, one each
         # of entailment / neutral / contradiction, no duplicates,
         # extras, or missing.
         seen_labels: list[str] = []
-        for idx in sorted(self._label_map):
-            seen_labels.append(self._label_map[idx])
+        for idx in sorted(label_map):
+            seen_labels.append(label_map[idx])
         if len(seen_labels) != 3:
             raise ValueError(
                 f"NLI model has {len(seen_labels)} labels; expected "
@@ -118,6 +123,11 @@ class HFNLI:
             if len(label_set) < len(seen_labels):
                 parts.append("duplicate labels detected")
             raise ValueError("NLI label set validation failed: " + "; ".join(parts))
+
+        # Publish only after all validation succeeds.
+        self._tokenizer = tokenizer
+        self._model = model
+        self._label_map = label_map
 
     def score(self, *, premise: str, hypothesis: str) -> NLIResult:
         import torch

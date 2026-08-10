@@ -206,7 +206,7 @@ def _make_rollout_row(
             {
                 "type": "function_call_output",
                 "call_id": "call_retrieve_1",
-                "output": json.dumps({"result": evidence_text}),
+                "output": json.dumps({"results": evidence_text}),
             },
             {
                 "type": "function_call",
@@ -272,6 +272,17 @@ class TestYamlParse:
 class TestRegistryDiscovery:
     def test_stage_registered(self):
         from nvflow.core import StageRegistry
+
+        # Prior tests (e.g. test_core.py) may call StageRegistry.clear()
+        # after collection, wiping entries added by @StageRegistry.register
+        # during module import.  Re-register via the public API if missing.
+        if not StageRegistry.has(
+            recipe="finance", workflow="grpo", stage="evaluate_provenance"
+        ):
+            mod = _load_eval_stage_module()
+            StageRegistry.register(
+                recipe="finance", workflow="grpo", stage="evaluate_provenance",
+            )(mod.EvaluateProvenanceStage)
 
         stage_cls = StageRegistry.get(
             recipe="finance",
@@ -658,6 +669,13 @@ class TestKnownUnknownKey:
                 ),
             },
             {
+                "type": "function_call_output",
+                "call_id": "call_parse_1",
+                "output": json.dumps(
+                    {"results": "SUCCESS: The result has been saved to the data storage under the key: filing_10k."}
+                ),
+            },
+            {
                 "type": "function_call",
                 "name": "parse_html_page",
                 "call_id": "call_parse_2",
@@ -669,6 +687,13 @@ class TestKnownUnknownKey:
                 ),
             },
             {
+                "type": "function_call_output",
+                "call_id": "call_parse_2",
+                "output": json.dumps(
+                    {"results": "SUCCESS: The result has been saved to the data storage under the key: filing_10k_2."}
+                ),
+            },
+            {
                 "type": "function_call",
                 "name": "retrieve_information",
                 "call_id": "call_retrieve_1",
@@ -677,7 +702,7 @@ class TestKnownUnknownKey:
             {
                 "type": "function_call_output",
                 "call_id": "call_retrieve_1",
-                "output": json.dumps({"result": "Some text"}),
+                "output": json.dumps({"results": "Some text"}),
             },
             {
                 "type": "function_call",
@@ -706,7 +731,7 @@ class TestKnownUnknownKey:
             {
                 "type": "function_call_output",
                 "call_id": "call_retrieve_1",
-                "output": json.dumps({"result": "Some text"}),
+                "output": json.dumps({"results": "Some text"}),
             },
             {
                 "type": "function_call",
@@ -774,7 +799,7 @@ class TestNestedResponseOutput:
                     {
                         "type": "function_call_output",
                         "call_id": "call_retrieve_nested",
-                        "output": json.dumps({"result": "Revenue was $1.23 billion in 2024."}),
+                        "output": json.dumps({"results": "Revenue was $1.23 billion in 2024."}),
                     },
                     {
                         "type": "function_call",
@@ -990,7 +1015,7 @@ class TestSidecarSchema:
             {
                 "type": "function_call_output",
                 "call_id": "call_r1",
-                "output": json.dumps({"result": "Evidence one."}),
+                "output": json.dumps({"results": "Evidence one."}),
             },
             {
                 "type": "function_call",
@@ -1001,7 +1026,7 @@ class TestSidecarSchema:
             {
                 "type": "function_call_output",
                 "call_id": "call_r2",
-                "output": json.dumps({"result": "Evidence two."}),
+                "output": json.dumps({"results": "Evidence two."}),
             },
             {
                 "type": "function_call",
@@ -1051,21 +1076,27 @@ def _make_realistic_trace() -> dict:
                 "type": "function_call",
                 "name": "sec_filing_search",
                 "call_id": "call_sec_1",
-                "arguments": json.dumps({"query": "Apple 10-K", "form_type": "10-K"}),
+                "arguments": json.dumps({"ticker": "AAPL", "form_types": ["10-K"]}),
             },
             {
                 "type": "function_call_output",
                 "call_id": "call_sec_1",
                 "output": json.dumps(
                     {
-                        "filings": [
-                            {
-                                "cik": "1811414",
-                                "accessionNo": "0001811414-25-000010",
-                                "primaryDocument": "10-K.htm",
-                                "linkToHtml": _FILING_URL,
-                            }
-                        ]
+                        "results": json.dumps(
+                            [
+                                {
+                                    "ticker": "AAPL",
+                                    "company_name": "Apple Inc.",
+                                    "form": "10-K",
+                                    "filing_date": "2025-01-01",
+                                    "report_date": "2024-12-31",
+                                    "accession_number": "0001811414-25-000010",
+                                    "filing_url": _FILING_URL,
+                                }
+                            ],
+                            indent=2,
+                        )
                     }
                 ),
             },
@@ -1078,7 +1109,9 @@ def _make_realistic_trace() -> dict:
             {
                 "type": "function_call_output",
                 "call_id": "call_parse_1",
-                "output": json.dumps({"result": "Page stored successfully"}),
+                "output": json.dumps(
+                    {"results": "SUCCESS: The result has been saved to the data storage under the key: filing_10k."}
+                ),
             },
             {
                 "type": "function_call",
@@ -1089,7 +1122,7 @@ def _make_realistic_trace() -> dict:
             {
                 "type": "function_call_output",
                 "call_id": "call_retrieve_1",
-                "output": json.dumps({"result": "Revenue was $1.23 billion in 2024."}),
+                "output": json.dumps({"results": "Revenue was $1.23 billion in 2024."}),
             },
             {
                 "type": "function_call",
@@ -1144,7 +1177,9 @@ class TestParsePlainKey:
             {
                 "type": "function_call_output",
                 "call_id": "call_parse_1",
-                "output": json.dumps({"result": "Page stored"}),
+                "output": json.dumps(
+                    {"results": "SUCCESS: The result has been saved to the data storage under the key: filing_10k."}
+                ),
             },
             {
                 "type": "function_call",
@@ -1155,7 +1190,7 @@ class TestParsePlainKey:
             {
                 "type": "function_call_output",
                 "call_id": "call_retrieve_1",
-                "output": json.dumps({"result": "Revenue was $1.23 billion in 2024."}),
+                "output": json.dumps({"results": "Revenue was $1.23 billion in 2024."}),
             },
             {
                 "type": "function_call",
@@ -1202,7 +1237,7 @@ class TestErrorExclusion:
         sidecar = parse_rollout_line(json.dumps(row))
         assert sidecar.trace is not None
         assert len(sidecar.trace.evidence) == 0
-        assert any("error" in e.lower() for e in sidecar.trace.extraction_errors)
+        assert any("unstructured" in e.lower() for e in sidecar.trace.extraction_errors)
 
     def test_traceback_excluded(self):
         row = _make_rollout_row()
@@ -1424,7 +1459,7 @@ class TestTopTraceFailure:
             {
                 "type": "function_call_output",
                 "call_id": "call_r1",
-                "output": json.dumps({"result": "Revenue was $1.23 billion in 2024."}),
+                "output": json.dumps({"results": "Revenue was $1.23 billion in 2024."}),
             },
             {
                 "type": "function_call",
@@ -1749,3 +1784,939 @@ class TestDuplicateLineIDs:
         r2 = json.loads(lines[1])
         assert r1["evaluation_uuid"] != r2["evaluation_uuid"]
         assert r1["raw_line_fingerprint"] == r2["raw_line_fingerprint"]
+
+
+# ---------------------------------------------------------------------------
+# Strict envelope decoder tests (pinned Gym interface)
+# ---------------------------------------------------------------------------
+
+
+class TestStrictEnvelopeDecoder:
+    """Strict envelope decoder for pinned Gym function_call_output items."""
+
+    def test_gym_results_envelope_accepted(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(
+            {"results": "Revenue was $1.23 billion."}
+        )
+        assert payload == "Revenue was $1.23 billion."
+        assert error is None
+
+    def test_gym_results_envelope_json_string_accepted(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(
+            {"results": json.dumps({"key": "value"})}
+        )
+        assert payload is not None
+        assert error is None
+
+    def test_agent_error_envelope_rejected(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(
+            {"error": "Tool call timed out after 30s."}
+        )
+        assert payload is None
+        assert "agent error" in error
+
+    def test_results_error_prefix_rejected(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(
+            {"results": "ERROR: Retrieval LLM call failed: timeout"}
+        )
+        assert payload is None
+        assert "ERROR" in error
+
+    def test_nested_json_error_rejected(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(
+            {"results": json.dumps({"error": "Time budget exhausted."})}
+        )
+        assert payload is None
+        assert "nested" in error
+
+    @pytest.mark.parametrize(
+        "raw_output",
+        [
+            "remote end hung up unexpectedly",
+            "upstream disconnected",
+            "Connection reset by peer",
+            "Request timed out",
+        ],
+    )
+    def test_arbitrary_raw_string_rejected(self, raw_output):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(raw_output)
+        assert payload is None
+        assert "unstructured" in error
+
+    def test_legacy_success_accepted(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(
+            {"success": True, "result": "Revenue was $1.23 billion."}
+        )
+        assert payload == "Revenue was $1.23 billion."
+        assert error is None
+
+    def test_legacy_failure_rejected(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(
+            {"success": False, "result": "error"}
+        )
+        assert payload is None
+        assert "success" in error.lower()
+
+    def test_legacy_missing_success_rejected(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope(
+            {"result": "Revenue was $1.23 billion."}
+        )
+        assert payload is None
+        assert "unknown" in error
+
+    def test_non_string_results_rejected(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope({"results": 42})
+        assert payload is None
+        assert "non-string" in error
+
+    def test_unknown_envelope_rejected(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _decode_tool_envelope,
+        )
+
+        payload, error = _decode_tool_envelope({"foo": "bar"})
+        assert payload is None
+        assert "unknown" in error
+
+
+# ---------------------------------------------------------------------------
+# Pinned Gym producer-to-sidecar integration test
+# ---------------------------------------------------------------------------
+
+
+class TestGymPinnedIntegration:
+    """End-to-sidecar using response.output items matching the pinned example."""
+
+    def test_full_pinned_gym_trace(self):
+        filing_url = (
+            "https://www.sec.gov/Archives/edgar/data/320193/"
+            "000032019322000108/aapl-20220924.htm"
+        )
+        row = {
+            "uuid": "gym-pinned-001",
+            "response": {
+                "id": "resp-gym-001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "sec_filing_search",
+                        "call_id": "call_sec_1",
+                        "arguments": json.dumps(
+                            {"ticker": "AAPL", "form_types": ["10-K"]}
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_sec_1",
+                        "output": json.dumps(
+                            {
+                                "results": json.dumps(
+                                    [
+                                        {
+                                            "ticker": "AAPL",
+                                            "company_name": "Apple Inc.",
+                                            "form": "10-K",
+                                            "filing_date": "2022-10-28",
+                                            "report_date": "2022-09-24",
+                                            "accession_number": "0000320193-22-000108",
+                                            "filing_url": filing_url,
+                                        }
+                                    ],
+                                    indent=2,
+                                )
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "parse_html_page",
+                        "call_id": "call_parse_1",
+                        "arguments": json.dumps(
+                            {"url": filing_url, "key": "aapl_10k_2022"}
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_parse_1",
+                        "output": json.dumps(
+                            {
+                                "results": (
+                                    "SUCCESS: The result has been saved to the data "
+                                    "storage under the key: aapl_10k_2022."
+                                )
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "retrieve_information",
+                        "call_id": "call_retrieve_1",
+                        "arguments": json.dumps(
+                            {"prompt": "Find FTE employees {{aapl_10k_2022}}"}
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_retrieve_1",
+                        "output": json.dumps(
+                            {
+                                "results": (
+                                    "As of September 24, 2022, the Company had "
+                                    "approximately 164,000 full-time equivalent "
+                                    "employees."
+                                )
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "submit_final_result",
+                        "call_id": "call_submit_1",
+                        "arguments": json.dumps(
+                            {"final_result": "Apple had approximately 164,000 FTE."}
+                        ),
+                    },
+                ],
+            },
+        }
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert sidecar.trace is not None
+        assert sidecar.trace.has_submit is True
+        assert sidecar.trace.answer == "Apple had approximately 164,000 FTE."
+        assert len(sidecar.trace.evidence) == 1
+        chunk = sidecar.trace.evidence[0]
+        assert "164,000 full-time equivalent" in chunk.text
+        assert chunk.source_id is not None
+        assert chunk.attribution_state == "available"
+        assert "cik=0000320193" in chunk.source_id
+        assert "accession=000032019322000108" in chunk.source_id
+        assert "doc=aapl-20220924.htm" in chunk.source_id
+
+
+# ---------------------------------------------------------------------------
+# Pinned Gym failure envelopes
+# ---------------------------------------------------------------------------
+
+
+class TestGymPinnedFailures:
+    """Pinned Gym failure envelopes must produce no evidence."""
+
+    def test_agent_error_envelope_no_evidence(self):
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_r1",
+                "arguments": json.dumps({"prompt": "query"}),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_r1",
+                "output": json.dumps(
+                    {"error": "Tool call timed out after 30s."}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_s1",
+                "arguments": json.dumps({"final_result": "Some answer."}),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert len(sidecar.trace.evidence) == 0
+        assert any("agent error" in e for e in sidecar.trace.extraction_errors)
+
+    def test_retrieve_error_prefix_no_evidence(self):
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_r1",
+                "arguments": json.dumps({"prompt": "query"}),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_r1",
+                "output": json.dumps(
+                    {"results": "ERROR: Retrieval LLM call failed: timeout"}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_s1",
+                "arguments": json.dumps({"final_result": "Some answer."}),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert len(sidecar.trace.evidence) == 0
+        assert any("ERROR" in e for e in sidecar.trace.extraction_errors)
+
+    def test_nested_json_error_no_evidence(self):
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_r1",
+                "arguments": json.dumps({"prompt": "query"}),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_r1",
+                "output": json.dumps(
+                    {"results": json.dumps({"error": "Time budget exhausted."})}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_s1",
+                "arguments": json.dumps({"final_result": "Some answer."}),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert len(sidecar.trace.evidence) == 0
+        assert any("nested" in e for e in sidecar.trace.extraction_errors)
+
+    @pytest.mark.parametrize(
+        "raw_output",
+        [
+            "remote end hung up unexpectedly",
+            "upstream disconnected",
+        ],
+    )
+    def test_arbitrary_raw_string_no_evidence(self, raw_output):
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_r1",
+                "arguments": json.dumps({"prompt": "query"}),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_r1",
+                "output": raw_output,
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_s1",
+                "arguments": json.dumps({"final_result": "Some answer."}),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert len(sidecar.trace.evidence) == 0
+        assert any("unstructured" in e for e in sidecar.trace.extraction_errors)
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: Transactional NLI label configuration
+# ---------------------------------------------------------------------------
+
+
+class TestNLITransactionalLoading:
+    """Failed label validation must not poison _model/_label_map state."""
+
+    @staticmethod
+    def _make_fake_transformers(id2label: dict):
+        import types
+
+        class _FakeModel:
+            def __init__(self):
+                class _Config:
+                    pass
+
+                self.config = _Config()
+                self.config.id2label = id2label
+
+            def eval(self):
+                return self
+
+        class _FakeAutoModel:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return _FakeModel()
+
+        class _FakeTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return _FakeTokenizer()
+
+        mod = types.ModuleType("transformers")
+        mod.AutoModelForSequenceClassification = _FakeAutoModel
+        mod.AutoTokenizer = _FakeTokenizer
+        return mod
+
+    def test_duplicate_id2label_fails_and_does_not_poison(self):
+        import sys
+
+        from nvflow.provenanceguard.nli import HFNLI
+
+        fake_mod = self._make_fake_transformers(
+            {0: "entailment", 1: "entailment", 2: "contradiction"}
+        )
+        original = sys.modules.get("transformers")
+        sys.modules["transformers"] = fake_mod
+        try:
+            nli = HFNLI()
+            with pytest.raises(ValueError, match="duplicate labels"):
+                nli._ensure_loaded()
+            assert nli._model is None
+            assert nli._tokenizer is None
+            assert nli._label_map is None
+            with pytest.raises(ValueError, match="duplicate labels"):
+                nli._ensure_loaded()
+            assert nli._model is None
+            assert nli._label_map is None
+        finally:
+            if original is not None:
+                sys.modules["transformers"] = original
+            else:
+                sys.modules.pop("transformers", None)
+
+    def test_incomplete_id2label_fails_and_does_not_poison(self):
+        import sys
+
+        from nvflow.provenanceguard.nli import HFNLI
+
+        fake_mod = self._make_fake_transformers(
+            {0: "entailment", 1: "contradiction"}
+        )
+        original = sys.modules.get("transformers")
+        sys.modules["transformers"] = fake_mod
+        try:
+            nli = HFNLI()
+            with pytest.raises(ValueError, match="2 labels"):
+                nli._ensure_loaded()
+            assert nli._model is None
+            assert nli._tokenizer is None
+            assert nli._label_map is None
+            with pytest.raises(ValueError, match="2 labels"):
+                nli._ensure_loaded()
+            assert nli._model is None
+            assert nli._label_map is None
+        finally:
+            if original is not None:
+                sys.modules["transformers"] = original
+            else:
+                sys.modules.pop("transformers", None)
+
+    def test_valid_id2label_publishes_state(self):
+        import sys
+
+        from nvflow.provenanceguard.nli import HFNLI
+
+        fake_mod = self._make_fake_transformers(
+            {0: "entailment", 1: "neutral", 2: "contradiction"}
+        )
+        original = sys.modules.get("transformers")
+        sys.modules["transformers"] = fake_mod
+        try:
+            nli = HFNLI()
+            nli._ensure_loaded()
+            assert nli._model is not None
+            assert nli._tokenizer is not None
+            assert nli._label_map == {0: "entailment", 1: "neutral", 2: "contradiction"}
+        finally:
+            if original is not None:
+                sys.modules["transformers"] = original
+            else:
+                sys.modules.pop("transformers", None)
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Canonicalize URL-derived SEC document IDs
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalDocumentIds:
+    """URL-derived document names must match metadata-derived document names."""
+
+    def test_url_document_strips_query_string(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _extract_filing_from_url,
+        )
+
+        base = (
+            "https://www.sec.gov/Archives/edgar/data/1811414/"
+            "000181141425000010/10-K.htm"
+        )
+        filing_plain = _extract_filing_from_url(base)
+        filing_query = _extract_filing_from_url(base + "?output=1")
+        assert filing_plain.document == "10-K.htm"
+        assert filing_query.document == "10-K.htm"
+        assert filing_plain.source_id() == filing_query.source_id()
+
+    def test_url_document_strips_fragment(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _extract_filing_from_url,
+        )
+
+        base = (
+            "https://www.sec.gov/Archives/edgar/data/1811414/"
+            "000181141425000010/10-K.htm"
+        )
+        filing_plain = _extract_filing_from_url(base)
+        filing_frag = _extract_filing_from_url(base + "#part1")
+        assert filing_plain.document == "10-K.htm"
+        assert filing_frag.document == "10-K.htm"
+        assert filing_plain.source_id() == filing_frag.source_id()
+
+    def test_url_query_and_fragment_equivalent(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _extract_filing_from_url,
+        )
+
+        base = (
+            "https://www.sec.gov/Archives/edgar/data/1811414/"
+            "000181141425000010/10-K.htm"
+        )
+        filing_q = _extract_filing_from_url(base + "?output=1")
+        filing_f = _extract_filing_from_url(base + "#part1")
+        assert filing_q.document == filing_f.document
+        assert filing_q.source_id() == filing_f.source_id()
+
+    def test_canonicalize_document_helper(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _canonicalize_document,
+        )
+
+        assert _canonicalize_document("10-K.htm") == "10-K.htm"
+        assert _canonicalize_document("10-K.htm?output=1") == "10-K.htm"
+        assert _canonicalize_document("10-K.htm#part1") == "10-K.htm"
+        assert _canonicalize_document("path/to/10-K.htm?x=1") == "10-K.htm"
+        assert _canonicalize_document(None) is None
+        assert _canonicalize_document("") is None
+
+    def test_url_and_metadata_document_equivalence(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _extract_filing_from_url,
+            _extract_filing_metadata,
+        )
+
+        url = (
+            "https://www.sec.gov/Archives/edgar/data/1811414/"
+            "000181141425000010/10-K.htm"
+        )
+        url_filing = _extract_filing_from_url(url + "?output=1")
+        meta_filing = _extract_filing_metadata(
+            {
+                "filings": [
+                    {
+                        "cik": "1811414",
+                        "accessionNo": "0001811414-25-000010",
+                        "primaryDocument": "10-K.htm?output=1",
+                        "linkToHtml": url,
+                    }
+                ]
+            }
+        )
+        assert url_filing.document == meta_filing.document
+        assert url_filing.source_id() == meta_filing.source_id()
+
+
+# ---------------------------------------------------------------------------
+# Call-id-paired parse tracking: failed retry preserves last successful key
+# ---------------------------------------------------------------------------
+
+
+class TestParseCallIdPairedTracking:
+    """parse_html_page key-to-URL must update only on strict SUCCESS output.
+
+    In pinned Gym, a successful parse returns ``{results: "SUCCESS: ..."}``
+    and a failure returns ``{results: str(e)}``.  A failed retry of the same
+    key with a different URL must preserve the previously stored filing, not
+    fabricate the new URL.
+    """
+
+    _URL_A = (
+        "https://www.sec.gov/Archives/edgar/data/1811414/"
+        "000181141425000010/10-K.htm"
+    )
+    _URL_B = (
+        "https://www.sec.gov/Archives/edgar/data/1811414/"
+        "000181141425000020/10-K.htm"
+    )
+
+    def test_failed_retry_preserves_successful_source(self):
+        """Success A then failed B same key: retrieve must map to source A."""
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "parse_html_page",
+                "call_id": "call_parse_A",
+                "arguments": json.dumps(
+                    {"url": self._URL_A, "key": "filing_k"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_parse_A",
+                "output": json.dumps(
+                    {
+                        "results": (
+                            "SUCCESS: The result has been saved to the data "
+                            "storage under the key: filing_k.\n"
+                            "The data_storage currently contains the following "
+                            "keys:\nfiling_k\n"
+                        )
+                    }
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "parse_html_page",
+                "call_id": "call_parse_B",
+                "arguments": json.dumps(
+                    {"url": self._URL_B, "key": "filing_k"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_parse_B",
+                "output": json.dumps(
+                    {"results": "HTTPSConnectionPool(host='www.sec.gov'): Read timed out."}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_retrieve_1",
+                "arguments": json.dumps(
+                    {"prompt": "Revenue {{filing_k}}"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_retrieve_1",
+                "output": json.dumps(
+                    {"results": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_submit_1",
+                "arguments": json.dumps(
+                    {"final_result": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert sidecar.trace is not None
+        assert len(sidecar.trace.evidence) == 1
+        chunk = sidecar.trace.evidence[0]
+        assert chunk.source_id is not None
+        assert chunk.attribution_state == "available"
+        assert "accession=000181141425000010" in chunk.source_id
+        assert chunk.sec_url == self._URL_A
+
+    def test_ordinary_success_still_maps(self):
+        """A single successful parse still maps the key to the filing."""
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "parse_html_page",
+                "call_id": "call_parse_1",
+                "arguments": json.dumps(
+                    {"url": self._URL_A, "key": "filing_k"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_parse_1",
+                "output": json.dumps(
+                    {
+                        "results": (
+                            "SUCCESS: The result has been saved to the data "
+                            "storage under the key: filing_k."
+                        )
+                    }
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_retrieve_1",
+                "arguments": json.dumps(
+                    {"prompt": "Revenue {{filing_k}}"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_retrieve_1",
+                "output": json.dumps(
+                    {"results": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_submit_1",
+                "arguments": json.dumps(
+                    {"final_result": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert sidecar.trace is not None
+        assert len(sidecar.trace.evidence) == 1
+        chunk = sidecar.trace.evidence[0]
+        assert chunk.source_id is not None
+        assert chunk.attribution_state == "available"
+        assert "accession=000181141425000010" in chunk.source_id
+        assert chunk.sec_url == self._URL_A
+
+    def test_no_success_output_no_mapping(self):
+        """parse_html_page with no paired output must not map the key."""
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "parse_html_page",
+                "call_id": "call_parse_1",
+                "arguments": json.dumps(
+                    {"url": self._URL_A, "key": "filing_k"}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_retrieve_1",
+                "arguments": json.dumps(
+                    {"prompt": "Revenue {{filing_k}}"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_retrieve_1",
+                "output": json.dumps(
+                    {"results": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_submit_1",
+                "arguments": json.dumps(
+                    {"final_result": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert sidecar.trace is not None
+        assert len(sidecar.trace.evidence) == 1
+        chunk = sidecar.trace.evidence[0]
+        assert chunk.source_id is None
+        assert chunk.attribution_state == "unavailable"
+
+    def test_error_envelope_does_not_map(self):
+        """parse_html_page output with agent error must not map the key."""
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "parse_html_page",
+                "call_id": "call_parse_1",
+                "arguments": json.dumps(
+                    {"url": self._URL_A, "key": "filing_k"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_parse_1",
+                "output": json.dumps(
+                    {"error": "Tool call timed out after 30s."}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_retrieve_1",
+                "arguments": json.dumps(
+                    {"prompt": "Revenue {{filing_k}}"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_retrieve_1",
+                "output": json.dumps(
+                    {"results": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_submit_1",
+                "arguments": json.dumps(
+                    {"final_result": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert sidecar.trace is not None
+        assert len(sidecar.trace.evidence) == 1
+        chunk = sidecar.trace.evidence[0]
+        assert chunk.source_id is None
+        assert chunk.attribution_state == "unavailable"
+
+    def test_success_then_success_overwrites(self):
+        """Two successful parses of the same key: last success wins."""
+        row = _make_rollout_row()
+        row["output"] = [
+            {
+                "type": "function_call",
+                "name": "parse_html_page",
+                "call_id": "call_parse_A",
+                "arguments": json.dumps(
+                    {"url": self._URL_A, "key": "filing_k"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_parse_A",
+                "output": json.dumps(
+                    {
+                        "results": (
+                            "SUCCESS: The result has been saved to the data "
+                            "storage under the key: filing_k."
+                        )
+                    }
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "parse_html_page",
+                "call_id": "call_parse_B",
+                "arguments": json.dumps(
+                    {"url": self._URL_B, "key": "filing_k"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_parse_B",
+                "output": json.dumps(
+                    {
+                        "results": (
+                            "SUCCESS: The result has been saved to the data "
+                            "storage under the key: filing_k."
+                        )
+                    }
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "retrieve_information",
+                "call_id": "call_retrieve_1",
+                "arguments": json.dumps(
+                    {"prompt": "Revenue {{filing_k}}"}
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_retrieve_1",
+                "output": json.dumps(
+                    {"results": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final_result",
+                "call_id": "call_submit_1",
+                "arguments": json.dumps(
+                    {"final_result": "Revenue was $1.23 billion in 2024."}
+                ),
+            },
+        ]
+        sidecar = parse_rollout_line(json.dumps(row))
+        assert sidecar.trace is not None
+        assert len(sidecar.trace.evidence) == 1
+        chunk = sidecar.trace.evidence[0]
+        assert chunk.source_id is not None
+        assert chunk.attribution_state == "available"
+        assert "accession=000181141425000020" in chunk.source_id
+        assert chunk.sec_url == self._URL_B
+
+    def test_is_parse_success_helper(self):
+        from nvflow.recipes.finance.utils.rl.provenanceguard import (
+            _is_parse_success,
+        )
+
+        assert _is_parse_success(
+            "SUCCESS: The result has been saved to the data "
+            "storage under the key: filing_k.",
+            "filing_k",
+        ) is True
+        assert (
+            _is_parse_success(
+                "WARNING: key exists.\n"
+                "SUCCESS: The result has been saved to the data "
+                "storage under the key: filing_k.\n"
+                "The data_storage currently contains the following keys:\nfiling_k\n",
+                "filing_k",
+            )
+            is True
+        )
+        assert _is_parse_success(
+            "SUCCESS: saved under key: filing_k.", "filing_k"
+        ) is False
+        assert _is_parse_success(
+            "SUCCESS: operation completed.", "filing_k"
+        ) is False
+        assert _is_parse_success(
+            "SUCCESS: The result has been saved to the data "
+            "storage under the key: other_k.",
+            "filing_k",
+        ) is False
+        assert _is_parse_success("Connection timed out", "filing_k") is False
+        assert _is_parse_success("", "filing_k") is False
+        assert _is_parse_success("   ", "filing_k") is False
+        assert _is_parse_success("ERROR: url is required.", "filing_k") is False
