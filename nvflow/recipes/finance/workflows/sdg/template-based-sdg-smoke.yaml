@@ -11,9 +11,9 @@
 
 _base_: template-based-sdg-demo.yaml
 
-base_output_dir: /workspace/outputs/finance/smoke/workflow-3-template-based-sdg
+base_output_dir: ${nvflow_root}/outputs/finance/smoke/workflow-3-template-based-sdg
 
-filings_dir: /workspace/outputs/finance/smoke/workflow-2-download-sec/step-0-download
+filings_dir: ${nvflow_root}/outputs/finance/smoke/workflow-2-download-sec/step-0-download
 
 pipeline_stages:
   - create_seed_data

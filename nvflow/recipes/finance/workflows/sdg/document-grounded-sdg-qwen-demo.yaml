@@ -32,7 +32,7 @@
 _base_: document-grounded-sdg-demo.yaml
 
 # Separate output tree for the Qwen run.
-base_data_dir: /workspace/outputs/finance/demo/workflow-2-document-grounded-sdg-qwen-demo
+base_data_dir: ${nvflow_root}/outputs/finance/demo/workflow-2-document-grounded-sdg-qwen-demo
 
 # ============================================================================
 # Shared 397B serving block.
@@ -49,8 +49,8 @@ _qwen397b_serving: &qwen397b_serving
   distributed_executor_backend: ray
   language_model_only: true
   reasoning_parser: qwen3
-  # Speed up 397B cold-load so GPUs start computing before Draco's
-  # OccupiedIdleGPUsJobReaper trips (~30min idle). Multithreaded safetensors
+  # Speed up 397B cold-load so GPUs start computing before the cluster's
+  # idle-GPU reaper trips (~30min idle). Multithreaded safetensors
   # load uncorks the ~110MB/s single-stream read; fuse_allreduce_rms off avoids
   # a slow compile pass. Passed as JSON strings -> vLLM --model-loader-extra-config
   # / --compilation-config (build_vllm_server_args wraps {...} values in quotes).

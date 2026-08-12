@@ -1,0 +1,74 @@
+# ============================================================================
+# Template-based SDG demo on a pre-provisioned Ray cluster (executor: none)
+# ============================================================================
+# Ready-to-edit copy of sdg/template-based-sdg-demo.yaml with the Ray-specific
+# overrides already applied (same pattern as eval/demo_ray.yaml). Run it with:
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/sdg/template-based-sdg-demo_ray.yaml
+#
+# Fill 1 placeholder before running:
+#   <GEN_SERVE>    host:port of YOUR external vLLM generation server (gpt-oss-20b),
+#                  e.g. 10.0.0.5:5000. All 4 LLM stages use the same model, so ONE
+#                  serve suffices. The inherited model id (/hf_models/openai/gpt-oss-20b)
+#                  MUST equal your serve's --served-model-name.
+#
+# Output/data paths need no placeholder: the base demo recipe writes everything
+# under ${nvflow_root}/..., which resolves to /workspace on Slurm and to the cluster
+# config's absolute shared root on Ray — so they work unchanged, provided
+# `nvflow_root` is set in my_cluster.yaml (see INSTALL-RAY.md and
+# cluster_configs/template-ray.yaml). Tracked prompts come from the baked
+# working-directory archive and need no separate staging.
+# ============================================================================
+
+_base_: template-based-sdg-demo.yaml
+cluster: my_cluster
+
+# The nemo-skills Ray cluster is CPU-only, so generation servers cannot be
+# self-hosted in-job. The shipped demo stages prehost an IN-JOB vLLM
+# (server_type: vllm, server_gpus: 4) which is NOT supported on Ray — repoint
+# each to your external endpoint. Nulling server_gpus/server_nodes/server_args
+# tells nemo-skills not to prehost (same convention as eval/demo_ray.yaml's
+# judge block); model / server_type / num_chunks / num_random_seeds are
+# inherited unchanged. `target_cluster: cpu` makes the CPU routing explicit
+# (with server_gpus nulled the runner infers CPU anyway — no positive GPU key).
+# create_seed_data / map_questions_to_context are CPU-only and inherit as-is.
+#
+# The driver and submitted jobs both start from the same tracked NVFlow tree:
+# /opt/nvflow in nvflow-client for the driver, and the extracted
+# backend.working_dir archive for jobs. Relative prompt paths are therefore
+# immutable, airgap-safe, and do not require a host checkout mount.
+stages:
+  generate_questions:
+    target_cluster: cpu
+    prompt_config: nvflow/recipes/finance/prompts/generate_questions.yaml
+    stage_kwargs:
+      server_address: http://<GEN_SERVE>/v1   # full URL, scheme + /v1 (NOT bare host:port)
+      server_gpus: null
+      server_nodes: null
+      server_args: null
+
+  generate_answers:
+    target_cluster: cpu
+    prompt_config: nvflow/recipes/finance/prompts/secque_template.yaml
+    stage_kwargs:
+      server_address: http://<GEN_SERVE>/v1   # full URL, scheme + /v1 (NOT bare host:port)
+      server_gpus: null
+      server_nodes: null
+      server_args: null
+
+  genselect_answers:
+    target_cluster: cpu
+    prompt_config: nvflow/recipes/finance/prompts/genselect_answers.yaml
+    stage_kwargs:
+      server_address: http://<GEN_SERVE>/v1   # full URL, scheme + /v1 (NOT bare host:port)
+      server_gpus: null
+      server_nodes: null
+      server_args: null
+
+  filter_answers:
+    target_cluster: cpu
+    prompt_config: nvflow/recipes/finance/prompts/filter_answers.yaml
+    stage_kwargs:
+      server_address: http://<GEN_SERVE>/v1   # full URL, scheme + /v1 (NOT bare host:port)
+      server_gpus: null
+      server_nodes: null
+      server_args: null

@@ -1,0 +1,129 @@
+# ============================================================================
+# Qwen3-4B GRPO smoke — EXTERNAL-SERVE policy vLLM (recommended Ray GRPO path)
+# ============================================================================
+# A thin overlay of qwen3_4b_smoke.yaml. It runs `collect_rollouts` on the
+# nemo-gym Ray cluster while the policy vLLM is served EXTERNALLY (bring-your-own,
+# "BYO"), instead of being launched inside the gym job. This is the recommended
+# way to run GRPO rollouts on the 3-cluster Ray Jobs backend
+# (executor: none + backend.name: ray).
+#
+# ---------------------------------------------------------------------------
+# WHY EXTERNAL-SERVE (the key idea)
+# ---------------------------------------------------------------------------
+# `collect_rollouts` routes to the nemo-gym cluster (target_cluster: gym). The
+# nemo-gym image ships the `gym` CLI but does NOT contain vLLM. So the DEFAULT
+# smoke config (policy_vllm.num_gpus: 2) — which asks nvflow to LAUNCH a policy
+# vLLM inside the gym job — cannot work here: it would need both the gym CLI and
+# vLLM in one image. That is "the image gap".
+#
+# The fix: point the gym at a policy vLLM that already runs elsewhere. The gym's
+# `vllm_model` adapter is a PURE HTTP client — given a base_url it just calls an
+# OpenAI-compatible endpoint and never builds a local engine. Setting
+#   policy_vllm.base_url: http://<host>:5000/v1
+#   policy_vllm.num_gpus: 0
+# tells nvflow to SKIP launching an in-gym serve (internally
+# need_policy_server = not base_url), so no vLLM and no GPU are needed in the gym
+# image. num_gpus: 0 also keeps the stage on the CPU nemo-gym cluster.
+#
+# In this mode policy_vllm.model_path is NOT loaded from disk — it is sent
+# verbatim as the OpenAI `model` id in each request. It MUST byte-equal the BYO
+# serve's --served-model-name.
+#
+# ---------------------------------------------------------------------------
+# ONE-TIME PREREQUISITE: bring up a BYO policy vLLM endpoint
+# ---------------------------------------------------------------------------
+# The BYO policy serve is just an OpenAI-compatible HTTP endpoint (like the
+# judge) — NOT a 4th Ray cluster. Start it once on a GPU node with the
+# vllm-grpo container (1 GPU is ample for a 4B model):
+#
+#   srun --gpus-per-node=1 \
+#        --container-image=<vllm-grpo image> \
+#        --container-mounts=/lustre:/lustre \
+#        bash -lc 'vllm serve <MODEL_PATH> \
+#          --served-model-name <SERVED_NAME> \
+#          --host 0.0.0.0 --port 5000 \
+#          --tensor-parallel-size 1 \
+#          --reasoning-parser qwen3 \
+#          --max-model-len 40960 \
+#          --trust-remote-code'
+#
+#   <SERVED_NAME> MUST equal policy_vllm.model_path below (see model_path note).
+#   <MODEL_PATH>  is the on-disk model the BYO serve loads (its own path; it need
+#                 NOT match <SERVED_NAME>, though using the same string is fine).
+#
+# Find the serve node IP (from the srun allocation header, or `scontrol show
+# hostnames <nodelist>`), then set policy_vllm.base_url to http://<that-ip>:5000/v1.
+# Verify the endpoint before running:
+#   curl http://<POLICY_VLLM_HOST>:5000/v1/models     # .data[0].id must == <SERVED_NAME>
+#
+# Other prerequisites are inherited from qwen3_4b_smoke.yaml + INSTALL-RAY.md:
+#   - All THREE backend dashboard URLs defined in your cluster config, INCLUDING
+#     cpu_nemo_gym_dashboard_url (if it is missing/commented out, target_cluster:
+#     gym silently misroutes to nemo-skills, which has no `gym` CLI).
+#   - prepare_data output (train.jsonl) already staged on the shared root.
+#   - The reward judge (external/hosted) is inherited unchanged from the base
+#     (NVIDIA-hosted; export its key on the driver — see below).
+#
+# ---------------------------------------------------------------------------
+# USAGE — smoke `collect_rollouts` first, then chain the rest
+# ---------------------------------------------------------------------------
+#   export NVIDIA_API_KEY=<nvapi-...>     # driver-side; the judge key (see base _judge_api)
+#   uv run nflow run collect_rollouts \
+#     --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_smoke_extserve.yaml \
+#     -e equivalence_llm_judge
+#
+#   # then the full chain (train_validation_split + training use the GPU cluster):
+#   uv run nflow run collect_rollouts train_validation_split training \
+#     --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_smoke_extserve.yaml \
+#     -e equivalence_llm_judge
+# ============================================================================
+
+_base_: qwen3_4b_smoke.yaml
+
+# The reward judge (_judge_api in the base) is already external/NVIDIA-hosted
+# (num_gpus: 0), so it is NOT overridden here. Just export its key on the driver
+# (NVIDIA_API_KEY for integrate.api.nvidia.com). See qwen3_4b_smoke.yaml.
+
+stages:
+  collect_rollouts:
+    # Route this stage to the nemo-gym cluster (cpu_nemo_gym_dashboard_url) —
+    # the only image that carries the `gym` CLI. The base uses target_cluster:
+    # gpu (for its in-gym policy serve); external-serve has num_gpus: 0 and the
+    # policy is BYO, so there is no gpu/cpu server to co-locate with — the gym
+    # client must land on gym. (The runner also force-routes container:
+    # nemo-gym CPU stages to gym, but we set this explicitly for clarity.)
+    target_cluster: gym
+    rollout:
+      # Keep concurrent reward-judge calls low for a SHARED / hosted judge: a wide
+      # fan-out trips the per-key rate limit (HTTP 429) and the rollout stalls
+      # ("Collecting rollouts stuck at N%"). Raise this only with a self-hosted or
+      # higher-limit judge. (Mirrors the base smoke's 429 floor.)
+      num_samples_in_parallel: 4
+
+      # The variance filter computes reward_std ACROSS seeds, so 1 seed => every
+      # reward_std=0 => filter drops all rows => empty train.jsonl (split/training
+      # then fail). The base caps seeds at 1 only to avoid LOCAL policy-serve GPU
+      # collisions; external serve (num_gpus: 0) shares one endpoint => no
+      # collision, so use multiple seeds here to give the filter varied rows.
+      num_random_seeds: 4
+
+      # EXTERNAL-SERVE policy vLLM. base_url is present => nvflow does NOT launch
+      # an in-gym serve (no vLLM / no GPU needed in the gym image); num_gpus: 0
+      # keeps the stage on the CPU nemo-gym cluster. Full block re-declared for
+      # clarity (num_gpus: 0 and base_url override the base's local-serve values).
+      policy_vllm:
+        # Sent VERBATIM as the OpenAI `model` id (NOT loaded from disk in this
+        # mode). MUST byte-equal the BYO serve's --served-model-name above.
+        # ${hf_model_path} inherits the base value (/hf_models/Qwen/Qwen3-4B);
+        # set it to whatever you passed as --served-model-name.
+        model_path: ${hf_model_path}
+        num_gpus: 0
+        reasoning_parser: qwen3
+        # BYO OpenAI-compatible Qwen3-4B endpoint. Replace <POLICY_VLLM_HOST> with
+        # the serve node IP/host; the trailing /v1 is REQUIRED.
+        # ⚠ If you leave the <POLICY_VLLM_HOST> placeholder (or point at a dead
+        #   serve), training submits fine and loads the policy onto the GPUs, then
+        #   BLOCKS on rollout generation against an unreachable endpoint — the GPUs
+        #   sit IDLE with no error. Bring up the BYO serve first and verify
+        #   `curl http://<host>:5000/v1/models` before setting this.
+        base_url: http://<POLICY_VLLM_HOST>:5000/v1

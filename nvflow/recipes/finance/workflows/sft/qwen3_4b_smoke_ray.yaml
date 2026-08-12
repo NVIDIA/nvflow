@@ -1,0 +1,121 @@
+# ============================================================================
+# Qwen3-4B SFT smoke test on a pre-provisioned Ray cluster (executor: none)
+# ============================================================================
+# Ready-to-edit copy of sft/qwen3_4b_smoke.yaml with the Ray-specific overrides
+# already applied to the PREPARE_FOR_SFT and EVAL stages (same pattern as
+# eval/demo_ray.yaml and sdg/template-based-sdg-demo_ray.yaml). Run it with an
+# IN-CONTAINER driver (see the prepare_for_sft note below):
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/sft/qwen3_4b_smoke_ray.yaml
+#
+# prepare_for_sft and eval are Ray-adapted here. data_transformation /
+# train_validation_split / sequence_length_grouping are pure-nvflow CPU data-prep
+# and inherit unchanged; training runs on the GPU Ray cluster (NeMo-RL with_ray)
+# as-is.
+#
+# ============================================================================
+# prepare_for_sft: baked worker dependencies + delivered NVFlow code
+# ============================================================================
+# Unlike the other CPU data-prep stages (which only import the `nvflow` package),
+# prepare_for_sft shells out to `python -m nemo_skills.training.prepare_data`, which
+# hard-imports `sdp` (NeMo-Speech-Data-Processor) at module load. `sdp` is baked ONLY
+# into the nemo-skills container image (dockerfiles/Dockerfile.nemo-skills:
+# `pip install git+.../NeMo-speech-data-processor@29b9b1ec`); it is NOT a nemo-skills
+# dependency and is deliberately NOT declared in nvflow's pyproject (it pins
+# numpy==1.26 vs the stack's numpy 2.x and drags in librosa/sox/ffmpeg audio+download
+# deps — airgap-hostile).
+#
+# On the Ray backend the stage is submitted to the nemo-skills head, whose image
+# bakes `sdp`. The nvflow-client driver only submits the job; it does not import or
+# install sdp. `backend.working_dir` uploads the compact NVFlow archive and makes
+# it the job cwd, so `python -m nvflow...` resolves without mounting a checkout.
+# Launch the driver from nvflow-client as documented in INSTALL-RAY.md Step 5.
+#
+# The driver and Ray jobs use the same committed NVFlow tree from the client
+# image / backend.working_dir archive, so tracked prompt configs stay relative
+# and require no host checkout or source staging.
+#
+# WHY the eval stage needs overrides on Ray (both are eval/demo_ray.yaml issues):
+#
+#  1. Tracked prompt configs resolve from the immutable delivered working tree.
+#     The driver runs in nvflow-client at /opt/nvflow; each job starts in the
+#     extracted baked archive. No absolute source path or PYTHONPATH is needed.
+#
+#  2. Ray eval = BYO-serve (external endpoint), never self-host.
+#     The inherited smoke eval self-hosts an IN-JOB vLLM generation serve
+#     (server_type: vllm, gpus: 1, server_args: ...) AND an IN-JOB vLLM judge
+#     (server_gpus: 4, server_nodes: 1, server_args: ...). Self-hosting a GPU
+#     serve on Ray raises NotImplementedError (Ray eval is BYO-serve only; the
+#     nemo-skills Ray cluster this stage routes to is CPU). Both are repointed to
+#     external OpenAI-compatible endpoints: setting `server_address` + nulling the
+#     GPU/serve keys (gpus:0 for the generation serve; server_gpus/server_nodes/
+#     server_args null for the judge) tells nemo-skills not to prehost. Same
+#     convention as eval/demo_ray.yaml's `models`+`judge` blocks.
+#
+# Fill 2 placeholders before running:
+#   <EVAL_SERVE>   host:port of YOUR external vLLM generation server, e.g.
+#                  10.0.0.5:5000. IMPORTANT SEQUENCING: this serve must host the
+#                  TRAINED checkpoint produced by the training stage
+#                  (${directories.step-4-training}/model-qwen3-4b-1n-tp2-pp1-cp2-seq32k,
+#                  i.e. checkpoint_path below), NOT the base HF model. Bring up
+#                  this vLLM AFTER training completes and the checkpoint is
+#                  converted, then fill <EVAL_SERVE>. Its --served-model-name must
+#                  equal `base_model` below (/hf_models/Qwen/Qwen3-4B).
+#   <JUDGE_SERVE>  host:port of YOUR external OpenAI-compatible judge
+#                  (gpt-oss-120b), e.g. 10.0.0.6:5001. Its --served-model-name
+#                  must equal the judge `model` below (openai/gpt-oss-120b).
+#   /lustre/<you>  an absolute path visible IDENTICALLY on the driver host AND
+#                  inside the cluster container (NOT /workspace).
+# The cluster config (my_cluster.yaml) must set nvflow_root and forward the judge
+# key via env_vars (see INSTALL-RAY.md / cluster_configs/template-ray.yaml).
+# ============================================================================
+
+_base_: qwen3_4b_smoke.yaml
+cluster: my_cluster
+
+# ============================================================================
+# Ray stage overrides (prepare_for_sft prompt config; eval BYO-serve)
+# ============================================================================
+stages:
+
+  # Tracked prompt_config delivered with the baked working tree. Tokenizer +
+  # enable_thinking are preserved so driver-side token counting still resolves
+  # the tokenizer. Requires the in-container driver (sdp) — see header.
+  prepare_for_sft:
+    prepare_data_kwargs:
+      ctx_args: >-
+        ++tokenizer=${hf_model_path}
+        ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
+        ++chat_template_kwargs.enable_thinking=true
+
+  eval:
+    # --- Generation serve: self-host -> external BYO endpoint ---
+    # gpus:0 (no prehost) + server_address set = BYO-serve; server_args nulled so
+    # no self-host flags are appended. See NotImplementedError note in header.
+    gpus: 0
+    server_args: null
+    server_address: http://<EVAL_SERVE>/v1     # full URL, scheme + /v1 (NOT bare host:port)
+    inference_args: >-
+      ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
+      ++inference.temperature=0.6
+      ++inference.top_p=0.95
+      ++inference.top_k=20
+      ++inference.tokens_to_generate=16384
+      ++chat_template_kwargs.enable_thinking=true
+
+    # --- Judge: self-host vLLM -> external OpenAI-compatible endpoint ---
+    # Inherited from sft/qwen3_4b.yaml as a self-hosted vLLM judge (server_gpus:4)
+    # with a relative prompt_config — both break on Ray. Repointed to an external
+    # endpoint (same shape as eval/demo_ray.yaml's judge block).
+    judge:
+      model: openai/gpt-oss-120b                 # MUST equal your judge serve's --served-model-name
+      server_type: openai
+      server_address: http://<JUDGE_SERVE>/v1    # full URL, scheme + /v1
+      server_gpus: null
+      server_nodes: null
+      server_args: null
+      extra_args: >-
+        ++prompt_config=nvflow/recipes/finance/prompts/sec_judge.yaml
+        ++inference.temperature=0.0
+        ++inference.tokens_to_generate=8192
+        ++generation_key=judgement
+        ++skip_extraction=True

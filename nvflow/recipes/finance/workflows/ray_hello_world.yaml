@@ -1,0 +1,33 @@
+# ray_hello_world: smoke test that submits a command via nemo-skills run_cmd.
+# Use with a cluster config that sets backend.name: ray.
+
+recipe: finance
+
+workflow:
+  name: "ray_hello_world"
+  type: "smoke-test"
+  description: "Submit a hello-world command through the Ray Jobs backend"
+
+# Resolved to cluster_configs/<cluster>.yaml via NEMO_SKILLS_CONFIG_DIR or ./cluster_configs/.
+cluster: my_cluster
+
+# ${nvflow_root} is backend-keyed by the runner: /workspace on Slurm (in-container) and the
+# cluster's absolute data_root on Ray (executor:none driver runs outside the container, so
+# the output must land on a host- and container-visible shared path, e.g. /lustre/<you>/nvflow).
+# Set `data_root` in your Ray cluster config (cluster_configs/template-ray.yaml); no per-recipe edit needed.
+# The hello_world stage verifies the output landed on a shared path (no silent false-pass).
+base_output_dir: ${nvflow_root}/outputs/finance/ray_hello_world
+
+pipeline_stages:
+  - hello_world
+
+stages:
+  hello_world:
+    output_dir: ${base_output_dir}/step-1-hello-world
+    message: "hello world from nvflow finance via ray backend"
+    dependencies: []
+    stage_kwargs:
+      container: nemo-skills
+      num_nodes: 1
+      num_tasks: 1
+      dry_run: false

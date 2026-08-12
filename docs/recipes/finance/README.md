@@ -4,6 +4,8 @@
 
 End-to-end pipeline for generating synthetic financial Q&A data from SEC filings, training financial reasoning models, and evaluating them on benchmarks.
 
+> **Slurm (default) or Ray?** The recipes and data are shared, but setup and run commands differ. To run against **pre-provisioned Ray clusters**, follow [`INSTALL-RAY.md`](../../../INSTALL-RAY.md) (run `uv sync` → build/pull images → provision the Ray cluster → cluster config), then use the Ray run walkthrough [`quick-start-ray.md`](./quick-start-ray.md) — the Ray counterpart of [`quick-start.md`](./quick-start.md), with Ray-native fire/verify and absolute paths.
+
 ### Key Capabilities
 
 **Two Independent SDG Approaches:**
@@ -183,8 +185,8 @@ uv run nflow run-all --config nvflow/recipes/finance/workflows/sft/qwen3_14b.yam
 # Run baseline evaluation only
 uv run nflow run-all --config nvflow/recipes/finance/workflows/eval/baselines.yaml
 
-# Run GRPO RL training + checkpoint eval
-uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Run GRPO RL training + checkpoint eval (-e scopes to one environment; required)
+uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 ```
 
 ## Need Help?

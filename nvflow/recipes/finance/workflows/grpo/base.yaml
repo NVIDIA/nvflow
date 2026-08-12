@@ -7,8 +7,10 @@
 # by model configs (e.g., qwen3_4b.yaml).
 #
 # Usage:
-#   # Always use a model config (required):
-#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+#   # Always use a model config (required) AND scope to ONE environment with
+#   # `-e/--environment` (the only reliable scoper; a top-level `_environment:`
+#   # recipe key is NOT honored by `run-all` / `nflow run`):
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 #
 # To add a new model:
 #   1. Create workflows/grpo/<model_name>.yaml
@@ -19,9 +21,12 @@
 # Environment Configuration:
 #   NeMo-Gym environments are defined in the top-level `environments` dict.
 #   Each environment has its own data pipeline and NeMo-Gym config.
-#   A model config's `environments` block MERGES with this one rather than
-#   replacing it, so pass `-e <name>` to run a single environment -- without it
-#   every environment declared here is trained jointly.
+#   Scope a run to ONE environment with the CLI flag `-e/--environment <name>`
+#   (e.g. `-e equivalence_llm_judge`). This is the ONLY thing that scopes a run.
+#   A top-level `_environment:` recipe key is NOT honored by `run-all` / `nflow
+#   run` -- it is silently ignored, so without `-e` every stage fans out to ALL
+#   environments below (e.g. finance_sec_search then fails "Missing local
+#   datasets"). Always pass `-e` for multi-environment model configs.
 #
 # NeMo-RL / NeMo-Gym versions:
 #   Baked into the airgapped `nvflow-nemo-rl` image (see dockerfiles/Dockerfile.nemo-rl):
@@ -149,14 +154,18 @@ directories:
 #   policy_vllm: (optional) Per-environment policy vLLM overrides (e.g. max_model_len).
 #     Merged onto the shared rollout.policy_vllm for rollout jobs.
 #   training_policy: (optional) Per-environment training policy overrides.
-#     Applied only for single-environment training (--environment <name>).
+#     Applied only for single-environment training (`-e/--environment <name>`).
 #     Ignored for combined (multi-environment) training, which uses the
 #     model-level default.  Maps to fields under `policy` in the NeMo-RL
 #     config (e.g. max_total_sequence_length, generation.vllm_cfg).
 #   judge_vllm: (optional) Per-environment judge vLLM config. Omit if not needed.
 #
-# Use --environment <name> to run a single environment, or omit to run all.
-# For training (step 9), omitting --environment merges all environments.
+# Scope to a single environment with the CLI flag `-e/--environment <name>`
+# (e.g. `-e equivalence_llm_judge`) -- the ONLY reliable scoper. A top-level
+# `_environment:` recipe key is NOT honored by `run-all` / `nflow run`. Without
+# `-e`, every stage fans out to ALL environments (and finance_sec_search fails
+# "Missing local datasets" unless its data + cache are present). For training
+# (step 8), passing `-e` trains one environment; omitting it merges all.
 # Per-environment training_repeat > 1 oversamples that dataset in combined training.
 environments:
   equivalence_llm_judge:
@@ -462,6 +471,8 @@ stages:
   # Resume: re-running skips (seed, chunk) pairs whose .done file exists.
   #         Set rerun_done: true to force re-execution.
   collect_rollouts:
+    # Rollout (policy vLLM) GPU need is nested under rollout.policy_vllm; pin to GPU.
+    target_cluster: gpu
     output_dir: ${directories.step-5-collect-rollouts}
     prepare_data_dir: ${directories.step-4-prepare-data}
     # CPU nemo-gym for the Gym rollout client (ng_run head server + env
@@ -673,5 +684,7 @@ stages:
   # eval_output_dir, inference_args, server_args
   eval:
     eval_output_dir: ${directories.step-9-eval}
+    # Generation server is external under Ray; eval's Ray jobs are CPU.
+    target_cluster: cpu
     dependencies:
       - training

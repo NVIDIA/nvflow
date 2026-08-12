@@ -1,0 +1,265 @@
+# ============================================================================
+# Qwen3-4B GRPO — Single-Node 8-GPU Smoke (Ray-on-Slurm, external/API judge)
+# ============================================================================
+# EXPERIMENTAL starting point. The smallest config that exercises the GRPO lane
+# on a pre-provisioned Ray cluster: prepare_data -> collect_rollouts ->
+# train_validation_split -> training. Slurm is the only officially supported
+# executor; running on Ray clusters is experimental (see INSTALL-RAY.md).
+#
+# Validation status: env-scoping (via `-e`) and the prepare_data / data-input
+# path are validated live; the full collect_rollouts + training run on Ray is
+# still being validated (a single-node 8-GPU job needs an idle-exempt / non-
+# preemptible GPU allocation to stay up through training).
+#
+# What it sets up: the Ray Jobs-API GRPO path with an EXTERNAL/API reward judge,
+# on ONE 8-GPU node — no SDG/validate-questions chain, no in-job vLLM judge,
+# no second (CPU) cluster.
+#
+# Prerequisites (read INSTALL-RAY.md first):
+#   - ONE nemo-rl GPU Ray cluster up; cluster_configs/my_cluster.yaml uses the
+#     single-cluster shorthand: backend: { name: ray, dashboard_url: http://<head>:8265 }
+#   - cluster env_vars include PYTHONPATH=/workspace and the judge key. This
+#     recipe ships the EXPLICIT judge key form (_judge_api below uses
+#     openai_api_key: ${oc.env:NVIDIA_API_KEY}), which is resolved DRIVER-SIDE —
+#     so export NVIDIA_API_KEY on the DRIVER host (where `uv run nflow` runs).
+#     If instead you OMIT openai_api_key (fallback form), the gym reads
+#     $OPENAI_API_KEY from the JOB env, so cluster env_vars MUST then list
+#     OPENAI_API_KEY (set OPENAI_API_KEY=$NVIDIA_API_KEY for the NVIDIA API).
+#     See the _judge_api block below and quick-start-ray.md Step 5 #2.
+#   - A pre-made equivalence dataset dropped on /lustre (see DATA INPUT below).
+#
+# Usage — you MUST scope to ONE environment with the `-e` CLI flag (else every
+# stage fans out to ALL envs in base.yaml and finance_sec_search fails with
+# "Missing local datasets"). The `-e` flag is the ONLY thing that scopes a run;
+# the top-level `_environment:` recipe key below is NOT honored by `run-all` or
+# `nflow run` (see note at the key). Always pass `-e`:
+#   uv run nflow run prepare_data collect_rollouts train_validation_split training \
+#     --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_smoke.yaml \
+#     -e equivalence_llm_judge
+#
+# DATA INPUT (skips SDG + validate_questions): drop ONE pre-made file at
+#   <base_output_dir>/step-3-convert-to-responses-api/equivalence_llm_judge/final_result.jsonl
+# JSONL schema (one object/line), required fields:
+#   uuid                     unique per row (keys cross-seed aggregation)
+#   question / problem       raw question text
+#   expected_answer          gold answer the judge scores against
+#   prompt                   full templated model input (the policy sees this)
+#   responses_create_params  {"input": [{"role": "user", "content": "<prompt>"}]}
+# Use ~24-32 REWARD-VARIED rows (model sometimes right, sometimes wrong): the
+# collect_rollouts variance filter (filter.min_reward_std) drops zero-variance
+# prompts, so all-easy / all-impossible rows leave training with nothing.
+#
+# PATHS: data_root / base_output_dir / model_output_dir are driver-side under Ray
+# the Ray Jobs backend (executor: none), so they use the injected ${nvflow_root} named root —
+# /workspace on Slurm (in-container), the cluster's absolute /lustre root on Ray
+# (visible on BOTH the login-node driver AND the cluster container). Set the Ray
+# root once via `nvflow_root:` in the cluster config (see template-ray.yaml).
+# Same path class as the eval lane (see quick-start-ray.md prereq #4).
+# ============================================================================
+
+_base_: base.yaml
+
+# NOTE: documents intent only. The top-level `_environment:` key is NOT read by
+# the runner — only the CLI `-e/--environment` flag scopes a run
+# (workflow_runner._run_stage injects `_environment` into stage config solely
+# from `-e`; this root key is never copied in). You MUST pass
+# `-e equivalence_llm_judge` on every command above. Left here as a readable
+# record of which env this smoke targets.
+_environment: equivalence_llm_judge
+
+# Run scope / output roots — ${nvflow_root}-relative (driver-side; see PATHS above).
+data_root:        ${nvflow_root}/nvflow_smoke/finance/demo
+base_output_dir:  ${nvflow_root}/nvflow_smoke/finance/demo/grpo
+# hf_model_path — TWO ways, pick one (the path must resolve INSIDE the head container):
+#   (a) SIMPLEST: an absolute /lustre/... path. The head already mounts /lustre:/lustre, so it
+#       resolves both driver-side and in-container with NO extra mount —
+#       e.g. /lustre/<you>/hf_models/Qwen/Qwen3-4B.
+#   (b) /hf_models/... — REQUIRES adding ,<host-hf-dir>:/hf_models to the head bring-up MOUNTS
+#       (Step 3). Without that mount you get
+#       "HFValidationError: Repo id must be in the form ...: '/hf_models/Qwen/Qwen3-4B'"
+#       (vLLM can't find it locally, HF refuses the absolute path as a Hub repo id).
+hf_model_path:    /hf_models/Qwen/Qwen3-4B
+model_output_dir: ${base_output_dir}/qwen3_4b
+
+cluster: my_cluster
+
+# 4-stage smoke: skip validate_questions / data_transformation /
+# apply_prompt_template / convert_to_responses_api (fed pre-made) / prefetch_cache
+# (finance_sec_search only) / compute_rewards (optional) / eval (needs a CPU
+# nemo-skills cluster + external generation serve — add later, like the eval lane).
+pipeline_stages:
+  - prepare_data
+  - collect_rollouts
+  - train_validation_split
+  - training
+
+# ---------------------------------------------------------------------------
+# External / API reward judge (NOT an in-job vLLM judge).
+#   num_gpus: 0          -> no judge server hosted; rewards scored over HTTP
+#   openai_base_url set  -> judge mode "openai"
+#   openai_model required
+#   openai_api_key -> TWO ways the judge gets its key, pick ONE:
+#     (A) EXPLICIT (below): ${oc.env:NVIDIA_API_KEY} is resolved DRIVER-SIDE at
+#         config load (OmegaConf resolve=True) and baked into the job. So export
+#         NVIDIA_API_KEY on the DRIVER host (where `uv run nflow` runs) — the
+#         cluster env_vars do NOT need it for this form. Use ${oc.env:OPENAI_API_KEY}
+#         for api.openai.com.
+#     (B) FALLBACK: OMIT this line. The gym then reads the literal $OPENAI_API_KEY
+#         from the JOB's env at runtime — so cluster env_vars MUST list OPENAI_API_KEY
+#         (set OPENAI_API_KEY=$NVIDIA_API_KEY for the NVIDIA API). This is the form the
+#         INSTALL-RAY env_vars guidance assumes.
+#   Either works; just be consistent — don't expect cluster env_vars OPENAI_API_KEY
+#   to feed an EXPLICIT ${oc.env:NVIDIA_API_KEY} (that one is resolved on the driver).
+# ---------------------------------------------------------------------------
+_judge_api: &judge_api
+  num_gpus: 0
+  openai_base_url: https://integrate.api.nvidia.com/v1   # or: https://api.openai.com/v1
+  openai_model: openai/gpt-oss-120b                      # a judge model id you can access
+  openai_api_key: ${oc.env:NVIDIA_API_KEY}               # form (A); export NVIDIA_API_KEY on the DRIVER. Or omit -> form (B). See above.
+
+# Per-env 32K training policy (no YaRN/CP needed at 32K; native ctx 40960).
+_env_seq_len_32k: 32768
+_training_policy_32k: &training_policy_32k
+  max_total_sequence_length: ${_env_seq_len_32k}
+  hf_config_overrides: {}   # MUST be a dict, not null: NeMo-RL's MasterConfig.policy
+                            # is a pydantic model that rejects None -> ValidationError
+                            # at training start. Empty {} = "no HF config overrides".
+  megatron_cfg:
+    context_parallel_size: 1
+  generation:
+    vllm_cfg:
+      max_model_len: ${_env_seq_len_32k}
+  sequence_packing:
+    enabled: true
+    train_mb_tokens: ${_env_seq_len_32k}
+    logprob_mb_tokens: ${_env_seq_len_32k}
+  logprob_chunk_size: 2048
+  make_sequence_length_divisible_by: 16
+
+environments:
+  equivalence_llm_judge:
+    # raw_train_data: its VALUE is only consumed by the SKIPPED upstream stages
+    # (0-3), so the path below need not exist for this smoke. But the KEY must
+    # stay TRUTHY: prepare_data skips any environment whose raw_train_data is
+    # falsy (-> empty train.jsonl -> training has nothing). Do NOT null/remove it.
+    raw_train_data: ${nvflow_root}/nvflow_smoke/seed
+    source_format: separated
+    reasoning_mode: none
+    prompt_template: nvflow/recipes/finance/prompts/secque_template.yaml
+    answer_prefix: "Answer:"
+    config_paths:
+      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+      # Absolute /nemo_run/code path: gym runs `cd /opt/Gym && gym dataset collate`,
+      # so a repo-relative entry would resolve under /opt/Gym (not found). The
+      # overlay is nemo-run-packaged into the job at /nemo_run/code (matches base.yaml).
+      - /nemo_run/code/nvflow/recipes/finance/prompts/finance_openqa_judge_overlay.yaml
+    agent_name: equivalence_llm_judge_simple_agent
+    judge_vllm: *judge_api
+    training_policy: *training_policy_32k
+
+stages:
+
+  # Step 4: ng_prepare_data — reads the pre-made step-3 file (DATA INPUT above),
+  # emits step-4-prepare-data/<env>/train.jsonl.
+  prepare_data:
+    dependencies: []          # override base (skip the upstream SDG chain)
+
+  # Step 5: rollout collection + API-judge reward + variance filter (GPU).
+  collect_rollouts:
+    target_cluster: gpu
+    dependencies: [prepare_data]   # override base (prefetch_cache is dropped)
+    rollout:
+      # Single-node smoke: ONE seed, because each seed spawns its own local policy
+      # vLLM (rs0, rs1, ...) at gpu_memory_utilization ~0.9 and two collide on one
+      # 8-GPU node ("No available memory for the cache blocks").
+      # ⚠ The collect_rollouts variance filter computes reward_std ACROSS seeds, so
+      # 1 seed => every reward_std=0 => the filter drops ALL rows => empty
+      # train.jsonl (split/training then have no data). This LOCAL-serve smoke
+      # therefore can't feed training end-to-end as-is; use the external-serve
+      # variant (qwen3_4b_smoke_extserve.yaml: num_gpus: 0 + one shared endpoint =>
+      # no GPU collision => num_random_seeds: 4) for a full GRPO smoke. (base uses 8.)
+      num_random_seeds: 1
+      num_chunks: 1
+      max_num_samples: 24          # smoke: first 24 prompts (variance filter needs reward-varied rows; keep at 24)
+      # Rollout judge-load floor (rollout-side analog of the training floor below):
+      # num_samples_in_parallel controls how many concurrent reward-judge calls the
+      # rollout fires. Against the SHARED public API judge (integrate.api.nvidia.com)
+      # a wide fan-out (24) hammers the per-key rate limit -> the judge returns HTTP
+      # 429 ("Too Many Requests"), the gym retries each call ~1300x, and the rollout
+      # stalls partway forever (e.g. "Collecting rollouts 42% (10/24)") with the
+      # policy serve idle. 4 stays under the limit (mirrors the training 2*2=4 floor).
+      # max_num_samples stays at 24 so the variance filter still sees enough
+      # reward-varied rows. For a real run, raise this AND use a higher-rate-limit
+      # or self-hosted judge -- see the rollout 429 entry in quick-start-ray.md
+      # troubleshooting.
+      num_samples_in_parallel: 4
+      # POLICY vLLM: collect_rollouts LAUNCHES this serve itself (one per random
+      # seed: rs0, rs1, ...) and the NeMo-Gym client connects to it over HTTP --
+      # the gym does NOT self-host a policy vLLM. To run against an ALREADY-RUNNING
+      # policy serve instead (and not allocate GPUs for the serve), set
+      # base_url: http://<your-vllm>/v1 and num_gpus: 0. (In training, Step 8, the
+      # policy vLLM is colocated INSIDE NeMo-RL at gpu_memory_utilization 0.7 --
+      # no separate serve, no external URL.)
+      policy_vllm:
+        model_path: ${hf_model_path}
+        num_gpus: 2                # TP=2 derived; ample for Qwen3-4B @ 32K
+        reasoning_parser: qwen3
+        # vLLM INTERPRETER (NeMo-RL clusters, Ray Jobs backend): the policy
+        # serve runs the STOCK nemo-skills serve_vllm entrypoint; on the
+        # nemo-rl image vLLM lives in a per-actor venv under
+        # /opt/ray_venvs/<hash>/, not on PATH. The Ray serve wrapper's
+        # interpreter bridge auto-discovers a python that can `import vllm`
+        # (scans /opt/ray_venvs/*/bin) and prepends its bin dir to PATH for
+        # the engine spawn, keeping the launcher on the original interpreter.
+        # If discovery fails, set the cluster env_var
+        # NVFLOW_VLLM_PYTHON=/opt/ray_venvs/<hash>/bin/python (or
+        # NVFLOW_VLLM_VENV=/opt/ray_venvs/<hash>); override the scan glob with
+        # NVFLOW_VLLM_VENV_GLOB. On Slurm / in-container (vllm already
+        # importable) nothing changes.
+    # filter.min_reward_std inherited from base — keeps reward-varied rows.
+
+  # Step 7: post-rollout train/val split on the filtered train.jsonl.
+  train_validation_split:
+    val_ratio: 0.1
+
+  # Step 8: GRPO training on ONE 8-GPU node. total_gpus: 8 -> 1 node x 8 GPUs.
+  # FSDP TP=2 -> DP=4. Checkpoint dir: grpo-qwen3-4b-8g-tp2-cp1-seq32k
+  # (shipped qwen3_4b.yaml uses total_gpus: 16 = 2 nodes -> ...-16g-...).
+  training:
+    model_name: Qwen/Qwen3-4B
+    hf_checkpoint_path: ${hf_model_path}
+    backend: fsdp
+    total_gpus: 8
+    dependent_jobs: 0
+    preset: "grpo-base"
+    overrides:
+      grpo:
+        # Judge-load floor for the smoke: each training step fires
+        # num_prompts_per_step * num_generations_per_prompt reward-judge calls in
+        # a burst. Against the SHARED public API judge (integrate.api.nvidia.com)
+        # 8*8=64 calls/step hammers the per-key rate limit -> the judge returns
+        # HTTP 429 ("Too Many Requests") on every call and the step never gets its
+        # rewards (training stalls retrying). 2*2=4 calls/step stays under the
+        # limit. (2 is the GRPO minimum for the group baseline.) For a real run,
+        # raise these AND use a higher-rate-limit or self-hosted judge — see the
+        # 429 entry in quick-start-ray.md troubleshooting.
+        num_prompts_per_step: 2        # smoke (base 64); keep judge QPS low
+        num_generations_per_prompt: 2  # smoke (base 8); 2 = GRPO minimum
+        max_num_steps: 2               # smoke: 2 steps
+        val_period: 2
+      checkpointing:
+        save_period: 2
+      policy:
+        tokenizer:
+          name: ${stages.training.hf_checkpoint_path}
+        train_global_batch_size: 4     # = num_prompts_per_step(2) * num_generations_per_prompt(2)
+        generation:
+          vllm_cfg:
+            http_server_serving_chat_kwargs:
+              reasoning_parser: qwen3
+      # wandb is OPTIONAL: wandb_mode defaults to `disabled` (base.yaml), so this
+      # block is dormant and NO WANDB_API_KEY is needed. To enable, set
+      # training.wandb_mode: online and export WANDB_API_KEY (via cluster env_vars).
+      logger:
+        wandb:
+          name: "grpo-qwen3-4b-smoke"

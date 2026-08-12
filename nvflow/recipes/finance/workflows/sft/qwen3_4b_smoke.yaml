@@ -10,10 +10,10 @@
 
 _base_: qwen3_4b.yaml
 
-base_output_dir: /workspace/outputs/finance/smoke/workflow-4-sft/qwen3_4b
+base_output_dir: ${nvflow_root}/outputs/finance/smoke/workflow-4-sft/qwen3_4b
 
 directories:
-  raw_train_data: /workspace/outputs/finance/smoke/workflow-3-template-based-sdg/step-4-genselect-answers
+  raw_train_data: ${nvflow_root}/outputs/finance/smoke/workflow-3-template-based-sdg/step-4-genselect-answers
 
 # ============================================================================
 # Smoke Test Overrides
@@ -31,7 +31,7 @@ stages:
 
   eval:
     eval_steps: ["final"]
-    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-1n-tp2-pp1-cp2-seq32k
+    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-${stages.training.total_gpus}g-tp2-pp1-cp2-seq32k
     base_output_dir: ${base_output_dir}
     format: megatron
     base_model: /hf_models/Qwen/Qwen3-4B

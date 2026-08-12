@@ -39,3 +39,5 @@ cluster_configs/my_cluster.yaml
 *.sqsh
 *.tar
 *.tar.gz
+*.bundle
+artifacts/

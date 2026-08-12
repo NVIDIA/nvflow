@@ -4,9 +4,9 @@
 # Single-environment config for finance_sec_search GRPO training.
 # Uses Megatron backend (required for YaRN context extension to 131K).
 #
-# Usage -- `-e finance_sec_search` is REQUIRED. environments here merges with
-# base.yaml rather than replacing it, so omitting -e trains all three jointly
-# (equivalence_llm_judge+mcqa+finance_sec_search).
+# Usage (always pass `-e finance_sec_search`; the `-e/--environment` CLI flag is
+# the only reliable scoper -- a top-level `_environment:` recipe key is NOT
+# honored by `run-all` / `nflow run`):
 #   uv run nflow run training --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
 #   uv run nflow run eval --config nvflow/recipes/finance/workflows/grpo/qwen3_4b_finsec.yaml -e finance_sec_search
 #
@@ -18,7 +18,7 @@
 
 _base_: base.yaml
 
-data_root: /workspace/outputs/finance/demo
+data_root: ${nvflow_root}/outputs/finance/demo
 hf_model_path: /hf_models/Qwen/Qwen3-4B
 model_output_dir: ${base_output_dir}/qwen3_4b
 
@@ -160,4 +160,6 @@ stages:
       ++inference.top_k=20
       ++inference.tokens_to_generate=16384
       ++chat_template_kwargs.enable_thinking=true
-    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3 --tensor-parallel-size 2"
+    # TP derives from the eval serve's gpus (4) via nemo-skills serve_vllm;
+    # don't also set --tensor-parallel-size here or vLLM gets a duplicate flag.
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"

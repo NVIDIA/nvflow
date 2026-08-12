@@ -46,3 +46,30 @@ jobs:
           # from implicitly auto-installing heavy core deps that we
           # deliberately skipped above.
           uv run --no-sync pytest tests/ -v --tb=short
+
+  # test_rollout.py and test_verify.py importorskip nemo_skills, which the job
+  # above does not install: 54 of the suite's 300 tests skipped until this job.
+  # Mirrors test-full-deps in .gitlab-ci.yml.
+  test-full-deps:
+    name: Test (full deps)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fail on draft PRs
+        if: github.event.pull_request.draft == true
+        run: |
+          echo "Failing on draft PR to enforce this check to run"
+          exit 1
+
+      - name: Setup for test
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv sync --all-extras
+
+      - name: Test
+        run: |
+          # Assert the gated import, or this passes by skipping them again.
+          uv run python -c "import nemo_skills"
+          uv run pytest tests/ -v --tb=short

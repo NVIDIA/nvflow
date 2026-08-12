@@ -12,10 +12,10 @@
 _base_: template-based-sdg.yaml
 
 # Demo output directory (alongside demo filings)
-base_output_dir: /workspace/outputs/finance/demo/workflow-3-template-based-sdg
+base_output_dir: ${nvflow_root}/outputs/finance/demo/workflow-3-template-based-sdg
 
 # Use demo filings (from download_sec_filings demo stage)
-filings_dir: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download
+filings_dir: ${nvflow_root}/outputs/finance/demo/workflow-2-download-sec/step-0-download
 
 # ============================================================================
 # Demo Stage Overrides - Only override what's different from prod

@@ -24,7 +24,6 @@ from typing import Any
 import jsonlines
 import pandas as pd
 import tiktoken
-from markdownify import markdownify as md
 from tqdm import tqdm
 
 from nvflow.utils import setup_logger
@@ -122,6 +121,11 @@ def get_previous_filename_from_filename(full_filename: str, form_type: str) -> s
 
 def convert_html_to_markdown(html: str) -> str:
     """Convert to markdown for easier comparison"""
+    # markdownify is declared in pyproject `[project].dependencies` so it installs into
+    # the login-node .venv (Ray/driver path) as well as the container. Kept as a lazy
+    # import here for defensiveness (module stays importable even if the dep is absent).
+    from markdownify import markdownify as md
+
     markdown = md(html, heading_style="ATX", strip=["script", "style"])
     markdown = re.sub(r"\n{3,}", "\n\n", markdown)
     return markdown.strip()
@@ -285,11 +289,27 @@ def file_exists(filepath: str) -> bool:
     return exists
 
 
+def _record_skip(skip_stats: dict[str, Any] | None, reason: str, detail: str | None = None) -> None:
+    """Record a lightweight, aggregated reason for skipping a question.
+
+    Keeps only category counts plus a small sample of distinct details so a
+    future 0/N run is diagnosable without per-question log spam. No-op when
+    skip_stats is None (the default), so the hot path / tests stay unchanged.
+    """
+    if skip_stats is None:
+        return
+    skip_stats["reasons"][reason] = skip_stats["reasons"].get(reason, 0) + 1
+    samples = skip_stats["samples"]
+    if detail is not None and len(samples) < 5 and detail not in samples:
+        samples.append(detail)
+
+
 def process_question_item(
     question_item: dict[str, Any],
     filings_metadata: pd.DataFrame,
     filings_folder: str,
     token_limit: int,
+    skip_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Process a single question item with lazy file caching"""
 
@@ -300,7 +320,22 @@ def process_question_item(
     orig_item_names = question_item["item"].split(";")
     orig_report_dates = question_item["report_dates"].split(";")
 
+    # SecQue copies `item` verbatim as a single value even for multi-accession
+    # (comparison) questions, while create_seed_data builds one form_type /
+    # report_date PER accession. Comparison questions compare the SAME section
+    # across companies, so broadcast a single item/report_date across all
+    # filings rather than dropping the question outright.
+    if len(orig_item_names) == 1 and len(form_types) > 1:
+        orig_item_names = orig_item_names * len(form_types)
+    if len(orig_report_dates) == 1 and len(form_types) > 1:
+        orig_report_dates = orig_report_dates * len(form_types)
+
     if len(form_types) != len(orig_item_names):
+        _record_skip(
+            skip_stats,
+            "form_item_length_mismatch",
+            f"form_types={len(form_types)} item={len(orig_item_names)} item_val={question_item.get('item')!r}",
+        )
         return None
 
     # Get filepaths - called ONCE per question
@@ -311,6 +346,11 @@ def process_question_item(
         orig_item_name = orig_item_names[i]
         sdg_company = sdg_companies[i]
         if not sdg_company or sdg_company == "" or sdg_company == "None":
+            _record_skip(
+                skip_stats,
+                "empty_company",
+                f"ticker_a={question_item.get('ticker_a')!r} ticker_b={question_item.get('ticker_b')!r}",
+            )
             return None
         filepath = get_matching_section_filepath(
             form_type=form_type,
@@ -322,6 +362,11 @@ def process_question_item(
             filings_folder=filings_folder,
         )
         if not filepath:
+            _record_skip(
+                skip_stats,
+                "file_not_found",
+                f"ticker={sdg_company} form={form_type} year={sdg_year} item={orig_item_name!r}",
+            )
             return None
         filepaths.append(filepath)
 
@@ -355,6 +400,8 @@ def process_question_chunk(
     """
     results = []
     stats = {"success": 0, "failed": 0}
+    # Lightweight, aggregated skip diagnostics so a 0/N run is not silent.
+    skip_stats: dict[str, Any] = {"reasons": {}, "samples": []}
 
     for question_item in questions:
         try:
@@ -363,14 +410,26 @@ def process_question_chunk(
                 filings_metadata,
                 filings_folder,
                 token_limit,
+                skip_stats=skip_stats,
             )
             if result:
                 results.append(result)
                 stats["success"] += 1
             else:
                 stats["failed"] += 1
-        except Exception:
+        except Exception as exc:
             stats["failed"] += 1
+            _record_skip(skip_stats, "exception", f"{type(exc).__name__}: {exc}")
+
+    # Surface category counts + a small sample so future 0/N runs are diagnosable.
+    if stats["failed"]:
+        stats["skip_reasons"] = skip_stats["reasons"]
+        logger.info(
+            "Chunk skips: %d failed; reasons=%s; sample=%s",
+            stats["failed"],
+            skip_stats["reasons"],
+            skip_stats["samples"],
+        )
 
     return results, stats
 
@@ -454,6 +513,7 @@ def map_questions_to_context(
     completed_count = 0
     success_count = 0
     failed_count = 0
+    skip_reason_totals: dict[str, int] = {}
     checkpoint_buffer = []
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -477,6 +537,8 @@ def map_questions_to_context(
 
                         success_count += stats["success"]
                         failed_count += stats["failed"]
+                        for reason, count in stats.get("skip_reasons", {}).items():
+                            skip_reason_totals[reason] = skip_reason_totals.get(reason, 0) + count
 
                         # Update progress bar by number of questions in this chunk
                         pbar.update(len(results))
@@ -517,6 +579,8 @@ def map_questions_to_context(
     logger.info("Complete! Processed %d questions this run", completed_count)
     logger.info("  - Success: %d", success_count)
     logger.info("  - Failed: %d", failed_count)
+    if failed_count:
+        logger.info("  - Skip reasons (by category): %s", skip_reason_totals)
     logger.info("Total in output: %d questions", total_in_file)
 
 

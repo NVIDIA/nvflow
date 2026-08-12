@@ -16,6 +16,7 @@ import argparse
 import ast
 import json
 import re
+from pathlib import Path
 
 import jsonlines
 
@@ -78,6 +79,10 @@ def parse_generation_text(generation_text):
 
 def parse_generations(input_file, output_file):
     log_file = output_file.replace(".jsonl", "_log.txt")
+    # Ensure the output directory exists: over the Ray Jobs API each stage runs
+    # as an isolated job, so the output step dir is not pre-created the way it is
+    # in a shared-filesystem Slurm run.
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     num_original_questions, num_failed_to_parse = 0, 0
     num_generated_questions, num_generated_questions_after_deduplication = 0, 0
     with (

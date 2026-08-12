@@ -2,6 +2,8 @@
 
 Comprehensive troubleshooting guide for common issues across all finance recipe workflows.
 
+> **Ray gotchas** (dashboard unreachable, Python-minor-at-join, judge auth via the cluster head env) are in [`INSTALL-RAY.md` → Troubleshooting](../../../INSTALL-RAY.md#troubleshooting).
+
 ## Quick Navigation
 
 - [Cluster & Infrastructure](#cluster--infrastructure)

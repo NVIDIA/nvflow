@@ -117,6 +117,13 @@ def merge_jsonl_files(input_files, output_file):
     # killed/timed-out job leave a truncated-but-non-empty file that either
     # check mistakes for complete, silently feeding a short genselect input
     # downstream forever.
+    # Ensure the output directory exists: over the Ray Jobs API each stage runs
+    # as an isolated job, so the output step dir is not pre-created the way it is
+    # in a shared-filesystem Slurm run.  Without this the tmp-file open below
+    # raises FileNotFoundError on Ray, the merge dies, and the downstream
+    # genselect generation then fails on the missing prepped input.
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
     tmp_output_file = f"{output_file}.tmp"
     with open(tmp_output_file, "wb") as out:
         for idx, (problem, problem_data) in enumerate(data.items(), 1):

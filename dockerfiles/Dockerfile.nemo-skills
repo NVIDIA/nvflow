@@ -33,13 +33,15 @@ RUN cd /src/wandb/core && \
     go version -m /wandb-core | grep -E "golang\.org/x/text[[:space:]]+v0\.40\.0([[:space:]]|$)"
 
 # NeMo-Skills at a pinned commit, replacing upstream's build-context COPYs.
+# This Ray integration pin must contain nemo_skills.pipeline.utils.ray_backend;
+# the fail-fast import below prevents a non-Ray source revision from shipping.
 FROM scratch AS nemo-skills-src
-ARG NEMO_SKILLS_COMMIT=e06c9b900177be3f60d6a3f99135bb5de9af9bed
+ARG NEMO_SKILLS_COMMIT=1fd0a9f34a5f213a1d0990f0d587fadabb80ba45
 ADD --keep-git-dir=true https://github.com/NVIDIA-NeMo/Skills.git#${NEMO_SKILLS_COMMIT} /
 
 
 # ===========================================================================
-# 1. BEGIN UPSTREAM -- github.com/NVIDIA-NeMo/Skills @ e06c9b90
+# 1. BEGIN UPSTREAM -- github.com/NVIDIA-NeMo/Skills @ 1fd0a9f3
 # Deviations, so a diff after re-syncing shows only these:
 #   - COPY -> COPY --from=nemo-skills-src (pinned SHA instead of build context)
 #   - google-research not cloned (unused here; carries Criticals)
@@ -138,6 +140,21 @@ RUN pip install ddgs
 # ===========================================================================
 
 
+# Ray Jobs workers do not receive the source bind mount assumed by upstream.
+# Bake the package itself after the upstream-compatible requirements layer.
+COPY --from=nemo-skills-src /nemo_skills/ /opt/NeMo-Skills/nemo_skills/
+COPY --from=nemo-skills-src /tools/requirements.txt /opt/NeMo-Skills/tools/requirements.txt
+RUN cd /opt/NeMo-Skills && uv pip install --system --no-cache-dir --no-deps .
+# Ray's stable code-root resolver intentionally prefers this complete baked
+# source tree over wheel package-data. Gate representative formats that finance
+# evaluation and RL jobs consume after changing directory to /opt/Gym.
+RUN test -s /opt/NeMo-Skills/nemo_skills/prompt/config/generic/default.yaml && \
+    test -s /opt/NeMo-Skills/nemo_skills/dataset/aime24/test.txt && \
+    test -s /opt/NeMo-Skills/nemo_skills/pipeline/nemo_rl/ray_templates/nemo_skills_sandbox_ray.sub.j2 && \
+    test -s /opt/NeMo-Skills/nemo_skills/mcp/servers/exclude_domains_hle_opus.json && \
+    python -c "import nemo_skills, nemo_skills.pipeline.utils.ray_backend; print('nemo_skills Ray backend OK:', nemo_skills.__file__)"
+
+
 # ===========================================================================
 # 2. NVFLOW -- imported by workflow steps; baked so no job downloads at launch.
 # ===========================================================================
@@ -222,7 +239,7 @@ RUN uv pip uninstall --system bfcl_eval || true && \
     ! python -c "import bfcl_eval" 2>/dev/null && \
     [ -z "$(find /usr/local/lib/python3*/dist-packages -maxdepth 1 -name '*bfcl*')" ] && \
     ! find /usr/local /opt -name 'ray_dist.jar' -type f 2>/dev/null | grep -q . && \
-    python -c "import ray; print('bfcl/IFBench removed, ray OK:', ray.__version__)"
+    python -c "import ray, nemo_skills.pipeline.utils.ray_backend; print('bfcl/IFBench removed, Ray backend OK:', ray.__version__)"
 
 # Asserted, not pinned, so a regression fails the build rather than being papered
 # over. wandb is exact: the patched core binary must match its Python protocol.

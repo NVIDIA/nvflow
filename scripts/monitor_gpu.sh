@@ -27,7 +27,7 @@ if [ -z "$NODES" ]; then
     exit 1
 fi
 
-# Parse node list (handle ranges like pool0-[01438,02109])
+# Parse node list (handle ranges like node-[0001,0002])
 NODE_LIST=$(scontrol show hostname $NODES)
 
 echo -e "${GREEN}=========================================="

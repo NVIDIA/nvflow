@@ -195,7 +195,9 @@ def compute_length_statistics(records: list[dict[str, Any]]) -> dict[str, dict[s
                 "p99": lengths_sorted[int(n * 0.99)],
             }
         else:
-            summary[field] = {k: 0 for k in ["count", "min", "max", "mean", "median", "p95", "p99"]}
+            summary[field] = dict.fromkeys(
+                ["count", "min", "max", "mean", "median", "p95", "p99"], 0
+            )
             summary[field]["missing"] = missing
 
     return summary

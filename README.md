@@ -107,6 +107,10 @@ uv run pre-commit install
 ```
 
 > ⚠️ **Developers:** Always run `uv run pre-commit install` after cloning. This enables automatic code quality checks on every commit.
+>
+> ⚠️ **Running on Ray?** The bare `uv sync` above installs everything you need — the
+> Ray Jobs backend lives in `nemo_skills`, which `uv sync` pulls in automatically. See
+> [`INSTALL-RAY.md`](INSTALL-RAY.md) Step 1.
 
 > 🔌 **Air-gapped / no internet on the install host?** Skip the local install and drive `nflow` from the prebuilt `nvflow-client` container (CLI + venv baked in, no `uv sync`). See [docs/remote-launch.md](docs/remote-launch.md).
 
@@ -139,6 +143,12 @@ runtime (see [INSTALL.md](INSTALL.md)).
 >
 > **See [`dockerfiles/docker_instructions.md`](dockerfiles/docker_instructions.md)**
 > for the build / multi-arch / sanity-check reference.
+>
+> **Running on Ray (experimental):** Slurm is the only officially supported executor.
+> To run on pre-provisioned Ray clusters instead, see [`INSTALL-RAY.md`](INSTALL-RAY.md).
+> Provisioning the Ray clusters (including any Kubernetes deployment) is the
+> customer's responsibility. **Ray users install with the same bare `uv sync`** above — the
+> Ray Jobs backend lives in `nemo_skills`, which `uv sync` installs automatically; see [`INSTALL-RAY.md`](INSTALL-RAY.md) Step 1.
 
 Once cluster setup is complete, set the config directory:
 
@@ -265,6 +275,7 @@ End-to-end pipeline for generating synthetic financial Q&A data from SEC filings
 
 **Quick Links:**
 - [Quick Start (~3 hour demo)](docs/recipes/finance/quick-start.md) - Get started quickly with 7 companies
+- [Quick Start — Ray](docs/recipes/finance/quick-start-ray.md) - The same demo on pre-provisioned Ray clusters (experimental)
 - [Workflow Guides](docs/recipes/finance/workflows/) - Detailed guides for all 6 workflows
 - [Stage Reference](docs/recipes/finance/stages/) - Technical specifications for all 37 stages
 
@@ -312,6 +323,10 @@ nflow run STAGE --config FILE               # Run specific stage (short name)
 nflow run-all --config FILE                 # Run all stages
 nflow version                               # Show version
 ```
+
+> **`--config` is cwd-relative.** Pass the full path from the repo root (e.g.
+> `nvflow/recipes/finance/workflows/grpo/qwen3_4b_smoke.yaml`), as every example above shows — there is
+> no recipe-search path, so a short form like `grpo/qwen3_4b_smoke.yaml` fails with `No such file or directory`.
 
 ## 🛠️ Development
 

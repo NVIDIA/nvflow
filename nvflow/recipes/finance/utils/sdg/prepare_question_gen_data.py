@@ -16,6 +16,7 @@
 
 import argparse
 from itertools import combinations
+from pathlib import Path
 
 import jsonlines
 import pandas as pd
@@ -107,6 +108,10 @@ def generate_company_year_combinations_for_all_questions(
 
     # Generate combinations for all questions
     total_output = 0
+    # Ensure the output directory exists: over the Ray Jobs API each stage runs
+    # as an isolated job, so the output step dir is not pre-created the way it is
+    # in a shared-filesystem Slurm run.
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     with jsonlines.open(output_file, mode="w") as writer:
         for entry in input_data:
             unique_accession_numbers = set(entry["accession_number"].split(";"))

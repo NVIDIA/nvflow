@@ -157,7 +157,7 @@ This stage has two sub-steps:
    - **Comparison questions**: Generate 1 entry per company **pair** × year
      - Pairs are created from companies in the **same SubIndustry** (from Stage 0 output)
      - Example: NVIDIA + AMD (both "Semiconductors") → valid pair
-     - Example: NVIDIA + JPMorgan Chase → **not** a valid pair (different SubIndustries)
+     - Example: NVIDIA + Walmart → **not** a valid pair (different SubIndustries)
    - Output: JSONL with all combinations to generate
 
 2. **Generate questions** (LLM inference):

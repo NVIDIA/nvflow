@@ -62,10 +62,10 @@
 _base_: document-grounded-sdg-qwen-demo.yaml
 
 # Production input: the FULL S&P 500 download (NOT the demo's 7 companies).
-filings_dir: /workspace/outputs/finance/sap-500/workflow-2-download-sec/step-0-download
+filings_dir: ${nvflow_root}/outputs/finance/sap-500/workflow-2-download-sec/step-0-download
 
 # Separate output tree for the production run.
-base_data_dir: /workspace/outputs/finance/prod/workflow-2-document-grounded-sdg-qwen-prod
+base_data_dir: ${nvflow_root}/outputs/finance/prod/workflow-2-document-grounded-sdg-qwen-prod
 
 stages:
 

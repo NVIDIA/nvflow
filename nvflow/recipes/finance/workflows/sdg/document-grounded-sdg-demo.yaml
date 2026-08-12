@@ -11,10 +11,10 @@
 # Inherit production config
 _base_: document-grounded-sdg.yaml
 
-base_data_dir: /workspace/outputs/finance/demo/workflow-2-document-grounded-sdg-demo
+base_data_dir: ${nvflow_root}/outputs/finance/demo/workflow-2-document-grounded-sdg-demo
 
 # Use demo filings (already downloaded in workflow-0)
-filings_dir: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download
+filings_dir: ${nvflow_root}/outputs/finance/demo/workflow-2-download-sec/step-0-download
 
 # ============================================================================
 # Demo Stage Overrides - Only override what's different from prod

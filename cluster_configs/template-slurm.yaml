@@ -168,7 +168,7 @@ env_vars:
   # API keys (keep these secret, don't commit to git!)
   # - HF_TOKEN=<YOUR_HF_TOKEN>
   # - WANDB_API_KEY=<YOUR_WANDB_KEY>
-  # - OPENAI_API_KEY=<YOUR_OPENAI_KEY>
+  # - OPENAI_API_KEY=<YOUR_OPENAI_KEY>   # GRPO/NeMo-Gym reward judge reads this by default (even against the NVIDIA API)
 
 # =============================================================================
 # Email Notifications (optional)

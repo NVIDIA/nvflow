@@ -1,0 +1,122 @@
+# Ray Cluster Configuration Template — EXPERIMENTAL
+#
+# Running on pre-provisioned Ray clusters is experimental; Slurm is the only
+# officially supported executor. See the Ray setup guide for the full walkthrough.
+#
+# Copy this file to a user-owned shared config directory, then fill in the
+# dashboard URLs (keep endpoint keys in the launch shell, not the YAML):
+#   export NEMO_SKILLS_CONFIG_DIR=/lustre/<you>/nvflow-config/cluster_configs
+#   mkdir -p "$NEMO_SKILLS_CONFIG_DIR"
+#   cp cluster_configs/template-ray.yaml "$NEMO_SKILLS_CONFIG_DIR/my_cluster.yaml"
+#
+# Bring up the clusters with scripts/start_ray_on_slurm.sb (run once per cluster);
+# it prints each dashboard URL to paste below. Keep the filled config in a
+# user-owned shared directory selected with NEMO_SKILLS_CONFIG_DIR; list only
+# environment-variable names here and keep secret values in the launch shell.
+
+# Required field even on the Ray backend: nemo-skills reads cluster_config["executor"] in many
+# non-Ray code paths (mounts, HF-home check, run_after, server config) and the config
+# loader does NOT default it, so it must be set here. "none" = no nemo-run executor; the
+# Ray Jobs backend does the submitting. Do NOT use "ray" — that selects the Mode-1
+# ray-as-scheduler path and trips the with_ray incompatibility guard.
+executor: none
+
+backend:
+  name: ray
+
+  # Install-free code delivery for Ray Jobs. The nvflow-client image creates
+  # this compact, tracked-files-only archive at build time. Run `nflow` from
+  # that image so the local path exists for the Jobs client; Ray uploads and
+  # extracts it as each job's working directory. NeMo-Skills captures that
+  # absolute directory in NEMO_RUN_CODE_DIR before commands can change cwd.
+  # Do not replace this with a host checkout, PYTHONPATH overlay, or runtime pip/uv install.
+  working_dir: /opt/nvflow-ray-code.zip
+
+  # Ray Jobs API dashboard URL of each pre-provisioned cluster (http://<head>:<port>).
+  # nvflow auto-routes each stage by its GPU request — GPU stages (training, rollout)
+  # to the nemo-rl cluster, CPU stages (data-prep, eval) to the nemo-skills cluster —
+  # exactly as Slurm splits partition / cpu_partition. A stage may override the
+  # inference with `target_cluster: cpu|gpu`.
+  gpu_nemo_rl_dashboard_url:     http://<gpu-cluster-head>:8265
+  cpu_nemo_skills_dashboard_url: http://<cpu-cluster-head>:8266
+  # 3rd cluster: CPU nemo-gym image (baked Gym CLI + component venvs) for the
+  # gym-client stages (DG-SDG gym stages, GRPO prepare_data / prefetch_cache /
+  # collect_rollouts). Stages with `container: nemo-gym` (or `target_cluster:
+  # gym`) route here.
+  #
+  # REQUIRED for GRPO on Ray. collect_rollouts targets the gym cluster, and if
+  # this key is unset the router silently FALLS BACK to the nemo-skills CPU
+  # cluster — which has NO gym CLI — so the stage misroutes and fails there
+  # (e.g. `Error: backend.name: ray with executor: none ... requires a dashboard
+  # URL`, or a gym-CLI-not-found error) instead of running on nemo-gym. Always
+  # define it for any workflow that uses gym stages. The head IP changes on every
+  # bring-up, so re-set this after each `scripts/start_ray_on_slurm.sb`.
+  # cpu_nemo_gym_dashboard_url:  http://<gym-cluster-head>:8267   # GRPO ONLY — uncomment + set for gym-rollout stages (see the warning above)
+  # Single cluster instead? Delete both *_dashboard_url lines above and set the generic shorthand
+  # the Ray Jobs backend reads directly — works for BOTH `nflow run <stage>` and `run-all`:
+  #     dashboard_url: http://<head>:8265
+  # (A lone gpu_nemo_rl_dashboard_url only takes effect through run-all's per-stage routing; a
+  # single-stage `nflow run` then fails: `use_with_ray_cluster is only supported for SlurmExecutor`.)
+
+  # ── GRPO collect_rollouts: BYO external policy serve (recommended path) ──────────
+  # The recommended way to run GRPO rollouts on Ray is with the policy vLLM served
+  # EXTERNALLY (BYO), not self-hosted inside the gym job. Why: a local in-gym serve
+  # (recipe `policy_vllm.num_gpus: 2`) would need the gym CLI AND vLLM in ONE image,
+  # but the nemo-gym image ships the gym CLI with NO vLLM — so a local serve fails
+  # ("the image gap"). The gym `vllm_model` adapter is a pure HTTP client, so pointing
+  # it at an external endpoint skips launching an in-gym serve entirely (no vLLM, no
+  # GPU needed in the gym image). In your RECIPE (not here) set, under policy_vllm:
+  #     base_url: http://<serve-node>:5000/v1   # external OpenAI-compatible endpoint
+  #     num_gpus: 0                              # -> need_policy_server=False (rollout.py)
+  #     model_path: <SERVED_NAME>                # sent VERBATIM as the OpenAI model id
+  # The endpoint is a standalone vLLM `vllm serve` on a GPU node (the vllm-grpo image) —
+  # NOT a 4th Ray cluster, just an HTTP endpoint like the judge. Its `--served-model-name`
+  # MUST byte-equal policy_vllm.model_path, or rollouts 404 with model-not-found (the id is
+  # sent verbatim, never loaded locally). One GPU is ample for a 4B policy. See the Ray GRPO
+  # guide for the `vllm serve` command and the `curl http://<serve>:5000/v1/models` check.
+  # The JUDGE is likewise external (num_gpus:0) — a hosted/OpenAI endpoint, configured in
+  # the recipe; its key is resolved DRIVER-SIDE (see env_vars below).
+
+# Absolute root for workflow data + outputs. Recipes are backend-agnostic and write to
+# ${nvflow_root}/... ; the runner injects this value on Ray and "/workspace" on Slurm, so ONE
+# recipe runs on both. With executor:none the nvflow-client driver and worker
+# containers both need this mutable data path, so it MUST be an absolute path
+# visible IDENTICALLY in both (e.g. a Lustre mount). Tracked repo refs (prompts,
+# scripts) resolve from the driver tree / delivered job cwd instead. Required
+# for the Ray backend.
+#
+# Include this same absolute path in MOUNTS when starting every Ray head with
+# scripts/start_ray_on_slurm.sb. The mounts listed below do not retrofit an
+# already-running, pre-provisioned cluster. Source is delivered separately by
+# backend.working_dir and must not be mounted from a host checkout.
+nvflow_root: /lustre/<you>/nvflow
+
+# Container image per role. On a pre-provisioned Ray cluster the image is already running,
+# so these paths are not used to launch jobs — but the keys must be present so each stage's
+# `container:` selector resolves (and maps to the right cluster above).
+containers:
+  nemo-rl:     <PATH_TO_CONTAINERS>/nvflow-nemo-rl.sqsh      # GPU cluster (training)
+  nemo-skills: <PATH_TO_CONTAINERS>/nvflow-nemo-skills.sqsh  # CPU cluster (data-prep, eval)
+  nemo-gym:    <PATH_TO_CONTAINERS>/nvflow-nemo-gym.sqsh     # CPU cluster (gym stages, collect_rollouts)
+
+# Host:container mount pairs visible to every Ray job (models / data / outputs).
+# Do not mount a source checkout. NVFlow code and tracked recipe assets come
+# from the immutable archive configured by backend.working_dir above.
+mounts:
+  - /lustre:/lustre
+  - <CLUSTER_PATH_TO_HF_MODELS>:/hf_models
+
+# Env var names (or NAME=value literals) forwarded into each Ray job. The
+# working-directory archive makes `python -m nvflow...` import from the job cwd,
+# so no PYTHONPATH source overlay is needed or permitted. The entries below
+# forward BYO generation/judge credentials. Keep secrets out of git.
+env_vars:
+  - OPENAI_API_KEY         # GRPO / BYO-OpenAI judge (the key the gym judge reads by default)
+  # - NVIDIA_API_KEY       # nemo-skills eval judge against api.nvidia.com
+  # - HF_TOKEN
+  #
+  # NOTE on `ModuleNotFoundError: No module named 'rich'` in nemo-gym post-rollout steps:
+  # Do NOT work around this by injecting a driver venv's site-packages onto PYTHONPATH here.
+  # That is an air-gap violation AND it pulls an incompatible `fastapi` into the gym server,
+  # crashing it at startup. The correct fix is to use a nemo-gym image that bakes `rich`
+  # at build time. See the `quick-start-ray.md` Troubleshooting entry for details.

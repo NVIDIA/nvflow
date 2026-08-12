@@ -5,8 +5,11 @@
 # Inherits shared pipeline logic from base.yaml and provides all Qwen3-4B
 # specific settings (model paths, parallelism, etc.)
 #
-# Usage:
-#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml
+# Usage (scope to ONE environment with `-e/--environment`; this is the only
+# reliable scoper -- a top-level `_environment:` recipe key is NOT honored by
+# `run-all` / `nflow run`. Without `-e`, every stage fans out to all envs and
+# finance_sec_search fails "Missing local datasets" without its SEC cache):
+#   uv run nflow run-all --config nvflow/recipes/finance/workflows/grpo/qwen3_4b.yaml -e equivalence_llm_judge
 #
 # Data:
 #   data_transformation cleans raw SDG data, apply_prompt_template formats
@@ -24,7 +27,7 @@ _base_: base.yaml
 # Run scope: change data_root AND the finance_sec_search overlay together.
 #   demo:     data_root: /workspace/outputs/finance/demo      + finance_sec_search_demo.yaml
 #   sap-500:  data_root: /workspace/outputs/finance/sap-500   + finance_sec_search_sap500.yaml
-data_root: /workspace/outputs/finance/demo
+data_root: ${nvflow_root}/outputs/finance/demo
 
 # Model identity (define once, reference everywhere via ${hf_model_path})
 hf_model_path: /hf_models/Qwen/Qwen3-4B
@@ -223,4 +226,7 @@ stages:
       ++inference.top_k=20
       ++inference.tokens_to_generate=16384
       ++chat_template_kwargs.enable_thinking=true
-    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3 --tensor-parallel-size 2"
+    # NOTE: TP is derived from the eval serve's ``gpus`` (4) by nemo-skills'
+    # serve_vllm (emits --tensor-parallel-size={num_gpus}); do NOT also set
+    # --tensor-parallel-size here or vLLM receives a duplicate flag (bit S5a eval).
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"

@@ -138,6 +138,16 @@ def test_verify_cmd_openai_judge_snapshot() -> None:
     assert rendered == _load_fixture("verify_cmd_openai_judge.txt")
 
 
+def test_verify_retry_uses_ray_managed_pythonpath() -> None:
+    slurm = _build_verify_cmd(**_verify_cmd_kwargs())  # type: ignore[arg-type]
+    ray = _build_verify_cmd(**_verify_cmd_kwargs(is_ray=True))  # type: ignore[arg-type]
+
+    assert "VERIFY_MAX_ATTEMPTS" not in slurm
+    assert "PYTHONPATH=/nemo_run/code" in slurm
+    assert "VERIFY_MAX_ATTEMPTS=3" in ray
+    assert "PYTHONPATH=" not in ray
+
+
 # ===========================================================================
 # _build_verify_cmd structural / behavioral checks
 # ===========================================================================
@@ -263,6 +273,15 @@ def test_analysis_cmd_single_seed_snapshot() -> None:
         )
     )
     assert rendered == _load_fixture("analysis_cmd_single_seed.txt")
+
+
+def test_analysis_pythonpath_is_backend_specific() -> None:
+    slurm = _build_analysis_cmd(**_analysis_cmd_kwargs())  # type: ignore[arg-type]
+    ray = _build_analysis_cmd(**_analysis_cmd_kwargs(is_ray=True))  # type: ignore[arg-type]
+
+    assert "PYTHONPATH=/nemo_run/code" in slurm
+    assert "${PYTHONPATH:+$PYTHONPATH:}" not in slurm
+    assert "PYTHONPATH=" not in ray
 
 
 def test_analysis_cmd_empty_entries_uses_default_first_file() -> None:

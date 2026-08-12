@@ -44,7 +44,7 @@ import pytest
 
 pytest.importorskip("nemo_skills")  # heavy core dep, absent in the lightweight CI
 
-from nvflow.lib.rl.helpers import LauncherFS
+from nvflow.lib.rl.helpers import LauncherFS, _build_overlay_setup_cmd
 from nvflow.lib.rl.rollout import (
     _build_client_cmd,
     _build_merge_cmd,
@@ -53,6 +53,7 @@ from nvflow.lib.rl.rollout import (
     _get_remaining_jobs,
     _merged_filename,
     _output_filename,
+    _ray_postprocess_installation_command,
     _vllm_port_file,
     build_aggregate_cmd,
     build_filter_cmd,
@@ -164,10 +165,10 @@ def test_vllm_port_file_includes_slurm_job_id() -> None:
     """
     path = _vllm_port_file("/log", "policy", "rs0_chunk0")
     assert path == "/log/.vllm_port_policy_rs0_chunk0_${SLURM_JOB_ID}.txt"
-    # The literal ``${SLURM_JOB_ID}`` shell variable -- expanded by bash
-    # at runtime, not by Python at render time.  This is intentional
-    # and load-bearing.
-    assert "${SLURM_JOB_ID}" in path
+    # The ``SLURM_JOB_ID`` shell variable --
+    # expanded by bash at runtime, not by Python at render time.  This is
+    # intentional and load-bearing.
+    assert "SLURM_JOB_ID" in path
 
 
 def test_vllm_port_file_no_label_omits_underscore() -> None:
@@ -302,6 +303,16 @@ def test_client_cmd_no_rcp_snapshot() -> None:
     rendered = _build_client_cmd(**_client_cmd_kwargs(responses_create_params={}))  # type: ignore[arg-type]
     assert rendered == _load_fixture("client_cmd_no_rcp.txt")
     assert "+responses_create_params." not in rendered
+
+
+def test_client_ray_retry_uses_ray_managed_pythonpath() -> None:
+    slurm = _build_client_cmd(**_client_cmd_kwargs())  # type: ignore[arg-type]
+    ray = _build_client_cmd(**_client_cmd_kwargs(is_ray=True))  # type: ignore[arg-type]
+
+    assert "_NG_RUN_MAX_RETRIES" not in slurm
+    assert "PYTHONPATH=/nemo_run/code" in slurm
+    assert "_NG_RUN_MAX_RETRIES=5" in ray
+    assert "PYTHONPATH=" not in ray
 
 
 def test_client_cmd_uses_python3_not_python() -> None:
@@ -709,6 +720,53 @@ def test_filter_cmd_full_snapshot() -> None:
         report_filename="filter_report.json",
     )
     assert rendered == _load_fixture("filter_cmd_full.txt")
+
+
+def test_postprocess_pythonpath_is_backend_specific() -> None:
+    slurm_merge = _build_merge_cmd(**_merge_cmd_kwargs())  # type: ignore[arg-type]
+    ray_merge = _build_merge_cmd(**_merge_cmd_kwargs(is_ray=True))  # type: ignore[arg-type]
+    slurm_aggregate = build_aggregate_cmd(rollout_dir="/out", aggregate_module="pkg.aggregate")
+    ray_aggregate = build_aggregate_cmd(
+        rollout_dir="/out", aggregate_module="pkg.aggregate", is_ray=True
+    )
+    slurm_filter = build_filter_cmd(
+        output_dir="/out",
+        difficulty_dir="/diff",
+        filter_module="pkg.filter",
+        train_data="/train",
+        validation_data="",
+    )
+    ray_filter = build_filter_cmd(
+        output_dir="/out",
+        difficulty_dir="/diff",
+        filter_module="pkg.filter",
+        train_data="/train",
+        validation_data="",
+        is_ray=True,
+    )
+
+    for command in (slurm_merge, slurm_aggregate, slurm_filter):
+        assert "PYTHONPATH=/nemo_run/code" in command
+        assert "${PYTHONPATH:+$PYTHONPATH:}" not in command
+    for command in (ray_merge, ray_aggregate, ray_filter):
+        assert "PYTHONPATH=" not in command
+
+    slurm_overlay = _build_overlay_setup_cmd("/model", "/overlay", {"rope": "yarn"})
+    ray_overlay = _build_overlay_setup_cmd("/model", "/overlay", {"rope": "yarn"}, is_ray=True)
+    assert slurm_overlay.startswith("PYTHONPATH=/nemo_run/code ")
+    assert ray_overlay.startswith("python3 -m nvflow.lib.rl.create_overlay ")
+    assert "PYTHONPATH=" not in ray_overlay
+
+
+def test_postprocess_installation_command_is_ray_only() -> None:
+    installation_command = "export PATH=/opt/gym-cli-venv/bin:$PATH"
+
+    assert (
+        _ray_postprocess_installation_command(installation_command, is_ray=True)
+        == installation_command
+    )
+    assert _ray_postprocess_installation_command(installation_command, is_ray=False) is None
+    assert _ray_postprocess_installation_command(None, is_ray=True) is None
 
 
 # ===========================================================================

@@ -31,8 +31,8 @@ finance_sec_search_resources_server:
     finance_sec_search:
       max_rollout_time_seconds: 1800  # 30-min wall-clock budget per rollout
       reward_mode: scaled  # [[0]]→0.0, [[1]]→0.5, [[2]]→1.0 (partial credit for GRPO)
-      judge_prompt_template_fpath: /nemo_run/code/nvflow/recipes/finance/prompts/finance_sec_search_judge.yaml
-      retrieval_system_prompt_fpath: /nemo_run/code/nvflow/recipes/finance/prompts/finance_sec_search_retrieval.yaml
+      judge_prompt_template_fpath: ${oc.env:NEMO_RUN_CODE_DIR,/nemo_run/code}/nvflow/recipes/finance/prompts/finance_sec_search_judge.yaml
+      retrieval_system_prompt_fpath: ${oc.env:NEMO_RUN_CODE_DIR,/nemo_run/code}/nvflow/recipes/finance/prompts/finance_sec_search_retrieval.yaml
       # Retrieval sub-calls go to the policy vLLM worker, which asserts
       # on-policy sampling params. Must match generation.temperature / top_p
       # from the GRPO preset (grpo_presets.yaml).

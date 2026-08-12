@@ -8,8 +8,8 @@ workflow:
 cluster: my_cluster
 
 # Repo is mounted at /workspace on cluster (see cluster_configs/aws.yaml)
-base_data_dir: /workspace/outputs/finance/demo/workflow-3-document-grounded-sdg
-filings_dir: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download
+base_data_dir: ${nvflow_root}/outputs/finance/demo/workflow-3-document-grounded-sdg
+filings_dir: ${nvflow_root}/outputs/finance/demo/workflow-2-download-sec/step-0-download
 
 # ---------------------------------------------------------------------------
 # NeMo-Gym shared config (used by all generation stages)

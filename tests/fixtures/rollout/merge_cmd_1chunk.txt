@@ -1,10 +1,16 @@
 set -e
 
 MERGED_FILE=/out/rollout/output-rs0.jsonl
+MERGED_DONE=/out/rollout/output-rs0.jsonl.done
 ANALYSIS_DIR=/out/rollout/analysis_rs0
 SEED_LABEL=rs0
 NUM_CHUNKS=1
 INPUT_DATA=/data/train.jsonl
+
+if [ -f "$MERGED_DONE" ] && [ -s "$MERGED_FILE" ]; then
+    echo "Merge already complete for $SEED_LABEL (output + .done present) — skipping."
+    exit 0
+fi
 
 echo "============================================================"
 echo "Merge Rollout Chunks  [$SEED_LABEL]"

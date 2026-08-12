@@ -233,7 +233,7 @@ class TestProcessQuestionItem:
 
         # Assert new fields are added
         assert "filepath" in result
-        assert "source_info" in result
+        assert "context" in result
 
         # Verify filepaths
         expected_goog_path = f"{filings_folder}/COMPANY2/10-K/2024/000001/7.html"
@@ -241,11 +241,65 @@ class TestProcessQuestionItem:
         expected_filepath = f"{expected_goog_path};{expected_aapl_path}"
         assert result["filepath"] == expected_filepath
 
-        # Verify source_info contains markdown content from both files
+        # Verify context contains markdown content from both files
         assert (
-            result["source_info"]
+            result["context"]
             == "COMPANY2 10-K Item 7\n\n# Item 7: Management's Discussion and Analysis\n\nThis is a dummy COMPANY2 10-K Item 7 document for testing purposes.\n\nCOMPANY1 10-K Item 7\n\n# Item 7: Management's Discussion and Analysis\n\nThis is a dummy COMPANY1 10-K Item 7 document for testing purposes."
         )
+
+    def test_process_question_item_single_item_broadcast(self):
+        """Comparison question with two form_types but a SINGLE item value.
+
+        SecQue copies `item` verbatim as one value even for multi-accession
+        (comparison) questions, while create_seed_data builds one form_type /
+        report_date per accession. The single item must be broadcast across the
+        filings so the question maps, instead of being dropped (returning None).
+        """
+
+        # Create test data
+        filings_metadata = pd.DataFrame(
+            {
+                "ticker": ["COMPANY2", "COMPANY1"],
+                "accession_number": ["000001", "000000"],
+                "report_date": ["2024-09-09", "2024-09-09"],
+                "form_type": ["10-K", "10-K"],
+            }
+        )
+
+        # Two form_types (per accession), but a SINGLE item and report_date.
+        question_item = {
+            "item": "Item 7. Some description",
+            "accession_number": "0000034088-24-000050;0000093410-24-000040",
+            "form_types": "10-K;10-K",
+            "report_dates": "2024-09-09",
+            "company_a": "Company2",
+            "ticker_a": "COMPANY2",
+            "company_b": "Company1",
+            "ticker_b": "COMPANY1",
+            "year": 2024,
+        }
+
+        # Get the test data directory path
+        test_dir = Path(__file__).parent
+        filings_folder = str(test_dir / "data")
+        token_limit = 500
+
+        # Call the function
+        result = process_question_item(
+            question_item=question_item,
+            filings_metadata=filings_metadata,
+            filings_folder=filings_folder,
+            token_limit=token_limit,
+        )
+
+        # Without broadcasting this returned None; now the single item maps to both filings.
+        assert result is not None
+
+        expected_company2_path = f"{filings_folder}/COMPANY2/10-K/2024/000001/7.html"
+        expected_company1_path = f"{filings_folder}/COMPANY1/10-K/2024/000000/7.html"
+        expected_filepath = f"{expected_company2_path};{expected_company1_path}"
+        assert result["filepath"] == expected_filepath
+        assert "context" in result
 
     def test_process_question_item_no_match(self):
         """Test processing a question item with two companies and two items but one of the company items is missing from filings."""

@@ -58,6 +58,11 @@ benchmarks:
   financebench:
     seeds: 5
   # finance_agent: disabled until multi-turn tool-calling eval is fully validated.
+  # ⚠ AIR-GAP WARNING: the `installation_command` below runs a runtime `pip install`
+  #   + a `git clone` of compute-eval at JOB TIME. That is NOT air-gap-safe. Before
+  #   enabling this benchmark on an air-gapped cluster, pre-bake model-library,
+  #   func-timeout, backoff, tavily, and compute-eval into the eval image and DELETE
+  #   the `installation_command` line (leaving it in forces a job-time download).
   # Re-enable when ready by uncommenting below:
   # finance_agent:
   #   seeds: 5
@@ -74,7 +79,7 @@ benchmarks:
 # Shared Settings
 # ============================================================================
 
-datasets_dir: /workspace/outputs/finance/eval-datasets
+datasets_dir: ${nvflow_root}/outputs/finance/eval-datasets
 
 # All eval deps are in the nemo-skills container
 installation_command: "true"
@@ -92,6 +97,6 @@ stages:
     # finance_agent dataset prep disabled (benchmark disabled above).
     # Re-add finance_agent to this list when the benchmark is re-enabled.
     dataset_names: [secque, financebench]
-    output_dir: /workspace/outputs/finance/eval-datasets
+    output_dir: ${nvflow_root}/outputs/finance/eval-datasets
     stage_kwargs:
       installation_command: "true"

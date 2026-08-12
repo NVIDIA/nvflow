@@ -15,10 +15,10 @@ _base_: base.yaml
 hf_model_path: /hf_models/Qwen/Qwen3-4B
 
 # Model-specific output directory
-base_output_dir: /workspace/outputs/finance/demo/workflow-4-sft/qwen3_4b
+base_output_dir: ${nvflow_root}/outputs/finance/demo/workflow-4-sft/qwen3_4b
 
 directories:
-  raw_train_data: /workspace/outputs/finance/demo/workflow-3-template-based-sdg/step-5-filter-answers
+  raw_train_data: ${nvflow_root}/outputs/finance/demo/workflow-3-template-based-sdg/step-5-filter-answers
 
 # ============================================================================
 # Pipeline Stages
@@ -111,12 +111,14 @@ stages:
   # --------------------------------------------------------------------------
   eval:
     eval_steps: [10]
-    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-8g-tp2-pp1-cp2-seq32k
+    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-${stages.training.total_gpus}g-tp2-pp1-cp2-seq32k
     base_output_dir: ${base_output_dir}
     format: megatron
     base_model: ${hf_model_path}
     server_type: vllm
-    gpus: 4  # Slurm allocation (>= QOS min); override TP via --tensor-parallel-size in server_args
+    gpus: 4  # Slurm allocation (>= QOS min) AND the eval serve's TP: nemo-skills'
+    # serve_vllm sets --tensor-parallel-size={gpus} and can't serve TP<gpus, so do
+    # NOT add --tensor-parallel-size to server_args (it appends a duplicate flag).
     # Local vLLM judge (keeps the quick-start air-gapped; production SFT configs
     # inherit the gpt-5 judge from workflows/eval/base.yaml).
     judge:
@@ -145,4 +147,4 @@ stages:
       ++inference.top_k=20
       ++inference.tokens_to_generate=16384
       ++chat_template_kwargs.enable_thinking=true
-    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3 --tensor-parallel-size 2"
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"

@@ -40,6 +40,7 @@ import yaml
 from omegaconf import OmegaConf
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.executor import is_ray_backend
 from nvflow.lib.gpu_layout import resolve_gpu_layout
 
 # ============================================================================
@@ -563,10 +564,15 @@ class SFTStage(BaseStage):
 
         from nvflow.lib.runtime import NRL_PYTHON_PREAMBLE
 
+        source_setup = (
+            "cd /opt/nemo-rl && "
+            if is_ray_backend(cluster_config)
+            else "export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/nemo-rl && "
+        )
         cmd = (
             f"{NRL_PYTHON_PREAMBLE} && "
             f"{config_snippet} && "
-            f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/nemo-rl && "
+            f"{source_setup}"
             f"echo 'Starting training' && "
             f"$NRL_PYTHON /opt/nemo-rl/examples/run_sft.py "
             f"  --config {config_path}"
@@ -653,6 +659,10 @@ class SFTStage(BaseStage):
                     num_gpus=prepared.num_gpus,
                     num_nodes=prepared.num_nodes,
                     cluster_config=cluster_config,
+                    # NeMo-RL training needs an in-allocation Ray cluster; on Slurm
+                    # with_ray=True is what sets use_with_ray_cluster (the GRPO stage
+                    # hardcodes this too). Gating on is_ray_backend() made it False on
+                    # Slurm and broke SFT-on-Slurm (no Ray cluster for run_sft.py).
                     with_ray=True,
                     sbatch_kwargs=sbatch_kwargs,
                     installation_command=stage_kwargs.get("installation_command"),

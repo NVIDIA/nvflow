@@ -79,9 +79,17 @@ def add_token_counts(
     output_path = Path(output_file).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Determine worker count: min(available_cpus - 2, user_specified)
-    max_workers = max(1, cpu_count() - 2)
-    num_workers = min(num_workers or max_workers, max_workers)
+    # Worker count clamped to [1, available_cpus - 2]. Use the cgroup CPU
+    # allocation (cpu_count() over-detects under cgroups); fall back if unavailable.
+    try:
+        _avail = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
+    except OSError:
+        _avail = None
+    if _avail is None:
+        _avail = cpu_count() or 1
+    max_workers = max(1, _avail - 2)
+    requested = max_workers if num_workers is None else num_workers
+    num_workers = min(max(1, requested), max_workers)
 
     logger.info(f"Tokenizer: {tokenizer_path}")
     logger.info(f"Workers: {num_workers} (max: {max_workers})")

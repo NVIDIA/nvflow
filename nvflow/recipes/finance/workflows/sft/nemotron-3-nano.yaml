@@ -22,10 +22,10 @@ _base_: base.yaml
 cluster: my_cluster_nemotron
 
 # Model-specific output directory
-base_output_dir: /workspace/outputs/finance/sap-500/workflow-4-sft/nemotron-3-nano
+base_output_dir: ${nvflow_root}/outputs/finance/sap-500/workflow-4-sft/nemotron-3-nano
 
 directories:
-  raw_train_data: /workspace/outputs/finance/sap-500/workflow-3-template-based-sdg/step-5-filter-answers
+  raw_train_data: ${nvflow_root}/outputs/finance/sap-500/workflow-3-template-based-sdg/step-5-filter-answers
 
 # ============================================================================
 # Pipeline Stages - Standard SFT pipeline (no convert_to_messages)
@@ -270,7 +270,7 @@ stages:
   # --------------------------------------------------------------------------
   eval:
     eval_steps: [1400, 2600]
-    checkpoint_path: ${directories.step-4-training}/model-nvidia-nemotron-3-nano-30b-a3b-bf16-256g-tp4-pp1-cp8-seq48k
+    checkpoint_path: ${directories.step-4-training}/model-nvidia-nemotron-3-nano-30b-a3b-bf16-${stages.training.total_gpus}g-tp4-pp1-cp8-seq48k
     base_output_dir: ${base_output_dir}
     format: megatron
     baseline_model: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16

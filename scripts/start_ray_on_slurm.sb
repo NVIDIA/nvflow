@@ -1,0 +1,88 @@
+#!/bin/bash
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Bring up ONE pre-provisioned Ray cluster on Slurm (experimental; Slurm is the
+# only officially supported executor). Starts a single Ray head and keeps it alive
+# for an external Ray Jobs API client (nvflow) to submit against. Run it ONCE PER
+# CLUSTER, then paste the printed dashboard URL into cluster_configs/my_cluster.yaml.
+#
+#   # GPU cluster (nemo-rl image) — training / rollout stages:
+#   IMAGE=/containers/nvflow-nemo-rl.sqsh DASHBOARD_PORT=8265 RAY_VENV=/opt/nemo_rl_venv \
+#     sbatch --account=<acct> --partition=<gpu_partition> --nodes=1 --gpus-per-node=8 \
+#            scripts/start_ray_on_slurm.sb
+#
+#   # CPU cluster (nemo-skills image) — data-prep / eval stages:
+#   IMAGE=/containers/nvflow-nemo-skills.sqsh DASHBOARD_PORT=8266 \
+#     sbatch --account=<acct> --partition=<cpu_partition> --nodes=1 --gpus-per-node=0 \
+#            scripts/start_ray_on_slurm.sb
+#
+# Env vars:
+#   IMAGE          (required) path to the cluster's .sqsh image
+#   DASHBOARD_PORT (default 8265) Ray dashboard / Jobs API port
+#   RAY_VENV       (optional) venv to prepend to PATH for images that ship Ray in a
+#                  uv venv (e.g. nemo-rl's /opt/nemo_rl_venv); omit for system-Python nemo-skills
+#   MOUNTS         (default /lustre:/lustre) comma-separated host:container mount pairs
+#   KEEPALIVE_S    (default 36000) seconds to keep the head alive; `scancel` ends it early
+#   RAY_PORT       (default 6379) Ray GCS port
+#
+# Node count / GPUs / partition / account / walltime are set via the sbatch CLI
+# flags above (they override the #SBATCH defaults below).
+
+#SBATCH --job-name=nvflow-ray-head
+#SBATCH --nodes=1
+#SBATCH --time=10:00:00
+#SBATCH --output=nvflow-ray-head-%j.out
+
+set -eou pipefail
+
+: "${IMAGE:?set IMAGE=/path/to/<nemo-rl|nemo-skills>.sqsh}"
+MOUNTS="${MOUNTS:-/lustre:/lustre}"
+DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
+KEEPALIVE_S="${KEEPALIVE_S:-36000}"
+RAY_PORT="${RAY_PORT:-6379}"
+RAY_VENV="${RAY_VENV:-}"
+NUM_GPUS="${SLURM_GPUS_PER_NODE:-0}"
+
+# Optional venv activation for images that ship Ray in a uv venv (the venv bin must
+# precede the image's /root/.local/bin so `ray`/`python` resolve to the venv).
+VENV_EXPORT=""
+if [ -n "${RAY_VENV}" ]; then
+    VENV_EXPORT="export VIRTUAL_ENV='${RAY_VENV}' UV_PROJECT_ENVIRONMENT='${RAY_VENV}' PATH='${RAY_VENV}/bin:'\"\${PATH}\";"
+fi
+
+# In-container body. Outer-shell vars are interpolated now; \$ defers HEAD_IP to runtime.
+read -r -d '' BODY <<EOF || true
+set -eou pipefail
+export PYTHONUNBUFFERED=1 UV_NO_SYNC=1
+${VENV_EXPORT}
+HEAD_IP="\$(hostname -i)"; HEAD_IP="\${HEAD_IP%% *}"
+ray start --head --disable-usage-stats \
+    --node-ip-address="\${HEAD_IP}" --port=${RAY_PORT} --num-gpus=${NUM_GPUS} \
+    --dashboard-host=0.0.0.0 --dashboard-port=${DASHBOARD_PORT} &
+until curl -sf "http://\${HEAD_IP}:${DASHBOARD_PORT}/api/version" >/dev/null 2>&1; do sleep 2; done
+echo "RAY HEAD READY dashboard_url=http://\${HEAD_IP}:${DASHBOARD_PORT}"
+# Keep the head alive for the external Ray Jobs API client; scancel to end early.
+sleep ${KEEPALIVE_S}
+EOF
+
+# pyxis/enroot exposes container flags at srun (sbatch rejects --container-image).
+# --no-container-mount-home keeps the image's baked /root/.cache (Ray's package files
+# symlink into it; the default host-home mount masks it and breaks `import ray`).
+exec srun --nodes="${SLURM_NNODES:-1}" --ntasks=1 \
+    --container-image="${IMAGE}" \
+    --container-mounts="${MOUNTS}" \
+    --container-name="nvflow-ray-${SLURM_JOB_ID}" \
+    --no-container-mount-home \
+    bash -c "${BODY}"

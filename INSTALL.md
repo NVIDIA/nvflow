@@ -296,7 +296,8 @@ For the one-time connected-node stages listed in [Download Models](#one-time-con
 **Step 6 of 6 · Goal:** confirm the whole setup before running a real workflow.
 
 ```bash
-# 1. Test NeMo-Skills import
+# 1. Test NeMo-Skills import (installed by `uv sync`, or run inside the
+#    nemo-skills container)
 uv run python -c "from nemo_skills.pipeline.cli import generate; print('✅ OK')"
 
 # 2. Check containers exist

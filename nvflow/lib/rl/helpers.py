@@ -364,8 +364,12 @@ def determine_judge_mode(
 
     Reads from ``config.judge_vllm`` sub-config.
 
-    - ``base_url`` set → ``external_vllm`` (pre-launched vLLM server)
-    - ``model_path`` set (no base_url) → ``local_vllm`` (launch server in job)
+    - ``base_url`` set → ``external_vllm`` (pre-launched vLLM server). NOTE:
+      in this mode ``model_path`` is sent verbatim as the OpenAI request
+      ``model``, so it must equal the server's ``--served-model-name`` (e.g.
+      ``openai/gpt-oss-120b``), NOT a filesystem path.
+    - ``model_path`` set (no base_url) → ``local_vllm`` (launch server in job;
+      here ``model_path`` IS a filesystem path to load)
     - ``openai_base_url`` set → ``openai`` (OpenAI-compatible API)
     - None of the above → ``policy_as_judge`` (if allowed)
     """
@@ -452,6 +456,8 @@ def _build_overlay_setup_cmd(
     model_path: str,
     overlay_path: str,
     hf_config_overrides: dict[str, Any],
+    *,
+    is_ray: bool = False,
 ) -> str:
     """Return a bash snippet that creates a symlinked model overlay.
 
@@ -461,8 +467,9 @@ def _build_overlay_setup_cmd(
     at ``/nemo_run/code/`` inside the container.
     """
     overrides_json = json.dumps(hf_config_overrides, sort_keys=True)
+    python_prefix = "" if is_ray else f"PYTHONPATH={CONTAINER_CODE_DIR} "
     return (
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.create_overlay"
+        f"{python_prefix}python3 -m nvflow.lib.rl.create_overlay"
         f" --model-path {model_path}"
         f" --overlay-path {overlay_path}"
         f" --overrides '{overrides_json}'"
@@ -531,6 +538,8 @@ def build_ng_run_invocation(
     policy_model: str,
     judge_ng_run_overrides: str = "",
     include_port_range: bool = False,
+    is_ray: bool = False,
+    retry: bool = False,
 ) -> str:
     """Render the shared ``ng_run`` invocation block (rollout + verify).
 
@@ -573,15 +582,31 @@ def build_ng_run_invocation(
             for rollout (where local vLLM lives on the same node and
             collides with NeMo-Gym's default port range).  Not needed
             for re-judge where no policy vLLM runs.
+        is_ray: True on the Ray Jobs backend.  Adds the
+            ``+ray_head_node_address=auto`` override so NeMo-Gym ATTACHES to
+            the node's pre-provisioned Ray cluster instead of forking a second
+            one (``server_utils.initialize_ray`` calls ``ray.init()``
+            unconditionally; a rogue second cluster collides with the existing
+            GCS and the gym head 500s on ``/run``).  Mirrors NeMo-RL's embedded
+            gym path, which injects ``ray.get_runtime_context().gcs_address``.
+            Slurm: omitted, so the gym starts its own cluster as before.
+        retry: When ``True``, wrap the launch in a 5-attempt loop with a fresh
+            ``HEAD_SERVER_PORT`` and small random jitter per attempt.
+            WORKAROUND(gym-internal-port-race): each ng_run starts internal
+            uvicorn sub-servers on ports NeMo-Gym picks WITHOUT coordinating
+            across concurrent launches on the same node, so two seeds can
+            collide ([Errno 98]) -> the head never comes up.  A retry with
+            freshly-rolled ports de-synchronises the port grabs.
+            ``wait_for_server`` hard-exits on failure, so it runs in a
+            subshell to keep the exit local to the attempt.
     """
     port_range_block = (
         '    "+port_range_low=1024" \\\n    "+port_range_high=8999" \\\n'
         if include_port_range
         else ""
     )
-    return (
-        'echo ""\n'
-        f'echo "{step_label} Starting NeMo-Gym servers ..."\n'
+    ray_attach_override = '    "+ray_head_node_address=auto" \\\n' if is_ray else ""
+    launch = (
         'gym env start "+config_paths=[$CONFIG_PATHS]" \\\n'
         f'    "+policy_model.responses_api_models.vllm_model.base_url={policy_base_url}" \\\n'
         '    "+policy_model.responses_api_models.vllm_model.api_key=EMPTY" \\\n'
@@ -594,11 +619,42 @@ def build_ng_run_invocation(
         # variables segment: /opt/gym-venvs for the nemo-gym image, else $GYM_PATH
         # (== Gym's default PARENT_DIR), which is behavior-preserving.
         '    "+uv_venv_dir=$UV_VENV_DIR" \\\n'
+        f"{ray_attach_override}"
         f"{judge_ng_run_overrides}"
         '    > "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" 2>&1 &\n'
         "NG_RUN_PID=$!\n"
-        "\n"
-        'wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" $NG_RUN_PID 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log"\n'
+    )
+    header = 'echo ""\n' + f'echo "{step_label} Starting NeMo-Gym servers ..."\n'
+    if not retry:
+        return (
+            header
+            + launch
+            + "\n"
+            + 'wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" $NG_RUN_PID 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log"\n'
+        )
+    indented_launch = "".join(
+        ("    " + line if line else line) + "\n" for line in launch.split("\n")[:-1]
+    )
+    return (
+        header
+        + "_NG_RUN_MAX_RETRIES=5\n"
+        + "_NG_RUN_OK=0\n"
+        + "for _ng_attempt in $(seq 1 $_NG_RUN_MAX_RETRIES); do\n"
+        + "    sleep $((RANDOM % 5))\n"
+        + "    HEAD_SERVER_PORT=$(find_free_port)\n"
+        + indented_launch
+        + '    if ( wait_for_server "http://127.0.0.1:$HEAD_SERVER_PORT/" "NeMo-Gym" "$NG_RUN_PID" 60 "$OUTPUT_DIR/logs/ng_run_$JOB_LABEL.log" ); then\n'
+        + "        _NG_RUN_OK=1\n"
+        + "        break\n"
+        + "    fi\n"
+        + '    echo "[nvflow] ng_run did not come up (attempt $_ng_attempt/$_NG_RUN_MAX_RETRIES) -- likely a NeMo-Gym internal port collision; restarting with fresh ports ..."\n'
+        + "    kill $NG_RUN_PID 2>&- && wait $NG_RUN_PID 2>&- || true\n"
+        + '    NG_RUN_PID=""\n'
+        + "done\n"
+        + 'if [ "$_NG_RUN_OK" -ne 1 ]; then\n'
+        + '    echo "[nvflow] ng_run failed to start after $_NG_RUN_MAX_RETRIES attempts."\n'
+        + "    exit 1\n"
+        + "fi\n"
     )
 
 

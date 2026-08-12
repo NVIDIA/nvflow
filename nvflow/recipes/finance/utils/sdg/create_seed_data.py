@@ -95,7 +95,7 @@ def create_input_file(output_path, sec_identity):
 
 def create_company_info_file(output_path):
     """Create the company info file with SP100 companies and their GICS sectors."""
-    import requests
+    import requests  # type: ignore[import-untyped]
     from bs4 import BeautifulSoup
 
     logger.info("Creating company info file from Wikipedia...")

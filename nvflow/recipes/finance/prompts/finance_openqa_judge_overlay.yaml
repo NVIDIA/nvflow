@@ -30,9 +30,17 @@
 # Note: upstream Gym commit 0123486b (Feb 2026) replaced the inline
 # judge_prompt_template field with file-based judge_prompt_template_fpath.
 # This overlay uses the file-based approach for compatibility.
+#
+# PACKAGING REQUIREMENT: NEMO_RUN_CODE_DIR points at the delivered repo tree for
+# Ray Jobs and falls back to nemo-run's /nemo_run/code path for Slurm. The
+# finance_openqa_judge.txt prompt (and this overlay) MUST be git-COMMITTED so it
+# is included in that tree. If you fork the prompt to a new file, `git add` it
+# before running. Do not use a ${nvflow_root}-absolute path: Gym reads this file
+# inside the job after changing its working directory to /opt/Gym.
 # ============================================================================
 
 equivalence_llm_judge:
   resources_servers:
     equivalence_llm_judge:
-      judge_prompt_template_fpath: /nemo_run/code/nvflow/recipes/finance/prompts/finance_openqa_judge.txt
+      # Resolve inside the delivered code tree even after Gym changes cwd.
+      judge_prompt_template_fpath: ${oc.env:NEMO_RUN_CODE_DIR,/nemo_run/code}/nvflow/recipes/finance/prompts/finance_openqa_judge.txt

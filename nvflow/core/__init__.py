@@ -21,9 +21,17 @@ from nvflow.core.base_stage import BaseStage
 from nvflow.core.stage_registry import StageRegistry
 
 if TYPE_CHECKING:
+    from nvflow.core.ray_workflow_runner import RayWorkflowRunner, create_workflow_runner
     from nvflow.core.workflow_runner import WorkflowRunner
 
-__all__ = ["BaseStage", "StageRegistry", "WorkflowRunner", "console"]
+__all__ = [
+    "BaseStage",
+    "StageRegistry",
+    "WorkflowRunner",
+    "RayWorkflowRunner",
+    "create_workflow_runner",
+    "console",
+]
 
 
 def __getattr__(name: str) -> Any:
@@ -31,11 +39,16 @@ def __getattr__(name: str) -> Any:
     # containers (e.g. the SAM localization image). Those workers import only
     # leaf helper modules under nvflow.recipes, and recipe auto-discovery
     # touches this package -- so importing WorkflowRunner eagerly here would
-    # crash them with ModuleNotFoundError. Resolve it lazily instead.
+    # crash them with ModuleNotFoundError. Resolve it lazily instead. The Ray
+    # runner symbols subclass/build on WorkflowRunner, so they stay lazy too.
     if name == "WorkflowRunner":
         from nvflow.core.workflow_runner import WorkflowRunner
 
         return WorkflowRunner
+    if name in ("RayWorkflowRunner", "create_workflow_runner"):
+        from nvflow.core import ray_workflow_runner
+
+        return getattr(ray_workflow_runner, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

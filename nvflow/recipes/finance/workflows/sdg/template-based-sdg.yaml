@@ -35,8 +35,8 @@ cluster: my_cluster
 # base_output_dir: Output root directory for this run (change for different runs)
 # filings_dir: Directory containing SEC filings data (from download_sec_filings workflow)
 # ============================================================================
-base_output_dir: /workspace/outputs/finance/sap-500/workflow-3-template-based-sdg
-filings_dir: /workspace/outputs/finance/sap-500/workflow-2-download-sec/step-0-download
+base_output_dir: ${nvflow_root}/outputs/finance/sap-500/workflow-3-template-based-sdg
+filings_dir: ${nvflow_root}/outputs/finance/sap-500/workflow-2-download-sec/step-0-download
 
 # ============================================================================
 # Directory Structure - All Stage Outputs

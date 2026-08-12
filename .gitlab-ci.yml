@@ -1,10 +1,13 @@
 default:
+  # The lint/test/build jobs need git for VCS dependencies and hatch-vcs.
+  # Official Python images do not provide it, so install it explicitly.
+  image: python:3.12-slim
   tags:
     - llm-mlops
   interruptible: true
   before_script:
     - apt-get update -qq && apt-get install -y -qq git > /dev/null
-    - pip install -q uv
+    - pip install --no-cache-dir -q uv
 
 stages:
   - lint
@@ -26,7 +29,6 @@ cache:
 # =============================================================================
 lint:
   stage: lint
-  image: python:3.12-slim
   script:
     - uv sync --all-extras
     - uv run pre-commit run --all-files
@@ -41,7 +43,6 @@ lint:
 # merge commits that never carry Signed-off-by lines.
 dco-check:
   stage: lint
-  image: python:3.12-slim
   script:
     - python3 scripts/check_dco.py
   rules:
@@ -60,21 +61,53 @@ secrets-detector:
     - apt-get update -qq && apt-get install -y -qq git curl > /dev/null
     - curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
   script:
-    - trufflehog git file://. --since-commit "$CI_MERGE_REQUEST_DIFF_BASE_SHA" --fail --no-update --results=verified,unknown
+    # An empty --since-commit is not an error: TruffleHog drops the boundary and
+    # scans every ref, so a secret on any branch fails an unrelated MR.  GitLab
+    # leaves the base SHA empty when an MR has no diff (a sync branch already
+    # containing its target), so resolve it ourselves.  --branch HEAD is the
+    # other half: the base bounds history but not the set of refs, and runners
+    # reuse build directories, so old refs/pipelines/* are otherwise in scope.
+    - |
+      BASE="$CI_MERGE_REQUEST_DIFF_BASE_SHA"
+      if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+        git fetch -q origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+        BASE="$(git merge-base FETCH_HEAD HEAD)"
+      fi
+      test -n "$BASE" || { echo "cannot resolve a scan base; refusing to scan every ref"; exit 1; }
+      echo "scanning ${BASE}..HEAD"
+      trufflehog git file://. --since-commit "$BASE" --branch HEAD --fail --no-update --results=verified,unknown --exclude-globs='*.whl'
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# The job above only sees one MR's commits, so nothing scans the other branches.
+# This does, on a schedule, reporting rather than blocking (allow_failure) since
+# findings usually live in someone else's branch.  Needs a schedule in
+# Settings > CI/CD > Schedules to run at all.
+secrets-audit-all-refs:
+  stage: lint
+  image: python:3.12-slim
+  variables:
+    GIT_DEPTH: 0
+  allow_failure: true
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git curl > /dev/null
+    - curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+  script:
+    - git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
+    - trufflehog git file://. --fail --no-update --results=verified,unknown --exclude-globs='*.whl'
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
 
 # =============================================================================
 # TEST STAGE
 # =============================================================================
 test:
   stage: test
-  image: python:3.12-slim
   script:
     # Lightweight install: the project plus tests/requirements-ci.txt, but not
     # the heavy nemo-skills stack (~200 packages incl. torch).  Tests that
-    # genuinely need nemo-skills use pytest.importorskip and skip here; they
-    # run in the full-deps CI.  The dependency list is shared with
+    # genuinely need nemo-skills use pytest.importorskip and skip here; the
+    # test-full-deps job below runs them.  The dependency list is shared with
     # .github/workflows/unit-tests.yml — edit it there, in one place.
     - uv venv --python 3.12
     - uv pip install -e . --no-deps
@@ -89,19 +122,35 @@ test:
     - if: $CI_COMMIT_BRANCH == "dev"
     - if: $CI_COMMIT_BRANCH =~ /^feature\//
 
+# test_rollout.py and test_verify.py importorskip nemo_skills, which the job above
+# does not install: 54 of the suite's 300 tests skipped in both pipelines until
+# this job.  Mirrored by test-full-deps in .github/workflows/unit-tests.yml.
+test-full-deps:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - uv sync --all-extras
+    # Assert the gated import, or this passes by skipping them again.
+    - uv run python -c "import nemo_skills"
+    - uv run pytest tests/ -v --tb=short
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+
 # =============================================================================
 # BUILD STAGE
 # =============================================================================
 build:
   stage: build
-  image: python:3.12-slim
   variables:
     GIT_DEPTH: 0
   before_script:
     - apt-get update -qq && apt-get install -y -qq git > /dev/null
     - git fetch --tags --force
     - git describe --tags || echo "No tags found"
-    - pip install -q build hatch-vcs
+    - pip install --no-cache-dir -q build hatch-vcs
   script:
     - python -m build
     - ls -la dist/
@@ -123,7 +172,7 @@ publish:
   image: python:3.12-slim
   interruptible: false
   before_script:
-    - pip install -q twine
+    - pip install --no-cache-dir -q twine
   script:
     - |
       echo "Publishing to GitLab Package Registry..."

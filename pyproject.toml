@@ -12,9 +12,9 @@ license = {text = "Apache-2.0"}
 dependencies = [
     # Core framework we orchestrate (brings ~200+ deps). Pinned to a commit
     # since nemo-skills has no version tags.
-    # Pinned 2026-08-02 | e06c9b90 (paired with nemo-rl v0.7.0; NVFlow v1.1.2).
+    # Pinned 2026-08-05 | 1fd0a9f3 (PR 1479 stable baked-code roots + PR 1507 security floors).
     # Must match NEMO_SKILLS_COMMIT in dockerfiles/Dockerfile.nemo-skills.
-    "nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@e06c9b900177be3f60d6a3f99135bb5de9af9bed",
+    "nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@1fd0a9f34a5f213a1d0990f0d587fadabb80ba45",
 
     # Configuration & Workflow
     "omegaconf>=2.3.0",      # YAML config loading with variable interpolation
@@ -25,6 +25,15 @@ dependencies = [
 
     # Data handling
     "jsonlines>=4.0.0",      # JSONL file reading/writing
+
+    # SDG seed-data generation (finance recipe): recipes/finance/utils/sdg/
+    # create_seed_data.py imports `edgar` to pull SEC filings. Declared here
+    # (not container-only) so the login-node `.venv` used by the Ray/driver
+    # execution path installs it via `uv sync`. (`datasets` already comes in
+    # transitively via nemo-skills.)
+    "edgartools>=5.42.0",    # SEC EDGAR filings access (import name: edgar)
+    "sec-parser>=0.58.1",    # SEC filing section extraction (import name: sec_parser) -- used by finance download/map utils
+    "markdownify>=1.2.3",    # HTML->Markdown (import name: markdownify) -- used by finance SDG map context-builder (utils/shared/question_context_utils.py)
 
     # Declared directly ONLY so the CPU-index source below can route it (keeps
     # CUDA out of the x86_64 client). Floor set for CVE remediation; otherwise

@@ -51,11 +51,72 @@ def _build_stage_kwargs(config: dict, model_path: str = "") -> dict:
     return kwargs
 
 
-def _load_eval_base_config() -> dict:
+def _resolve_judge(config: dict, base_config: dict) -> Any:
+    """Resolve the eval judge, preferring a per-workflow override.
+
+    Precedence: a ``judge:`` set under the workflow recipe's ``stages.eval``
+    block (``config``) wins over the shared default in ``eval/base.yaml``
+    (``base_config``).  This lets a customer point evaluation at a BYO
+    OpenAI-compatible judge (e.g. a self-hosted endpoint in an air-gapped
+    cluster) without editing the shared base config.
+
+    Uses ``or`` rather than ``dict.get(key, default)`` so a present-but-empty
+    override (``judge: null`` / ``judge: {}``) falls back to the base default
+    instead of silently disabling the judge -- safer for air-gapped runs.
+    """
+    return config.get("judge") or base_config.get("judge")
+
+
+def _resolve_path_roots(config: dict, cluster: str | None) -> dict:
+    """Interpolate ``${repo_root}``/``${nvflow_root}`` using the backend's path roots.
+
+    Mirrors ``WorkflowRunner._inject_path_roots``: Slurm (and any unresolved /
+    unknown cluster) resolves both roots to ``/workspace``; a Ray backend resolves
+    ``nvflow_root`` to the cluster config's absolute path.  Helper roots are
+    injected only when absent, then dropped after resolution so the returned dict
+    is structurally identical to one that hard-coded the paths.
+    """
+    from omegaconf import OmegaConf
+
+    from nvflow.lib.executor import path_roots
+
+    cluster_config: dict = {}
+    if cluster:
+        try:
+            from nemo_skills.pipeline.utils.cluster import get_cluster_config
+
+            cfg = get_cluster_config(cluster)
+            cluster_config = cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            cluster_config = {}
+
+    conf = OmegaConf.create(config)
+    OmegaConf.set_struct(conf, False)
+    injected: list[str] = []
+    for key, value in path_roots(cluster_config).items():
+        if key in conf:
+            continue
+        conf[key] = value
+        injected.append(key)
+    resolved = OmegaConf.to_container(conf, resolve=True)
+    for key in injected:
+        resolved.pop(key, None)
+    return resolved
+
+
+def _load_eval_base_config(cluster: str | None = None) -> dict:
     """Load shared evaluation settings from ``eval/base.yaml``.
 
     Returns benchmarks, judge, datasets_dir, and conversion config that
     are shared across all evaluation contexts (standalone, SFT, GRPO).
+
+    ``${nvflow_root}``/``${repo_root}`` interpolations (e.g. ``datasets_dir`` and
+    ``stages.prepare_data.output_dir``) are resolved via the same path-roots
+    mechanism ``WorkflowRunner`` applies to standalone stages.  Standalone eval
+    goes through the runner (which resolves these); the embedded SFT/GRPO eval
+    stage reads this base config directly, so without resolving here it would pass
+    the literal ``${nvflow_root}/...`` datasets/output dirs to ``prepare_data`` and
+    trip its absolute-path check on the Slurm lane.
     """
     import yaml
 
@@ -63,7 +124,8 @@ def _load_eval_base_config() -> dict:
     if not base_yaml.exists():
         return {}
     with open(base_yaml) as f:
-        return yaml.safe_load(f) or {}
+        raw = yaml.safe_load(f) or {}
+    return _resolve_path_roots(raw, cluster)
 
 
 # ============================================================================
@@ -211,6 +273,23 @@ def _format_benchmarks(benchmarks_config: dict | list) -> list[str]:
     return []
 
 
+def _enabled_benchmark_names(benchmarks_config: dict | list) -> set[str]:
+    """Names of benchmarks that are enabled (non-disabled).
+
+    Mirrors :func:`_format_benchmarks` null-filtering so the prepare-data
+    stage only fetches datasets that will actually be evaluated — a
+    benchmark set to ``None`` in the recipe (e.g. ``financebench: null``)
+    must be skipped at prep time too, otherwise its ``prepare.py`` runs an
+    unguarded ``load_dataset()`` that fails under air-gap.  Accepts the same
+    dict or pre-formatted ``["name:seeds", ...]`` list forms.
+    """
+    if isinstance(benchmarks_config, dict):
+        return {name for name, cfg in benchmarks_config.items() if cfg is not None}
+    if isinstance(benchmarks_config, list):
+        return {str(entry).split(":", 1)[0] for entry in benchmarks_config}
+    return set()
+
+
 class _BaseFinanceEvaluator(BaseStage):
     """Evaluate a model on finance benchmarks using nemo-skills.
 
@@ -244,16 +323,28 @@ class _BaseFinanceEvaluator(BaseStage):
         judge = raw_config.get("judge", base.get("judge"))
         datasets_dir = raw_config.get("datasets_dir", base.get("datasets_dir"))
 
+        # When the model entry points at an already-hosted server
+        # (``server_address``), evaluate against it directly and do NOT prehost.
+        # This is the external-serve path for clusters whose eval image can't
+        # host vLLM in its base environment (e.g. the nemo-rl image keeps vLLM
+        # in a per-actor venv, not importable as ``python -m vllm``). Dropping
+        # ``server_gpus`` keeps nemo-skills from launching its own server.
+        server_address = raw_config.get("server_address")
         return {
             "benchmarks": _format_benchmarks(benchmarks),
             "datasets_dir": datasets_dir,
             "judge": judge,
             "output_dir": f"{base_output_dir}/{model_name}",
+            # Carry an optional force-regenerate flag through to nemo-skills.
+            # Kept only when the model entry set it so the default (absent) path
+            # is byte-identical to configs that never mention it.
+            "rerun_done": raw_config.get("rerun_done"),
             "rollouts": {
                 "model": raw_config["path"],
                 "skip_conversion": True,
                 "server_type": raw_config.get("server_type", "vllm"),
-                "server_gpus": raw_config.get("gpus", 1),
+                "server_address": server_address,
+                "server_gpus": None if server_address else raw_config.get("gpus", 1),
                 "server_nodes": raw_config.get("nodes", 1),
                 "extra_args": raw_config.get("inference_args", ""),
             },
@@ -404,6 +495,17 @@ class _BaseFinanceEvaluator(BaseStage):
         installation_command = config.get("installation_command")
         num_jobs = config.get("num_jobs")
         single_node_mode = config.get("single_node_mode")
+        # Force-regenerate override. nemo-skills skips any (seed, chunk) whose
+        # ``.done`` file already exists at the eval output path — an idempotency
+        # check that runs DRIVER-SIDE for ``executor: none`` (the Ray backend):
+        # ``get_unmounted_path`` is a no-op there and the existence probe is a
+        # local ``subprocess`` (nemo_skills generation.py), so a stale/leftover
+        # ``.done`` on the driver host suppresses the vLLM serve+generate
+        # submission to the GPU cluster and only summarize_results runs.  A
+        # recipe can set ``rerun_done: true`` (per-model or at stage level) to
+        # bypass the cache and force a real serve+generate.  Left as ``None`` by
+        # default so it is omitted (nemo-skills default ``False``) — no golden churn.
+        rerun_done = config.get("rerun_done")
 
         # datasets_dir is a self-contained data_dir: prepare_data writes
         # <bench>/{__init__.py, eval.jsonl} here, so nemo-skills' data_dir fallback
@@ -450,6 +552,8 @@ class _BaseFinanceEvaluator(BaseStage):
                 **stage_kwargs,
             }
 
+            if rerun_done is not None:
+                eval_kwargs["rerun_done"] = rerun_done
             if num_jobs is not None:
                 eval_kwargs["num_jobs"] = num_jobs
             if single_node_mode is not None:
@@ -487,12 +591,19 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         cluster: str,
         expname: str,
         run_after: list[str] | None = None,
+        enabled_benchmarks: set[str] | None = None,
     ) -> str:
         """Submit benchmark dataset preparation job and return its expname.
 
         Reads the ``stages.prepare_data`` config from ``eval/base.yaml`` and
         delegates to ``PrepareFinanceBenchmarksStage``.  The job is idempotent —
         re-running when data already exists is a fast no-op on the cluster.
+
+        When ``enabled_benchmarks`` is provided, the prep dataset list is
+        intersected with it so benchmarks disabled in the recipe (``<name>:
+        null``) are not fetched — ``stages.prepare_data.dataset_names`` in
+        ``eval/base.yaml`` is otherwise independent of the recipe's
+        ``benchmarks`` block and would prepare them regardless.
         """
         from nvflow.recipes.finance.stages.evaluation.prepare_data import (
             PrepareFinanceBenchmarksStage,
@@ -502,6 +613,19 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         if not prep_config:
             console.info("No prepare_data config in eval/base.yaml — skipping data prep")
             return ""
+
+        if enabled_benchmarks is not None:
+            requested = prep_config.get("dataset_names", prep_config.get("benchmarks", ["secque"]))
+            if isinstance(requested, str):
+                requested = [requested]
+            kept = [b for b in requested if b in enabled_benchmarks]
+            skipped = [b for b in requested if b not in enabled_benchmarks]
+            if skipped:
+                console.info(f"Skipping eval-prep for disabled benchmarks: {', '.join(skipped)}")
+            if not kept:
+                console.info("No enabled benchmarks to prepare — skipping data prep")
+                return ""
+            prep_config = {**prep_config, "dataset_names": kept}
 
         prep_expname = f"{expname}-prepare-data"
         console.info("Preparing benchmark datasets before evaluation")
@@ -523,7 +647,8 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         expname: str,
         run_after: list[str] | None = None,
     ) -> None:
-        base_config = _load_eval_base_config()
+        base_config = _load_eval_base_config(cluster)
+        judge = _resolve_judge(config, base_config)
 
         eval_steps = config.get("eval_steps", [])
         if isinstance(eval_steps, int):
@@ -532,12 +657,19 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
             console.info("No eval_steps configured — skipping evaluation")
             return
 
-        # Sub-step 0: prepare benchmark datasets (idempotent)
+        # Resolve the effective benchmarks once (recipe overrides base; the
+        # null-filter disables benchmarks for both prep and scoring).
+        benchmarks_config = config.get("benchmarks", base_config.get("benchmarks", {}))
+
+        # Sub-step 0: prepare benchmark datasets (idempotent).  Restrict prep
+        # to benchmarks enabled in the recipe so a disabled one (e.g.
+        # `financebench: null`) isn't fetched (air-gap-unsafe load_dataset).
         prep_expname = self._prepare_benchmark_data(
             base_config=base_config,
             cluster=cluster,
             expname=expname,
             run_after=run_after,
+            enabled_benchmarks=_enabled_benchmark_names(benchmarks_config),
         )
 
         # All eval jobs depend on prepare_data completing first
@@ -552,9 +684,7 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
         base_output_dir = config.get("base_output_dir", "")
         eval_output_dir = config.get("eval_output_dir", f"{base_output_dir}/step-5-eval")
 
-        benchmarks_list = _format_benchmarks(
-            config.get("benchmarks", base_config.get("benchmarks", {}))
-        )
+        benchmarks_list = _format_benchmarks(benchmarks_config)
 
         for step in eval_steps:
             console.info(f"Evaluating checkpoint step {step} (format: {checkpoint_format})")
@@ -565,13 +695,16 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                 stage_config = {
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": config.get("judge", base_config.get("judge")),
+                    "judge": judge,
                     "output_dir": f"{eval_output_dir}/final",
                     "rollouts": {
                         "model": model_path,
                         "skip_conversion": True,
                         "server_type": config.get("server_type", "vllm"),
-                        "server_gpus": config.get("gpus", 1),
+                        "server_address": config.get("server_address"),
+                        "server_gpus": None
+                        if config.get("server_address")
+                        else config.get("gpus", 1),
                         "server_nodes": config.get("nodes", 1),
                         "extra_args": config.get("inference_args", ""),
                     },
@@ -584,13 +717,16 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                 stage_config = {
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": config.get("judge", base_config.get("judge")),
+                    "judge": judge,
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
                         "model": model_path,
                         "skip_conversion": True,
                         "server_type": config.get("server_type", "vllm"),
-                        "server_gpus": config.get("gpus", 1),
+                        "server_address": config.get("server_address"),
+                        "server_gpus": None
+                        if config.get("server_address")
+                        else config.get("gpus", 1),
                         "server_nodes": config.get("nodes", 1),
                         "extra_args": config.get("inference_args", ""),
                     },
@@ -603,13 +739,16 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                     "_conversion_type": "dcp",
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": config.get("judge", base_config.get("judge")),
+                    "judge": judge,
                     "conversion": base_config.get("conversion", {}),
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
                         "skip_conversion": False,
                         "server_type": config.get("server_type", "vllm"),
-                        "server_gpus": config.get("gpus", 1),
+                        "server_address": config.get("server_address"),
+                        "server_gpus": None
+                        if config.get("server_address")
+                        else config.get("gpus", 1),
                         "server_nodes": config.get("nodes", 1),
                         "extra_args": config.get("inference_args", ""),
                     },
@@ -623,14 +762,17 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
                     "_step": step,
                     "benchmarks": benchmarks_list,
                     "datasets_dir": base_config.get("datasets_dir"),
-                    "judge": config.get("judge", base_config.get("judge")),
+                    "judge": judge,
                     "conversion": conversion_config,
                     "output_dir": f"{eval_output_dir}/step-{step}",
                     "rollouts": {
                         "base_model": base_model,
                         "skip_conversion": False,
                         "server_type": config.get("server_type", "vllm"),
-                        "server_gpus": config.get("gpus", 1),
+                        "server_address": config.get("server_address"),
+                        "server_gpus": None
+                        if config.get("server_address")
+                        else config.get("gpus", 1),
                         "server_nodes": config.get("nodes", 1),
                         "extra_args": config.get("inference_args", ""),
                     },
@@ -650,13 +792,14 @@ class EmbeddedEvalStage(_BaseFinanceEvaluator):
             baseline_config = {
                 "benchmarks": benchmarks_list,
                 "datasets_dir": base_config.get("datasets_dir"),
-                "judge": config.get("judge", base_config.get("judge")),
+                "judge": judge,
                 "output_dir": f"{eval_output_dir}/baseline",
                 "rollouts": {
                     "model": baseline_model,
                     "skip_conversion": True,
                     "server_type": config.get("server_type", "vllm"),
-                    "server_gpus": config.get("gpus", 1),
+                    "server_address": config.get("server_address"),
+                    "server_gpus": None if config.get("server_address") else config.get("gpus", 1),
                     "server_nodes": config.get("nodes", 1),
                     "extra_args": config.get("inference_args", ""),
                 },
@@ -701,7 +844,7 @@ class _CheckpointEvaluator(_BaseFinanceEvaluator):
         console.info(f"Checkpoint: {run_name}, step: {step}, format: {checkpoint_format}")
         console.detail("Run path", str(run_path))
 
-        base = _load_eval_base_config()
+        base = _load_eval_base_config(cluster)
         benchmarks = config.get("benchmarks", base.get("benchmarks", {}))
         common = {
             "benchmarks": _format_benchmarks(benchmarks),
@@ -718,7 +861,8 @@ class _CheckpointEvaluator(_BaseFinanceEvaluator):
                     "model": hf_model_path,
                     "skip_conversion": True,
                     "server_type": config.get("server_type", "vllm"),
-                    "server_gpus": config.get("gpus", 1),
+                    "server_address": config.get("server_address"),
+                    "server_gpus": None if config.get("server_address") else config.get("gpus", 1),
                     "server_nodes": config.get("nodes", 1),
                     "extra_args": config.get("inference_args", ""),
                 },
@@ -735,7 +879,8 @@ class _CheckpointEvaluator(_BaseFinanceEvaluator):
                     "base_model": config.get("base_model"),
                     "skip_conversion": False,
                     "server_type": config.get("server_type", "vllm"),
-                    "server_gpus": config.get("gpus", 1),
+                    "server_address": config.get("server_address"),
+                    "server_gpus": None if config.get("server_address") else config.get("gpus", 1),
                     "server_nodes": config.get("nodes", 1),
                     "extra_args": config.get("inference_args", ""),
                 },

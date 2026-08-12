@@ -12,7 +12,7 @@
 _base_: base.yaml
 
 # Model-specific output directory
-base_output_dir: /workspace/outputs/finance/sap-500/workflow-4-sft/qwen3_14b
+base_output_dir: ${nvflow_root}/outputs/finance/sap-500/workflow-4-sft/qwen3_14b
 
 # ============================================================================
 # Pipeline Stages - Qwen3 includes convert_to_messages + eval
@@ -137,7 +137,7 @@ stages:
   # --------------------------------------------------------------------------
   eval:
     eval_steps: [2600, 5000, 7408]
-    checkpoint_path: ${directories.step-4-training}/model-qwen3-14b-256g-tp4-pp1-cp8-seq48k
+    checkpoint_path: ${directories.step-4-training}/model-qwen3-14b-${stages.training.total_gpus}g-tp4-pp1-cp8-seq48k
     base_output_dir: ${base_output_dir}
     format: megatron
     baseline_model: /hf_models/Qwen/Qwen3-14B

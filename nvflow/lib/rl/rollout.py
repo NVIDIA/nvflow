@@ -31,6 +31,7 @@ from typing import Any
 from nemo_skills.pipeline.utils.scripts import BaseJobScript, ServerScript
 
 from nvflow.core import console
+from nvflow.lib.executor import is_ray_backend
 
 from .helpers import (
     CONTAINER_CODE_DIR,
@@ -106,6 +107,20 @@ class RolloutClientScript(BaseJobScript):
     num_chunks: int = 1
     responses_create_params: dict = field(default_factory=dict)
     log_dir: str = ""
+    # Per-rollout-attempt Python-baked constant; must equal the ``attempt_id``
+    # given to the paired ``make_server_script`` so the reader's port-file path
+    # matches the writer's (see :func:`_vllm_port_file`).
+    attempt_id: str = ""
+    # True on the Ray Jobs backend.  Gates the ``ray_head_node_address``
+    # override so the gym attaches to the pre-provisioned cluster instead of
+    # forking its own (see :func:`_build_client_cmd`).  Slurm: stays False so
+    # the generated command is byte-identical to the validated Slurm path.
+    is_ray: bool = False
+    # Shared-FS path the client touches in its cleanup trap (Ray only) so the
+    # paired serve's watcher stops vLLM and exits 0.  Must equal the
+    # ``stop_sentinel`` given to the paired ``make_server_script`` (see
+    # :func:`_server_stop_sentinel`).
+    stop_sentinel: str = ""
 
     def __post_init__(self):
         def build_cmd() -> str:
@@ -144,6 +159,8 @@ class RolloutClientScript(BaseJobScript):
                 chunk_id=self.chunk_id,
                 num_chunks=self.num_chunks,
                 responses_create_params=self.responses_create_params,
+                is_ray=self.is_ray,
+                stop_sentinel=self.stop_sentinel,
             )
 
             preamble = _build_port_read_preamble(
@@ -151,6 +168,7 @@ class RolloutClientScript(BaseJobScript):
                 self.job_label,
                 has_policy=self.policy_server is not None,
                 has_judge=self.judge_server is not None,
+                attempt_id=self.attempt_id,
             )
             return preamble + cmd
 
@@ -163,27 +181,227 @@ class RolloutClientScript(BaseJobScript):
 # ---------------------------------------------------------------------------
 
 
-def _vllm_port_file(log_dir: str, role: str, job_label: str = "") -> str:
+def _vllm_port_file(log_dir: str, role: str, job_label: str = "", attempt_id: str = "") -> str:
     """Return the shared-filesystem path for the dynamic vLLM port file.
 
-    Includes ``$SLURM_JOB_ID`` so each Slurm job gets a unique file.  This
-    avoids a race condition where the client's ``rm -f`` of stale port files
-    (after pip install) deletes the file the server already wrote.
+    Suffixed with a per-job id so each job gets a unique file, avoiding a race
+    where the client's ``rm -f`` of stale port files deletes the one the server
+    just wrote.  Falls back ``$SLURM_JOB_ID`` -> ``$RAY_JOB_ID`` -> ``$$`` so the
+    name stays unique under the Ray Jobs backend, where ``$SLURM_JOB_ID`` is unset.
+
+    *attempt_id* is a Python-baked, per-rollout-attempt constant (e.g. a uuid4
+    hex generated once in the command builder) that is interpolated identically
+    into BOTH the server (writer) and client (reader) paths for a single attempt.
+    It MUST be a constant baked into both generated command strings — never a
+    bash-runtime value like ``$$`` or ``$RANDOM`` — because the writer and reader
+    are *different processes* (and, in multi-node jobs, different nodes), so a
+    runtime-random value would differ between them and they would never agree on
+    the path.  Why it matters: on the Ray Jobs backend ``$SLURM_JOB_ID`` is
+    constant for the pre-provisioned head's whole life, so *every* rollout attempt
+    (driver re-runs and retries) would otherwise reuse the SAME port file and a
+    client could read a STALE port written by a prior attempt and wait forever on
+    a dead server.  The Python-baked *attempt_id* makes the path unique per attempt
+    while keeping the paired writer+reader in agreement.
     """
     suffix = f"_{job_label}" if job_label else ""
-    return f"{log_dir}/.vllm_port_{role}{suffix}_${{SLURM_JOB_ID}}.txt"
+    if not attempt_id:
+        # Preserve the established Slurm command byte-for-byte.  Ray Jobs need
+        # the wider fallback chain below because they do not define
+        # SLURM_JOB_ID, but ordinary Slurm jobs must not pay for or inherit any
+        # of that backend-specific machinery.
+        return f"{log_dir}/.vllm_port_{role}{suffix}_${{SLURM_JOB_ID}}.txt"
+    return (
+        f"{log_dir}/.vllm_port_{role}{suffix}_{attempt_id}_"
+        "${SLURM_JOB_ID:-${RAY_JOB_ID:-$$}}.txt"
+    )
 
 
-def _wrap_server_with_dynamic_port(script: ServerScript, role: str, port_file: str) -> None:
+def _new_ray_attempt_id() -> str:
+    """Return a per-attempt nonce without importing UUID on the Slurm path."""
+    import uuid
+
+    return uuid.uuid4().hex[:12]
+
+
+def _python_module_prefix(is_ray: bool) -> str:
+    """Return a Slurm-only import prefix for an in-tree Python module.
+
+    Ray's working-dir runtime env already prepends the extracted archive root
+    to ``PYTHONPATH``. Reassigning it in every command is redundant and risks
+    diverging from Ray's own code-delivery lifecycle.
+    """
+    return "" if is_ray else f"PYTHONPATH={CONTAINER_CODE_DIR} "
+
+
+def _server_stop_sentinel(log_dir: str, job_label: str = "", attempt_id: str = "") -> str:
+    """Return the shared-FS path for the rollout-client → server stop sentinel.
+
+    Modelled on :func:`_vllm_port_file` (same *log_dir* + per-attempt *attempt_id*
+    so the writer [client] and reader [server] agree on one path).  It is
+    role-agnostic ("stop"): the client touches a SINGLE sentinel for an attempt
+    and BOTH the policy and judge servers (when present) poll the same path.
+
+    Critically — UNLIKE the port file — the path does NOT embed
+    ``$SLURM_JOB_ID``/``$RAY_JOB_ID``: the client and server run as SEPARATE Ray
+    jobs under the Ray Jobs backend (the policy serve is its own het-group job), so
+    a per-job-id suffix would differ between writer and reader and they would
+    never rendezvous.  The Python-baked *attempt_id* alone keeps the path unique
+    per rollout attempt while keeping the paired writer+reader in agreement.
+    """
+    suffix = f"_{job_label}" if job_label else ""
+    attempt = f"_{attempt_id}" if attempt_id else ""
+    return f"{log_dir}/.server_stop{suffix}{attempt}.sentinel"
+
+
+def _wrap_server_with_dynamic_port(
+    script: ServerScript,
+    role: str,
+    port_file: str,
+    *,
+    is_ray: bool = False,
+    stop_sentinel: str = "",
+) -> None:
     """Replace the hardcoded port in *script* with runtime-dynamic allocation.
 
     Wraps the server's inline command so that at runtime on the compute node:
       1. ``find_free_port()`` probes for an available port
       2. The port is written to *port_file* (shared filesystem)
       3. ``sed`` replaces the hardcoded port in the original command
+
+    On the Ray Jobs backend (*is_ray* True, *stop_sentinel* set) the vLLM
+    process is run in the BACKGROUND under its own process group/session leader
+    (``setsid``) and a watcher polls for *stop_sentinel*.  When the paired
+    rollout client finishes it touches the sentinel (in its cleanup trap, on
+    BOTH success and failure) and the watcher signals the ENTIRE vLLM process
+    GROUP — ``kill -TERM -<pgid>`` then, after a short grace, ``kill -KILL
+    -<pgid>`` — so vLLM's multiprocessing children (EngineCore, ``Worker_TP*``)
+    die too and the GPU memory they pin (~74 GiB observed live) is released
+    BEFORE this serve Ray job exits.  The watcher then ``exit 0`` so the job
+    completes SUCCEEDED, and the driver advances past the ``collect_rollouts``
+    gate.  Because ``setsid`` makes the child a new session leader, its PGID
+    equals its PID, so ``-$_NVFLOW_VLLM_PID`` targets the whole tree without
+    killing this watcher script.
+
+    Killing only the launcher (the pre-refinement behaviour) left those workers
+    ORPHANED holding GPU memory for >75s after the job was already SUCCEEDED,
+    OOM-ing the next colocated stage (GRPO training on the same single node) at
+    engine init.  On Slurm the het-group allocation teardown frees the GPUs
+    between stages, so this only bit the Ray single-node path.
+
+    If vLLM instead dies on its own (a real failure) the watcher reaps any
+    surviving group members and exits with vLLM's non-zero code, so genuine
+    crashes are NOT masked.
+
+    On Slurm (*is_ray* False) the serve stays FOREGROUND and the het-group's
+    allocation teardown reaps it — the emitted command is byte-identical to the
+    validated Slurm path (the sentinel branch is never built).
     """
     hardcoded = str(script.port)
     original_inline = script.inline
+    if is_ray and stop_sentinel:
+        run_vllm = (
+            f"ORIG_CMD=$(cat <<'__NVFLOW_VLLM_CMD__'\n"
+            f"{original_inline}\n"
+            f"__NVFLOW_VLLM_CMD__\n"
+            f")\n"
+            f'VLLM_RUN_CMD=$(echo "$ORIG_CMD" | sed "s/{hardcoded}/$VLLM_PORT/g")\n'
+            # WORKAROUND(nemo-rl-vllm-separate-venv), Ray only: on the nemo-rl
+            # image vLLM lives in a per-actor venv (/opt/ray_venvs/*), NOT on
+            # PATH, while PATH's python3 (nemo_rl_venv) has nemo_skills/nvflow
+            # but no vllm.  Stock serve_vllm spawns the engine with a literal
+            # ``python3 -m vllm...`` through the shell, so PATH decides the
+            # ENGINE interpreter.  Bridge: resolve a vllm-capable bin dir
+            # (env override -> current python3 -> glob probe), prepend it to
+            # PATH for the engine spawn, and re-anchor the nemo_skills/nvflow
+            # module invocations to the ORIGINAL interpreter so they keep
+            # importing.  No-op when PATH python3 already imports vllm (e.g. a
+            # dedicated vllm-image cluster) — and always a no-op on Slurm
+            # (this branch is Ray-only).
+            f"_NVFLOW_OUTER_PY=$(command -v python3)\n"
+            f'_NVFLOW_VLLM_BIN=""\n'
+            f'if [ -n "${{NVFLOW_VLLM_PYTHON:-}}" ]; then\n'
+            f'    _NVFLOW_VLLM_BIN="$(dirname "$NVFLOW_VLLM_PYTHON")"\n'
+            f'elif [ -n "${{NVFLOW_VLLM_VENV:-}}" ]; then\n'
+            f'    _NVFLOW_VLLM_BIN="$NVFLOW_VLLM_VENV/bin"\n'
+            f"elif ! python3 -c 'import vllm' >/dev/null 2>&1; then\n"
+            f"    for _nvflow_p in ${{NVFLOW_VLLM_VENV_GLOB:-/opt/ray_venvs/*/bin}}; do\n"
+            f'        if [ -x "$_nvflow_p/python3" ] && "$_nvflow_p/python3" -c \'import vllm\' >/dev/null 2>&1; then\n'
+            f'            _NVFLOW_VLLM_BIN="$_nvflow_p"\n'
+            f"            break\n"
+            f"        fi\n"
+            f"    done\n"
+            f"fi\n"
+            f'if [ -n "$_NVFLOW_VLLM_BIN" ]; then\n'
+            f'    echo "[serve] vLLM interpreter bridge: engine python from $_NVFLOW_VLLM_BIN (launcher stays $_NVFLOW_OUTER_PY)"\n'
+            f'    export PATH="$_NVFLOW_VLLM_BIN:$PATH"\n'
+            f'    VLLM_RUN_CMD=$(echo "$VLLM_RUN_CMD" | sed -e "s|python3 -m nemo_skills\\.|$_NVFLOW_OUTER_PY -m nemo_skills.|g" -e "s|python3 -m nvflow\\.|$_NVFLOW_OUTER_PY -m nvflow.|g")\n'
+            f"fi\n"
+            f'rm -f "{stop_sentinel}"\n'
+            f'echo "[server-stop] {role} vLLM running in background (own process '
+            f'group via setsid); polling for stop sentinel {stop_sentinel}"\n'
+            # ``setsid`` makes the child a session/process-group leader so its
+            # PGID == its PID; we can then signal the whole group with a negative
+            # PID without killing this watcher.  Fall back to a plain background
+            # launch if setsid is unavailable (rare; util-linux ships it on
+            # essentially every Linux image).
+            f"if command -v setsid >/dev/null 2>&1; then\n"
+            f'    setsid bash -c "$VLLM_RUN_CMD" &\n'
+            f"    _NVFLOW_VLLM_PID=$!\n"
+            f"    _NVFLOW_VLLM_GROUP=1\n"
+            f"else\n"
+            f'    echo "[server-stop] setsid not found; falling back to '
+            f'single-process kill (orphaned vLLM workers may linger on GPU)" >&2\n'
+            f'    eval "$VLLM_RUN_CMD" &\n'
+            f"    _NVFLOW_VLLM_PID=$!\n"
+            f"    _NVFLOW_VLLM_GROUP=0\n"
+            f"fi\n"
+            f"_nvflow_kill_vllm() {{\n"
+            f'    if [ "$_NVFLOW_VLLM_GROUP" = "1" ]; then\n'
+            f'        kill -TERM -"$_NVFLOW_VLLM_PID" 2>/dev/null || true\n'
+            f"        sleep 5\n"
+            f'        kill -KILL -"$_NVFLOW_VLLM_PID" 2>/dev/null || true\n'
+            f"    else\n"
+            f'        kill -TERM "$_NVFLOW_VLLM_PID" 2>/dev/null || true\n'
+            f"        sleep 5\n"
+            f'        kill -KILL "$_NVFLOW_VLLM_PID" 2>/dev/null || true\n'
+            f"    fi\n"
+            f'    wait "$_NVFLOW_VLLM_PID" 2>/dev/null || true\n'
+            # Brief settle so CUDA actually frees the worker memory before this
+            # job exits and the next (colocated) stage starts its engine init.
+            f"    sleep 5\n"
+            f"}}\n"
+            f"while true; do\n"
+            f'    if [ -f "{stop_sentinel}" ]; then\n'
+            f'        echo "[server-stop] stop sentinel seen — shutting down '
+            f'{role} vLLM process group (pid/pgid $_NVFLOW_VLLM_PID)"\n'
+            f"        _nvflow_kill_vllm\n"
+            f'        rm -f "{stop_sentinel}"\n'
+            f"        exit 0\n"
+            f"    fi\n"
+            f'    if ! kill -0 "$_NVFLOW_VLLM_PID" 2>/dev/null; then\n'
+            f"        _NVFLOW_VLLM_RC=0\n"
+            f'        wait "$_NVFLOW_VLLM_PID" || _NVFLOW_VLLM_RC=$?\n'
+            # Reap any worker children that outlived the launcher so they do not
+            # linger on the GPU, but PRESERVE vLLM's real exit code (genuine
+            # crash must still surface) — the group-kill here is best-effort.
+            f'        if [ "$_NVFLOW_VLLM_GROUP" = "1" ]; then\n'
+            f'            kill -KILL -"$_NVFLOW_VLLM_PID" 2>/dev/null || true\n'
+            f"        fi\n"
+            f'        echo "[server-stop] {role} vLLM exited on its own '
+            f'(code $_NVFLOW_VLLM_RC) before any stop sentinel" >&2\n'
+            f"        exit $_NVFLOW_VLLM_RC\n"
+            f"    fi\n"
+            f"    sleep 5\n"
+            f"done\n"
+        )
+    else:
+        run_vllm = (
+            f"ORIG_CMD=$(cat <<'__NVFLOW_VLLM_CMD__'\n"
+            f"{original_inline}\n"
+            f"__NVFLOW_VLLM_CMD__\n"
+            f")\n"
+            f'eval "$(echo "$ORIG_CMD" | sed "s/{hardcoded}/$VLLM_PORT/g")"\n'
+        )
     wrapped = (
         f"{SHELL_FIND_FREE_PORT}\n"
         f"VLLM_PORT=$(find_free_port)\n"
@@ -191,11 +409,7 @@ def _wrap_server_with_dynamic_port(script: ServerScript, role: str, port_file: s
         f'if [ "${{SLURM_NODEID:-0}}" = "0" ]; then\n'
         f'    echo "$VLLM_PORT" > "{port_file}"\n'
         f"fi\n"
-        f"ORIG_CMD=$(cat <<'__NVFLOW_VLLM_CMD__'\n"
-        f"{original_inline}\n"
-        f"__NVFLOW_VLLM_CMD__\n"
-        f")\n"
-        f'eval "$(echo "$ORIG_CMD" | sed "s/{hardcoded}/$VLLM_PORT/g")"\n'
+        f"{run_vllm}"
     )
     script.set_inline(wrapped)
 
@@ -206,19 +420,24 @@ def _build_port_read_preamble(
     *,
     has_policy: bool = False,
     has_judge: bool = False,
+    attempt_id: str = "",
 ) -> str:
     """Build bash preamble that reads dynamic vLLM ports from port files.
 
     Returns empty string if neither server is present.
+
+    *attempt_id* must be the SAME Python-baked constant passed to
+    :func:`make_server_script` for the paired server in this attempt, so the
+    reader's path matches the writer's path (see :func:`_vllm_port_file`).
     """
     if not has_policy and not has_judge:
         return ""
     parts = [SHELL_READ_PORT_FILE]
     if has_policy:
-        pf = _vllm_port_file(log_dir, "policy", job_label)
+        pf = _vllm_port_file(log_dir, "policy", job_label, attempt_id)
         parts.append(f'POLICY_PORT=$(read_port_file "{pf}" "Policy vLLM" 300)')
     if has_judge:
-        jf = _vllm_port_file(log_dir, "judge", job_label)
+        jf = _vllm_port_file(log_dir, "judge", job_label, attempt_id)
         parts.append(f'JUDGE_PORT=$(read_port_file "{jf}" "Judge vLLM" 300)')
     return "\n".join(parts) + "\n"
 
@@ -230,6 +449,9 @@ def make_server_script(
     role: str = "policy",
     log_dir: str = "",
     job_label: str = "",
+    attempt_id: str = "",
+    is_ray: bool = False,
+    stop_sentinel: str = "",
 ) -> ServerScript:
     if "num_gpus" not in vllm_cfg:
         raise ValueError("vLLM config must specify 'num_gpus'")
@@ -258,12 +480,14 @@ def make_server_script(
     )
 
     if overlay:
-        setup_cmd = _build_overlay_setup_cmd(model_path, overlay, hf_overrides)
+        setup_cmd = _build_overlay_setup_cmd(model_path, overlay, hf_overrides, is_ray=is_ray)
         script.set_inline(f"{setup_cmd} && {script.inline}")
 
     if log_dir:
-        port_file = _vllm_port_file(log_dir, role, job_label)
-        _wrap_server_with_dynamic_port(script, role, port_file)
+        port_file = _vllm_port_file(log_dir, role, job_label, attempt_id)
+        _wrap_server_with_dynamic_port(
+            script, role, port_file, is_ray=is_ray, stop_sentinel=stop_sentinel
+        )
 
     return script
 
@@ -274,6 +498,23 @@ def make_bash_script(
     installation_command: str | None = None,
 ) -> BashScript:
     return BashScript(cmd=bash_cmd, installation_command=installation_command)
+
+
+def _ray_postprocess_installation_command(
+    installation_command: str | None,
+    *,
+    is_ray: bool,
+) -> str | None:
+    """Select the baked runtime for Ray-only post-processing jobs.
+
+    Slurm post-processing runs in ``postprocess_container`` and must retain
+    its existing environment. Ray Jobs, however, all execute on the already
+    provisioned Ray head; the container field is metadata rather than a
+    per-job container switch. Reusing the stage installation command there
+    selects the baked Gym venv for merge/aggregate/filter utilities without
+    installing packages at runtime.
+    """
+    return installation_command if is_ray else None
 
 
 # ---------------------------------------------------------------------------
@@ -492,12 +733,35 @@ def _build_variables_segment(
     )
 
 
-def _build_setup_segment() -> str:
+def _build_setup_segment(is_ray: bool = False, stop_sentinel: str = "") -> str:
     """Render mkdir, port-finder definition, cleanup trap, and wait_for_server.
 
     The cleanup trap is the load-bearing crash-safety hook; see the
     self-heal segment for the matching recovery side.
     """
+    # On the Ray Jobs backend the policy/judge vLLM serve runs as a
+    # SEPARATE Ray job that nothing reaps on a *successful* rollout (on Slurm the
+    # het-group allocation teardown does it).  The client touches a shared-FS
+    # stop sentinel UNCONDITIONALLY (success AND failure) so the paired serve's
+    # watcher sees it, kills vLLM, and exits 0 — releasing GPUs and letting the
+    # driver advance past the collect_rollouts gate.  Ray-only: on Slurm the
+    # branch is never built, so the emitted command is byte-identical.
+    stop_sentinel_touch = (
+        f'    echo "[Cleanup] Touching server-stop sentinel {stop_sentinel}"\n'
+        f'    touch "{stop_sentinel}" 2>&- || true\n'
+        if is_ray and stop_sentinel
+        else ""
+    )
+    if is_ray:
+        failure_cleanup = (
+            '        echo "[nvflow] Client exited with code $_nvflow_exit — terminating process group"\n'
+            "        kill 0 2>&- || true\n"
+        )
+    else:
+        failure_cleanup = (
+            '        echo "[nvflow] Client exited with code $_nvflow_exit — cancelling job ${SLURM_JOB_ID}"\n'
+            '        scancel "${SLURM_JOB_ID}" 2>&- || kill 0 2>&- || true\n'
+        )
     return (
         "\n"
         'mkdir -p "$OUTPUT_DIR/logs"\n'
@@ -516,7 +780,8 @@ def _build_setup_segment() -> str:
         "    # in the cleanup path, producing ``/dev/null: No such file\n"
         "    # or directory`` noise on top of the original failure.\n"
         '    [ -n "$NG_RUN_PID" ] && kill $NG_RUN_PID 2>&- && wait $NG_RUN_PID 2>&- || true\n'
-        "    # Best-effort merge of .prev into -async.  On success, finalize already\n"
+        + stop_sentinel_touch
+        + "    # Best-effort merge of .prev into -async.  On success, finalize already\n"
         "    # merged and removed .prev so this block is a no-op.  On failure/kill,\n"
         "    # this is a first attempt; the self-heal at next startup is the guarantee.\n"
         "    # Chain with && so .prev is NEVER deleted unless the merge succeeds.\n"
@@ -528,10 +793,7 @@ def _build_setup_segment() -> str:
         '            && rm -f "$ASYNC_FILE.prev" \\\n'
         '            || echo "[Cleanup] WARNING: merge failed — self-heal will recover on next start"\n'
         "    fi\n"
-        "    if [ $_nvflow_exit -ne 0 ]; then\n"
-        '        echo "[nvflow] Client exited with code $_nvflow_exit — cancelling job ${SLURM_JOB_ID}"\n'
-        '        scancel "${SLURM_JOB_ID}" 2>&- || kill 0 2>&- || true\n'
-        "    fi\n"
+        "    if [ $_nvflow_exit -ne 0 ]; then\n" + failure_cleanup + "    fi\n"
         "}\n"
         "trap cleanup EXIT\n"
         "\n" + SHELL_WAIT_FOR_SERVER + "\n"
@@ -643,7 +905,7 @@ def _build_selfheal_segment() -> str:
     )
 
 
-def _build_resume_segment(num_chunks: int, max_num_samples: int) -> str:
+def _build_resume_segment(num_chunks: int, max_num_samples: int, *, is_ray: bool = False) -> str:
     """Render the resume-filter step that skips already-completed rows.
 
     When chunked, the head|tail slice already truncated; pass 0 to
@@ -662,10 +924,11 @@ def _build_resume_segment(num_chunks: int, max_num_samples: int) -> str:
     cleanup avoids the surprise.
     """
     resume_max = 0 if num_chunks > 1 else max_num_samples
+    python_prefix = _python_module_prefix(is_ray)
     return (
         'REMAINING_INPUT="$OUTPUT_DIR/remaining_input_chunk$CHUNK_ID.jsonl"\n'
         "\n"
-        f'if ! PYTHONPATH={CONTAINER_CODE_DIR} python3 -m nvflow.lib.rl.resume_filter "$ASYNC_FILE" "$INPUT_DATA" "$REMAINING_INPUT" {resume_max}; then\n'
+        f'if ! {python_prefix}python3 -m nvflow.lib.rl.resume_filter "$ASYNC_FILE" "$INPUT_DATA" "$REMAINING_INPUT" {resume_max}; then\n'
         '    echo "ERROR: resume_filter failed" >&2\n'
         "    exit 1\n"
         "fi\n"
@@ -682,17 +945,19 @@ def _build_resume_segment(num_chunks: int, max_num_samples: int) -> str:
     )
 
 
-def _build_ng_run_segment(judge_ng_run_overrides: str) -> str:
+def _build_ng_run_segment(judge_ng_run_overrides: str, is_ray: bool = False) -> str:
     """Render "[Step 2/3]": background ng_run + wait_for_server probe.
 
     WORKAROUND(port-toctou): allocate the head-server port here (not in
     setup) to minimise the window between ``find_free_port()`` and ng_run
-    binding to it.
+    binding to it (the retry loop in :func:`build_ng_run_invocation`
+    re-allocates a fresh port per attempt).
 
     The shared invocation block is delegated to
     :func:`build_ng_run_invocation` so any future change to the ng_run
     arg shape applies to both ``collect_rollouts`` and
-    ``compute_rewards`` atomically.
+    ``compute_rewards`` atomically; *is_ray* adds the
+    ``ray_head_node_address`` attach override there.
     """
     return '\nHEAD_SERVER_PORT=$(find_free_port)\n\ncd "$GYM_PATH"\n\n' + build_ng_run_invocation(
         step_label="[Step 2/3]",
@@ -700,6 +965,11 @@ def _build_ng_run_segment(judge_ng_run_overrides: str) -> str:
         policy_model="$MODEL_PATH",
         judge_ng_run_overrides=judge_ng_run_overrides,
         include_port_range=True,
+        is_ray=is_ray,
+        # The retry loop includes random startup jitter and exists to avoid
+        # collisions between colocated Ray Jobs.  A Slurm allocation has the
+        # established one-shot launch and must remain byte-for-byte unchanged.
+        retry=is_ray,
     )
 
 
@@ -849,6 +1119,8 @@ def _build_client_cmd(
     chunk_id: int = 0,
     num_chunks: int = 1,
     responses_create_params: dict | None = None,
+    is_ray: bool = False,
+    stop_sentinel: str = "",
 ) -> str:
     """Build the rollout collection bash script.
 
@@ -885,14 +1157,14 @@ def _build_client_cmd(
             chunk_id=chunk_id,
             num_chunks=num_chunks,
         )
-        + _build_setup_segment()
+        + _build_setup_segment(is_ray=is_ray, stop_sentinel=stop_sentinel)
         + _build_banner_segment()
         + _build_done_check_segment()
         + _build_step1_wait_segment(policy_vllm_url, judge_vllm_url)
         + _build_chunk_slice_segment(max_num_samples)
         + _build_selfheal_segment()
-        + _build_resume_segment(num_chunks, max_num_samples)
-        + _build_ng_run_segment(judge_ng_run_overrides)
+        + _build_resume_segment(num_chunks, max_num_samples, is_ray=is_ray)
+        + _build_ng_run_segment(judge_ng_run_overrides, is_ray=is_ray)
         + _build_collect_segment(responses_create_params)
         + _build_finalize_segment()
     )
@@ -911,6 +1183,7 @@ def _build_merge_cmd(
     enrich_module: str,
     input_data: str,
     keep_chunk_files: bool = False,
+    is_ray: bool = False,
 ) -> str:
     """Build the chunk-merge + enrich + analyze bash script.
 
@@ -930,10 +1203,26 @@ def _build_merge_cmd(
         "set -e\n"
         "\n"
         f"MERGED_FILE={shlex.quote(merged_file)}\n"
+        f"MERGED_DONE={shlex.quote(merged_done_file)}\n"
         f"ANALYSIS_DIR={shlex.quote(analysis_dir)}\n"
         f"SEED_LABEL={shlex.quote(seed_label)}\n"
         f"NUM_CHUNKS={num_chunks}\n"
         f"INPUT_DATA={shlex.quote(input_data)}\n"
+    )
+
+    # -- Idempotency: skip if this seed's merge already completed ----------
+    # A prior successful merge consumes the chunks (deletes chunk_*.jsonl but
+    # keeps their .done markers, which _get_remaining_jobs relies on) and writes
+    # the merged output + its own .done marker.  On a resume into that dir the
+    # Step-1 chunk-file check would abort ("chunk .done present but file gone");
+    # detect the completed merge here and skip cleanly so collect_rollouts is
+    # resumable after a crash/disconnect.
+    idempotency = (
+        "\n"
+        'if [ -f "$MERGED_DONE" ] && [ -s "$MERGED_FILE" ]; then\n'
+        '    echo "Merge already complete for $SEED_LABEL (output + .done present) — skipping."\n'
+        "    exit 0\n"
+        "fi\n"
     )
 
     # -- Step 1: Merge chunks (atomic — write to .tmp, then mv) ------------
@@ -988,12 +1277,14 @@ def _build_merge_cmd(
         'mv -f "$MERGED_FILE.tmp" "$MERGED_FILE"\n'
     )
 
+    python_prefix = _python_module_prefix(is_ray)
+
     # -- Step 2: Enrich with input metadata -------------------------------
     step2_enrich = (
         "\n"
         'echo ""\n'
         'echo "[Step 2/3] Enriching rollouts with input metadata ..."\n'
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {shlex.quote(enrich_module)} \\\n"
+        f"{python_prefix}python3 -m {shlex.quote(enrich_module)} \\\n"
         '    "$INPUT_DATA" \\\n'
         '    "$MERGED_FILE"\n'
     )
@@ -1003,7 +1294,7 @@ def _build_merge_cmd(
         "\n"
         'echo ""\n'
         'echo "[Step 3/3] Analyzing rollouts ..."\n'
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {shlex.quote(analyze_module)} \\\n"
+        f"{python_prefix}python3 -m {shlex.quote(analyze_module)} \\\n"
         '    "$MERGED_FILE" \\\n'
         f'    "$ANALYSIS_DIR"\n'
     )
@@ -1035,7 +1326,7 @@ def _build_merge_cmd(
         'echo "  export PATH=/opt/gym-cli-venv/bin:$PATH && ng_viewer +jsonl_fpath=$MERGED_FILE"\n'
     )
 
-    return variables + step1_merge + step2_enrich + step3_analyze + cleanup
+    return variables + idempotency + step1_merge + step2_enrich + step3_analyze + cleanup
 
 
 def build_aggregate_cmd(
@@ -1044,6 +1335,7 @@ def build_aggregate_cmd(
     aggregate_module: str,
     difficulty_filename: str = "difficulty.jsonl",
     expected_seeds: int | None = None,
+    is_ray: bool = False,
 ) -> str:
     """Build the bash command for the cross-seed aggregation job.
 
@@ -1059,10 +1351,11 @@ def build_aggregate_cmd(
     ``num_seeds`` in ``metrics.json``.
     """
     expected_arg = f" --expected-seeds {expected_seeds}" if expected_seeds is not None else ""
+    python_prefix = _python_module_prefix(is_ray)
     return (
         "set -e\n"
         'echo "Cross-Seed Aggregation (pass@k)"\n'
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {aggregate_module} \\\n"
+        f"{python_prefix}python3 -m {aggregate_module} \\\n"
         f'    "{rollout_dir}" \\\n'
         f'    "{rollout_dir}/aggregate" \\\n'
         f'    --output_filename "{difficulty_filename}"{expected_arg}\n'
@@ -1084,11 +1377,13 @@ def build_filter_cmd(
     val_filename: str = "validation.jsonl",
     difficulty_filename: str = "difficulty.jsonl",
     report_filename: str = "filter_report.json",
+    is_ray: bool = False,
 ) -> str:
+    python_prefix = _python_module_prefix(is_ray)
     cmd = (
         "set -e\n"
         'echo "Filter Training Data (reward-variance difficulty)"\n'
-        f"PYTHONPATH={CONTAINER_CODE_DIR} python3 -m {filter_module} \\\n"
+        f"{python_prefix}python3 -m {filter_module} \\\n"
         f'    "{train_data}" \\\n'
         f'    "{difficulty_dir}/aggregate/{difficulty_filename}" \\\n'
         f'    "{output_dir}" \\\n'
@@ -1307,6 +1602,7 @@ def _build_collection_jobs(
     from nvflow.lib.sbatch import parse_extra_sbatch_args
 
     sbatch_kwargs = parse_extra_sbatch_args(cluster_config) or None
+    use_ray_jobs = is_ray_backend(cluster_config)
 
     for seed, chunk_id in remaining:
         job_lbl = f"rs{seed}_chunk{chunk_id}"
@@ -1315,16 +1611,48 @@ def _build_collection_jobs(
 
         prev_job_spec = None
         for dep_id in range(p.dependent_jobs + 1):
+            # Per-attempt nonce baked into BOTH the server (writer) and client
+            # (reader) port-file paths.  Each distinct attempt (every dep_id in
+            # the chain) gets its own id so a re-run never reads a stale port.
+            # Critical under the Ray Jobs backend: the pre-provisioned head keeps one
+            # constant $SLURM_JOB_ID for its whole life, so without this nonce
+            # every rollout attempt would reuse the same port file and a client
+            # could read a STALE port and hang on a dead server.  Must be a
+            # Python-baked constant (not bash $$/$RANDOM): the writer and reader
+            # are different processes/nodes and would otherwise never agree.
+            is_ray = use_ray_jobs
+            attempt_id = _new_ray_attempt_id() if is_ray else ""
+            # Single per-attempt stop sentinel: the client touches it on EXIT and
+            # both servers (policy + judge) poll the same path.  Ray-only — empty
+            # on Slurm so the serve stays foreground and the emitted command is
+            # byte-identical to the validated Slurm path.
+            stop_sentinel = (
+                _server_stop_sentinel(job_log_dir, job_lbl, attempt_id) if is_ray else ""
+            )
             policy_script = (
                 make_server_script(
-                    p.pcfg, cluster_config, role="policy", log_dir=job_log_dir, job_label=job_lbl
+                    p.pcfg,
+                    cluster_config,
+                    role="policy",
+                    log_dir=job_log_dir,
+                    job_label=job_lbl,
+                    attempt_id=attempt_id,
+                    is_ray=is_ray,
+                    stop_sentinel=stop_sentinel,
                 )
                 if p.need_policy_server
                 else None
             )
             judge_script = (
                 make_server_script(
-                    p.jcfg, cluster_config, role="judge", log_dir=job_log_dir, job_label=job_lbl
+                    p.jcfg,
+                    cluster_config,
+                    role="judge",
+                    log_dir=job_log_dir,
+                    job_label=job_lbl,
+                    attempt_id=attempt_id,
+                    is_ray=is_ray,
+                    stop_sentinel=stop_sentinel,
                 )
                 if p.need_judge_server
                 else None
@@ -1353,7 +1681,10 @@ def _build_collection_jobs(
                 num_chunks=p.num_chunks,
                 responses_create_params=p.responses_create_params,
                 log_dir=job_log_dir,
+                attempt_id=attempt_id,
                 installation_command=p.installation_command,
+                is_ray=is_ray,
+                stop_sentinel=stop_sentinel,
             )
 
             job_deps: list = [prev_job_spec] if prev_job_spec is not None else (run_after or [])
@@ -1459,6 +1790,7 @@ def _build_merge_jobs(
     *,
     analyze_module: str,
     enrich_module: str,
+    is_ray: bool = False,
 ) -> list[dict]:
     """Build one merge job per seed. Returns merge job specs."""
     from nemo_skills.pipeline.utils.declarative import Command, CommandGroup, HardwareConfig
@@ -1485,10 +1817,17 @@ def _build_merge_jobs(
             enrich_module=enrich_module,
             input_data=p.input_data,
             keep_chunk_files=p.keep_chunk_files,
+            is_ray=is_ray,
         )
 
         merge_cmd = Command(
-            script=make_bash_script(merge_cmd_str),
+            script=make_bash_script(
+                merge_cmd_str,
+                installation_command=_ray_postprocess_installation_command(
+                    p.installation_command,
+                    is_ray=is_ray,
+                ),
+            ),
             container=p.postprocess_container,
             name=f"merge-{seed_label}",
         )
@@ -1540,6 +1879,7 @@ def rollout(
     p = _parse_rollout_config(config)
 
     cluster_config = pipeline_utils.get_cluster_config(cluster)
+    use_ray_jobs = is_ray_backend(cluster_config)
 
     rollout_dir = f"{p.output_dir}/rollout"
 
@@ -1648,6 +1988,7 @@ def rollout(
         expname,
         analyze_module=analyze_module,
         enrich_module=enrich_module,
+        is_ray=use_ray_jobs,
     )
     jobs.extend(merge_job_specs)
 
@@ -1668,10 +2009,17 @@ def rollout(
             aggregate_module=aggregate_module,
             difficulty_filename=difficulty_filename,
             expected_seeds=p.num_random_seeds,
+            is_ray=use_ray_jobs,
         )
 
         agg_cmd = Command(
-            script=make_bash_script(agg_cmd_str),
+            script=make_bash_script(
+                agg_cmd_str,
+                installation_command=_ray_postprocess_installation_command(
+                    p.installation_command,
+                    is_ray=use_ray_jobs,
+                ),
+            ),
             container=p.postprocess_container,
             name="aggregate",
         )
@@ -1703,10 +2051,17 @@ def rollout(
             val_filename=p.filter_cfg.get("val_filename", "validation.jsonl"),
             difficulty_filename=p.filter_cfg.get("difficulty_filename", "difficulty.jsonl"),
             report_filename=p.filter_cfg.get("report_filename", "filter_report.json"),
+            is_ray=use_ray_jobs,
         )
 
         filter_cmd = Command(
-            script=make_bash_script(filter_cmd_str),
+            script=make_bash_script(
+                filter_cmd_str,
+                installation_command=_ray_postprocess_installation_command(
+                    p.installation_command,
+                    is_ray=use_ray_jobs,
+                ),
+            ),
             container=p.postprocess_container,
             name="filter",
         )
@@ -1734,6 +2089,7 @@ def rollout(
         name=expname,
         cluster_config=cluster_config,
         jobs=jobs,
+        with_ray=use_ray_jobs,
     )
     pipeline.run()
 

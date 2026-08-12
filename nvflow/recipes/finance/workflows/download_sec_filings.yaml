@@ -10,7 +10,7 @@ workflow:
 
 cluster: my_cluster
 
-output_dir: /workspace/outputs/finance
+output_dir: ${nvflow_root}/outputs/finance
 
 pipeline_stages:
   - smoke

@@ -17,7 +17,7 @@ workflow:
   description: "Demo baseline evaluation (Qwen3-4B, Gemma-3-4B-IT, GPT-OSS-20B)"
 
 cluster: my_cluster
-base_output_dir: /workspace/outputs/finance/demo/workflow-1-baseline-eval
+base_output_dir: ${nvflow_root}/outputs/finance/demo/workflow-1-baseline-eval
 
 # Local vLLM judge (overrides OpenAI default in base.yaml)
 judge:
@@ -50,7 +50,7 @@ benchmarks:
 stages:
   prepare_data:
     dataset_names: [secque, financebench]
-    output_dir: /workspace/outputs/finance/eval-datasets
+    output_dir: ${nvflow_root}/outputs/finance/eval-datasets
 
 models:
   qwen3-4b:
@@ -64,7 +64,9 @@ models:
       ++inference.top_k=20
       ++inference.tokens_to_generate=16384
       ++chat_template_kwargs.enable_thinking=true
-    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3 --tensor-parallel-size 2"
+    # TP derives from gpus (4) via nemo-skills serve_vllm; don't also set
+    # --tensor-parallel-size here or vLLM receives a duplicate flag.
+    server_args: "--max-model-len 40960 --async-scheduling --reasoning-parser qwen3"
     gpus: 4
     nodes: 1
 
@@ -76,7 +78,9 @@ models:
     inference_args: >-
       ++prompt_config=nvflow/recipes/finance/prompts/secque_template.yaml
       ++inference.tokens_to_generate=8192
-    server_args: "--max-model-len 40960 --async-scheduling --tensor-parallel-size 2"
+    # TP derives from gpus (4) via nemo-skills serve_vllm; don't also set
+    # --tensor-parallel-size here or vLLM receives a duplicate flag.
+    server_args: "--max-model-len 40960 --async-scheduling"
     gpus: 4
     nodes: 1
 

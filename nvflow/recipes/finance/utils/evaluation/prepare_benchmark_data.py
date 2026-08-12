@@ -60,6 +60,17 @@ def prepare_benchmarks(benchmarks: list[str], output_dir: str) -> None:
             benchmark_output_dir = Path(output_dir) / bench_name
             benchmark_output_dir.mkdir(parents=True, exist_ok=True)
 
+            # Airgap: prepare.py downloads the benchmark from HuggingFace
+            # (load_dataset). If the prepared eval.jsonl is already present
+            # (baked into the deploy / produced by a prior run), skip the
+            # download so this runs offline.  Pair with HF_*_OFFLINE in the
+            # cluster/job env so any unguarded load_dataset fails fast.
+            existing = benchmark_output_dir / "eval.jsonl"
+            if existing.exists() and existing.stat().st_size > 0:
+                logger.info(f"  {bench_name}: eval.jsonl already prepared — skipping download")
+                logger.info(f"✓ {bench_name} prepared successfully\n")
+                continue
+
             # Run prepare.py with benchmark-specific output_dir
             result = subprocess.run(
                 [sys.executable, str(prepare_script), "--output_dir", str(benchmark_output_dir)],
@@ -82,7 +93,16 @@ def prepare_benchmarks(benchmarks: list[str], output_dir: str) -> None:
                 logger.error(f"✗ {bench_name} missing descriptor __init__.py at {init_src}\n")
                 failed.append(bench_name)
                 continue
-            shutil.copy2(init_src, benchmark_output_dir / "__init__.py")
+            init_dst = benchmark_output_dir / "__init__.py"
+            if init_src.resolve() == init_dst.resolve():
+                # output_dir already IS the descriptor's own directory (e.g. the
+                # in-repo datasets tree) — src and dst are the same file, so the
+                # copy is a no-op that would raise shutil.SameFileError. Skip it.
+                logger.info(
+                    f"  {bench_name}: descriptor already in place (output dir is its own package), skipping copy"
+                )
+            else:
+                shutil.copy2(init_src, init_dst)
 
             logger.info(f"✓ {bench_name} prepared successfully\n")
 
@@ -92,8 +112,10 @@ def prepare_benchmarks(benchmarks: list[str], output_dir: str) -> None:
 
         except subprocess.CalledProcessError as e:
             logger.error(f"✗ {bench_name} failed with exit code {e.returncode}")
+            if e.stdout:
+                logger.error(f"  stdout:\n{e.stdout}")
             if e.stderr:
-                logger.error(f"  {e.stderr}")
+                logger.error(f"  stderr:\n{e.stderr}")
             failed.append(bench_name)
             logger.info("")
 

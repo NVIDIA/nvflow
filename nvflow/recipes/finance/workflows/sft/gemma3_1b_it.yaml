@@ -13,10 +13,10 @@
 _base_: base.yaml
 
 # Model-specific output directory (example / demo workflow)
-base_output_dir: /workspace/outputs/finance/demo/workflow-4-sft/gemma3_1b_it
+base_output_dir: ${nvflow_root}/outputs/finance/demo/workflow-4-sft/gemma3_1b_it
 
 directories:
-  raw_train_data: /workspace/outputs/finance/demo/workflow-3-template-based-sdg/step-5-filter-answers
+  raw_train_data: ${nvflow_root}/outputs/finance/demo/workflow-3-template-based-sdg/step-5-filter-answers
 
 # ============================================================================
 # Model-Specific Stage Overrides

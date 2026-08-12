@@ -45,6 +45,11 @@ env/
 htmlcov/
 .tox/
 
+# Scratch HOME from tests that shell out to uv/virtualenv; fills with cached
+# wheels that the secrets detector flags on vendored example credentials.
+.tmp-test-home/
+*.whl
+
 # HF / tokenizer / debug caches.  Created by ad-hoc local Python sessions
 # (e.g. AutoConfig.from_pretrained(..., trust_remote_code=True)) when
 # HF_HOME defaults to $cwd/cache.  Pipeline runs use the Lustre HF cache,
@@ -105,7 +110,14 @@ Thumbs.db
 credentials.yaml
 private_*.yaml
 
-# Cluster configs (only track containers.yaml and template-slurm.yaml)
+# Cluster configs: track only the example templates; real configs (e.g. my_cluster.yaml,
+# which holds dashboard URLs + endpoint keys) stay ignored.
 cluster_configs/*.yaml
 !cluster_configs/containers.yaml
 !cluster_configs/template-slurm.yaml
+!cluster_configs/template-ray.yaml
+
+# Local Codex/NVFlow operator artifacts
+monitor_audit_*/
+CODEX_*_FINANCE_CLUSTER.md
+scripts/finance_cluster_preflight.py

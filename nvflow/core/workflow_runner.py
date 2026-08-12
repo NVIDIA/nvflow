@@ -14,6 +14,7 @@
 #
 """Workflow runner for executing stage sequences with dependency management."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -56,7 +57,9 @@ class WorkflowRunner:
 
         # Load config with inheritance support and resolve interpolations
         config = self._load_config_with_inheritance(self.config_path)
+        self._inject_path_roots(config)
         self.config = OmegaConf.to_container(config, resolve=True)
+        self._drop_injected_path_roots()
 
         # Expand dynamic sections (models, checkpoints) into stage configs
         self._expand_dynamic_stages()
@@ -102,6 +105,110 @@ class WorkflowRunner:
             config = OmegaConf.merge(base_config, config)
 
         return config
+
+    # ------------------------------------------------------------------
+    # Backend-keyed path roots (recipe unification)
+    # ------------------------------------------------------------------
+
+    def _resolve_cluster_config(self, config) -> dict:
+        """Best-effort, lightweight load of the named cluster config.
+
+        The recipe carries a cluster *name* (``cluster: my_cluster``); the actual
+        backend config lives in a separate cluster file resolved by nemo-skills.
+        This intentionally does *not* import ``nemo_skills.pipeline``.  That
+        import costs seconds on a cold login node and config loading/validation
+        historically did not pay it.  Full cluster validation still happens in
+        the stage submission path; here we only need ``executor``, ``backend``,
+        and ``nvflow_root`` to select the runner and interpolate paths.
+
+        The lookup order mirrors nemo-skills for the normal NVFlow entrypoints:
+        ``NEMO_SKILLS_CONFIG_DIR`` first, then ``./cluster_configs``.  Tolerant
+        by design: a missing or unreadable config returns ``{}``, which
+        :func:`path_roots` treats as non-Ray and therefore preserves the legacy
+        ``/workspace`` roots.
+        """
+        try:
+            import yaml
+
+            cluster_name = OmegaConf.select(config, "cluster")
+            if not isinstance(cluster_name, str) or not cluster_name:
+                return {}
+
+            config_dir = os.environ.get("NEMO_SKILLS_CONFIG_DIR")
+            if config_dir:
+                candidate = Path(config_dir) / f"{cluster_name}.yaml"
+                if not candidate.is_file():
+                    raise FileNotFoundError(f"Cluster config not found: {candidate}")
+                with candidate.open(encoding="utf-8") as stream:
+                    loaded = yaml.safe_load(stream)
+                if not isinstance(loaded, dict):
+                    raise ValueError(f"Cluster config must contain a mapping: {candidate}")
+                return loaded
+
+            candidates = [Path.cwd() / "cluster_configs" / f"{cluster_name}.yaml"]
+            if not candidates[0].is_file():
+                # Match nemo-skills' final packaged-cluster-config fallback
+                # without importing the package (find_spec reads metadata only).
+                import importlib.util
+
+                spec = importlib.util.find_spec("nemo_skills")
+                package_dirs = list(spec.submodule_search_locations or []) if spec else []
+                candidates.extend(
+                    Path(package_dir).parent / "cluster_configs" / f"{cluster_name}.yaml"
+                    for package_dir in package_dirs
+                )
+
+            for candidate in candidates:
+                if not candidate.is_file():
+                    continue
+                with candidate.open(encoding="utf-8") as stream:
+                    loaded = yaml.safe_load(stream)
+                if not isinstance(loaded, dict):
+                    raise ValueError(f"Cluster config must contain a mapping: {candidate}")
+                return loaded
+            self._cluster_config_error = FileNotFoundError(
+                f"Cluster config {cluster_name!r} not found in any supported directory"
+            )
+        except Exception as exc:
+            self._cluster_config_error = exc
+            return {}
+        return {}
+
+    def _inject_path_roots(self, config) -> None:
+        """Inject backend-keyed ``repo_root``/``nvflow_root`` for ``${...}`` interpolation.
+
+        Only injects a root the recipe does not already define (so a recipe that
+        sets its own ``data_root`` — e.g. grpo — is left untouched). Injected keys
+        are recorded and removed after resolution by
+        :meth:`_drop_injected_path_roots`, so the resolved config stays structurally
+        identical to a recipe that hard-coded the paths.
+        """
+        from nvflow.lib.executor import path_roots
+
+        self._cluster_config_error = None
+        self._cluster_config = self._resolve_cluster_config(config)
+        roots = path_roots(self._cluster_config)
+        self._injected_path_roots: list[str] = []
+        OmegaConf.set_struct(config, False)
+        for key, value in roots.items():
+            # Inject only when the recipe neither defines the key nor declares it
+            # mandatory (``key: ???``). A recipe that sets its own root (e.g. grpo's
+            # ``data_root``) keeps it; a mandatory placeholder is left to fail loudly
+            # rather than being silently masked with /workspace.
+            try:
+                is_missing = OmegaConf.is_missing(config, key)
+            except Exception:
+                is_missing = False
+            if key in config or is_missing:
+                continue
+            config[key] = value
+            self._injected_path_roots.append(key)
+
+    def _drop_injected_path_roots(self) -> None:
+        """Remove the helper roots we injected (post-resolve) so they don't persist."""
+        for key in getattr(self, "_injected_path_roots", []):
+            if isinstance(self.config, dict):
+                self.config.pop(key, None)
 
     # ------------------------------------------------------------------
     # Dynamic stage expansion
@@ -219,6 +326,21 @@ class WorkflowRunner:
                 expanded.append(stage)
         self.config["pipeline_stages"] = expanded
 
+    def _before_run(self) -> None:
+        """Executor-specific setup hook called at the start of :meth:`run`.
+
+        Default implementation applies the Slurm sbatch-args autopatch so
+        cluster-level ``extra_sbatch_args`` reach every Slurm submission.
+        Installed lazily here (not at CLI startup) because importing
+        nemo_skills.pipeline pulls in torch/transformers (~15s cold cache).
+
+        Subclasses (e.g. :class:`~nvflow.core.ray_workflow_runner.RayWorkflowRunner`)
+        override this to skip the Slurm patch or perform Ray-specific setup.
+        """
+        from nvflow.lib.sbatch import apply_sbatch_args_autopatch
+
+        apply_sbatch_args_autopatch()
+
     def run(
         self,
         stages: list[str] | None = None,
@@ -244,12 +366,8 @@ class WorkflowRunner:
         # Validate that requested stages exist in config
         self._validate_stages(stages_to_run, all_stages)
 
-        # Ensure cluster-level extra_sbatch_args reach every Slurm submission.
-        # Installed lazily here (not at CLI startup) because importing
-        # nemo_skills.pipeline pulls in torch/transformers (~15s cold cache).
-        from nvflow.lib.sbatch import apply_sbatch_args_autopatch
-
-        apply_sbatch_args_autopatch()
+        # Executor-specific pre-run setup (Slurm sbatch-args patch by default).
+        self._before_run()
 
         # Warn about sibling stages that are declared in pipeline_stages
         # but not currently registered (e.g., their import failed).
@@ -275,9 +393,18 @@ class WorkflowRunner:
             self._run_stage(stage_name, environment=environment, stages_to_run=stages_to_run)
             completed_stages.append(stage_name)
 
-        header("✅ Workflow Submitted")
-        success(f"Submitted {len(completed_stages)} stage(s): {', '.join(completed_stages)}")
-        detail("Note", "Stages run as Slurm jobs -- track them with squeue")
+        self._report_workflow_completion(completed_stages)
+
+    def _report_workflow_completion(self, completed_stages: list[str]) -> None:
+        """Print a completion summary that reflects executor semantics."""
+        if self._executor_of(self.cluster) in (None, "slurm"):
+            header("✅ Workflow Submitted")
+            success(f"Submitted {len(completed_stages)} stage(s): {', '.join(completed_stages)}")
+            detail("Note", "Stages run as Slurm jobs -- track them with squeue")
+            return
+
+        header("✅ Workflow Complete!")
+        success(f"Completed {len(completed_stages)} stage(s): {', '.join(completed_stages)}")
 
     def _preflight_pipeline_health(
         self,
@@ -326,7 +453,20 @@ class WorkflowRunner:
         # Get stage configuration and inject environment filter
         stage_config = {**self.config["stages"][stage_name]}
         if environment is not None:
-            stage_config["_environment"] = environment
+            # `-e` is a filter, never an expansion: a stage that declares an
+            # ``environments`` scope only runs for the requested env(s) within
+            # that scope. A scoped stage with no in-scope env is skipped (it
+            # never declared that env, so forcing it would read stale/foreign
+            # source_data). Mirrors ``_resolve_env_names`` so dependency wiring
+            # and execution agree on a scoped stage's env set.
+            selected = self._filter_stage_environment(stage_config, environment)
+            if not selected:
+                info(
+                    f"Skipping stage '{stage_name}' for "
+                    f"{', '.join(environment)} (outside its environments scope)"
+                )
+                return
+            stage_config["_environment"] = selected
 
         # Get stage class from hierarchical registry with explicit context
         if not StageRegistry.has(self.recipe, self.workflow_name, stage_name):
@@ -356,12 +496,130 @@ class WorkflowRunner:
         # Validate stage configuration
         stage.validate_config(stage_config)
 
-        # Execute stage
+        # Execute stage on its resolved cluster (per-stage CPU/GPU routing
+        # for 2-cluster Ray; no-op on Slurm / single-URL Ray).
+        resolved_cluster = self._resolve_stage_cluster(stage_config)
         stage.execute(
-            config=stage_config, cluster=self.cluster, expname=expname, run_after=run_after
+            config=stage_config,
+            cluster=resolved_cluster,
+            expname=expname,
+            run_after=run_after,
         )
 
+        # Fail loudly if the stage's underlying nemo-run task crashed.  For
+        # synchronous executors (ray / local / none) stage.execute blocks
+        # until every task reaches a terminal state, but nemo-run records a
+        # FAILED status WITHOUT raising -- so a task that died mid-run
+        # (ModuleNotFoundError, non-zero Hydra job, ...) would otherwise be
+        # reported here as a completed stage and let downstream stages run on
+        # missing/partial inputs.  This surfaces that failure as a stage
+        # failure so the workflow stops instead of printing false success.
+        self._verify_stage_tasks(stage_name, expname, resolved_cluster)
+
         success(f"Stage '{stage_name}' completed")
+
+    # Terminal nemo-run/torchx task states that mean the stage's work did NOT
+    # succeed.  A legitimate "skip_filled / no data to process, skipping
+    # generation" run still exits 0 -> SUCCEEDED, so it is NOT in this set and
+    # is never misclassified as a failure.
+    _FAILED_TASK_STATES = frozenset({"FAILED", "CANCELLED"})
+
+    def _verify_stage_tasks(
+        self,
+        stage_name: str,
+        expname: str,
+        cluster,
+    ) -> None:
+        """Raise if the stage's nemo-run experiment has any FAILED task.
+
+        Only runs for synchronous executors (anything but Slurm), where
+        ``stage.execute`` has already driven every task to a terminal state
+        (``exp.run(detach=False)``).  Slurm submits asynchronously
+        (``detach=True``) and relies on ``--dependency=afterok`` for failure
+        propagation, so its tasks are still PENDING/SUBMITTED at this point;
+        the check is skipped there to keep the Slurm path byte-identical.
+
+        Best-effort and non-fatal on introspection errors: if nemo-run/torchx
+        are unavailable, the experiment cannot be located, or status cannot be
+        read, we return without raising so a real success is never turned into
+        a false failure.  Only a genuinely FAILED/CANCELLED task raises.
+
+        Args:
+            stage_name: Short stage name (for the error message).
+            expname: nemo-run experiment title used by this stage's submission
+                (``generate`` / ``run_cmd`` create ``run.Experiment(expname)``).
+            cluster: The resolved stage cluster (config dict for Ray, cluster
+                name string for Slurm/base) used to determine the executor.
+        """
+        if self._executor_of(cluster) in (None, "slurm"):
+            return
+
+        try:
+            import nemo_run as run
+        except Exception:
+            return
+
+        try:
+            with run.Experiment.from_title(expname) as exp:
+                status_dict = exp.status(return_dict=True) or {}
+        except Exception:
+            return
+
+        failed = [
+            task
+            for task, meta in status_dict.items()
+            if self._task_state_name(meta) in self._FAILED_TASK_STATES
+        ]
+        if failed:
+            raise RuntimeError(
+                f"Stage '{stage_name}' FAILED: nemo-run task(s) "
+                f"{', '.join(failed)} did not complete successfully "
+                f"(experiment '{expname}'). See the job traceback/logs above "
+                f"for the underlying error. Aborting the workflow so downstream "
+                f"stages do not run on missing or partial inputs."
+            )
+
+    @staticmethod
+    def _task_state_name(meta) -> str:
+        """Return the task's status as an upper-case name string.
+
+        ``exp.status(return_dict=True)`` maps each task to a dict whose
+        ``status`` is a torchx ``AppState`` enum (``AppState.FAILED``), but we
+        avoid importing torchx and tolerate a plain string too.
+        """
+        status = meta.get("status") if isinstance(meta, dict) else meta
+        return getattr(status, "name", str(status)).upper()
+
+    def _executor_of(self, cluster):
+        """Best-effort resolve the executor name for a resolved stage cluster.
+
+        ``cluster`` is either a resolved cluster-config dict (Ray runner, which
+        carries ``executor``) or a cluster *name* string (Slurm/base runner,
+        resolved via nemo-skills).  Returns the executor string (e.g.
+        ``"none"``, ``"local"``, ``"slurm"``) or ``None`` when it cannot be
+        determined -- in which case the caller conservatively skips the check.
+        """
+        try:
+            if isinstance(cluster, dict):
+                return cluster.get("executor")
+            if cluster == getattr(self, "cluster", None):
+                cfg = getattr(self, "_cluster_config", {})
+                return cfg.get("executor") if isinstance(cfg, dict) else None
+            from nemo_skills.pipeline.utils.cluster import get_cluster_config
+
+            cfg = get_cluster_config(cluster)
+            return cfg.get("executor") if isinstance(cfg, dict) else None
+        except Exception:
+            return None
+
+    def _resolve_stage_cluster(self, stage_config: dict):
+        """Return the workflow cluster unchanged (Slurm path — no per-stage routing).
+
+        Ray-specific 2-cluster routing lives in
+        :class:`~nvflow.core.ray_workflow_runner.RayWorkflowRunner`, which
+        overrides this method.
+        """
+        return self.cluster
 
     def _get_expname(self, stage_name: str, stage_config: dict) -> str:
         """Generate clean experiment name for a stage.
@@ -433,6 +691,26 @@ class WorkflowRunner:
         if environment:
             return [e for e in environment if e in envs]
         return list(envs.keys())
+
+    @staticmethod
+    def _filter_stage_environment(
+        stage_config: dict,
+        environment: list[str],
+    ) -> list[str]:
+        """Filter the CLI ``-e`` env(s) by a stage's own ``environments`` scope.
+
+        ``-e`` is a filter, not an expansion. A stage that declares an
+        ``environments`` block runs only for the requested env(s) that fall
+        within that block (the intersection); an empty result means the stage
+        is out of scope for every requested env and the caller should skip it.
+        A stage with no ``environments`` block is unscoped and runs for the
+        requested env(s) unchanged. Mirrors :meth:`_resolve_env_names` so
+        dependency wiring and execution agree on a scoped stage's env set.
+        """
+        stage_envs = stage_config.get("environments")
+        if not stage_envs:
+            return environment
+        return [e for e in environment if e in stage_envs]
 
     def _validate_stages(self, stages_to_run: list[str], all_stages: list[str]) -> None:
         """Validate that requested stages exist and are registered.

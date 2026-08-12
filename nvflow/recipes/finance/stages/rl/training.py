@@ -35,6 +35,7 @@ import yaml
 from omegaconf import OmegaConf
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.executor import is_ray_backend
 from nvflow.lib.gpu_layout import resolve_gpu_layout
 from nvflow.lib.rl.helpers import (
     NON_VLLM_KEYS,
@@ -425,10 +426,15 @@ class GRPOStage(BaseStage):
                 f"    --port {judge_port}"
                 f"    {server_args}"
             )
+            pythonpath_setup = (
+                ""
+                if is_ray_backend(cluster_config)
+                else "export PYTHONPATH=$PYTHONPATH:/nemo_run/code && "
+            )
             wrapped_cmd = (
                 f'echo "$(hostname):{judge_port}" > {host_file} && '
                 f"nvidia-smi && cd /nemo_run/code && "
-                f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code && "
+                f"{pythonpath_setup}"
                 f"{vllm_cmd}"
             )
 
@@ -548,15 +554,41 @@ class GRPOStage(BaseStage):
             )
         console.blank()
 
-    def _config_shell_snippet(self, prepared: PreparedGRPOConfig) -> tuple[str, str]:
+    def _config_shell_snippet(
+        self, prepared: PreparedGRPOConfig, *, is_ray: bool = False
+    ) -> tuple[str, str]:
         """Return a shell snippet that writes the NeMo-RL config YAML at job runtime.
 
         The config is base64-encoded and decoded inside the Slurm job,
         avoiding any host-side filesystem writes.  Same pattern used by
         ``PrepareDataForGRPOStage._overlay_shell_snippet``.
+
+        PR 1479 rewrites legacy code paths in the rendered shell command, but
+        it cannot see paths hidden inside this base64 payload.  Ray configs
+        therefore use an OmegaConf environment interpolation which resolves
+        against the stable absolute code root exported by the Ray backend.
+        The default Slurm payload is deliberately left byte-for-byte unchanged.
         """
+
+        def rewrite_ray_code_paths(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {key: rewrite_ray_code_paths(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [rewrite_ray_code_paths(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(rewrite_ray_code_paths(item) for item in value)
+            if isinstance(value, str):
+                return value.replace(
+                    "/nemo_run/code",
+                    "${oc.env:NEMO_RUN_CODE_DIR}",
+                )
+            return value
+
+        config = (
+            rewrite_ray_code_paths(prepared.nemo_rl_config) if is_ray else prepared.nemo_rl_config
+        )
         content = yaml.dump(
-            prepared.nemo_rl_config,
+            config,
             default_flow_style=False,
             sort_keys=False,
             allow_unicode=True,
@@ -584,12 +616,18 @@ class GRPOStage(BaseStage):
         ) or get_timeout_str(cluster_config, partition)
         hf_model = config.get("hf_checkpoint_path", config["model_name"])
 
+        # NRL_PYTHON_PREAMBLE resolves $NRL_PYTHON to the container venv python (with a dev fallback).
         from nvflow.lib.runtime import NRL_PYTHON_PREAMBLE
 
+        source_setup = (
+            "cd /opt/nemo-rl && "
+            if is_ray_backend(cluster_config)
+            else "export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/nemo-rl && "
+        )
         cmd = (
             f"{NRL_PYTHON_PREAMBLE} && "
             f"{config_snippet} && "
-            f"export PYTHONPATH=$PYTHONPATH:/nemo_run/code:/opt/nemo-rl && "
+            f"{source_setup}"
             f"echo 'Starting training' && "
             f"$NRL_PYTHON /opt/nemo-rl/examples/nemo_gym/run_grpo_nemo_gym.py "
             f"  --config {config_path}"
@@ -635,6 +673,135 @@ class GRPOStage(BaseStage):
 
         return cmd
 
+    @staticmethod
+    def _resolve_external_judge_url(config: dict[str, Any], judge_mode: str) -> str | None:
+        """Return the external judge base_url for external_vllm/openai modes, else None.
+
+        local_vllm has its own in-job health monitor; policy_as_judge has no
+        separate endpoint, so neither needs a pre-launch reachability gate.
+        """
+        jcfg = config.get("judge_vllm") or {}
+        if judge_mode == "external_vllm":
+            return jcfg.get("base_url")
+        if judge_mode == "openai":
+            return jcfg.get("openai_base_url")
+        return None
+
+    @staticmethod
+    def _external_judge_health_gate(base_url: str) -> str:
+        """One-shot reachability pre-gate for an external/BYO judge endpoint.
+
+        Curls the OpenAI-compatible ``{base_url}/models`` (falling back to the
+        server-root ``/health``) with a short bounded retry; aborts the job
+        non-zero if still unreachable so a dead/slow endpoint fails fast instead
+        of hanging the GRPO loop. Mirrors the local_vllm health monitor style.
+        """
+        url = base_url.rstrip("/")
+        models_url = f"{url}/models"
+        # /health lives at the server root, not under /v1.
+        health_url = (url[: -len("/v1")] if url.endswith("/v1") else url) + "/health"
+        return (
+            'echo "[nvflow] Probing external judge at ' + url + '..."; '
+            "n=0; while [ $n -lt 5 ]; do "
+            f'curl -sf "{models_url}" >/dev/null 2>&1 && break; '
+            f'curl -sf "{health_url}" >/dev/null 2>&1 && break; '
+            "n=$((n+1)); sleep 3; done; "
+            "[ $n -ge 5 ] && { "
+            'echo "[nvflow] external judge at ' + url + ' unreachable -- aborting"; '
+            "exit 1; }; "
+            'echo "[nvflow] external judge reachable" && '
+        )
+
+    # Mid-run watchdog tunables (overridable via config["judge_midrun_watchdog"]).
+    # Conservative defaults: only a sustained, unambiguous outage trips teardown,
+    # never a transient blip.  For external_vllm (self-hosted) this is safe; for
+    # openai/managed judges the watchdog is DISABLED by default (see
+    # _external_judge_midrun_watchdog) because elastic/rate-limited endpoints
+    # surface transient 429/503/connection resets that are NOT a dead judge.
+    _MIDRUN_POLL_SECS = 60
+    _MIDRUN_FAIL_THRESHOLD = 5
+
+    @staticmethod
+    def _external_judge_midrun_watchdog(
+        base_url: str,
+        judge_mode: str,
+        log_dir: str,
+        config: dict[str, Any] | None = None,
+    ) -> str:
+        """Background mid-run health watchdog for an external/BYO judge endpoint.
+
+        Builds on the one-shot ``_external_judge_health_gate`` (cold-start) to add
+        coverage for a judge that dies *mid-run*.  Polls ``{base_url}/health``
+        (falling back to ``/models``) every ``poll_secs``; after
+        ``fail_threshold`` *consecutive* hard failures it touches the
+        ``{log_dir}/ENDED`` sentinel, which the NeMo-RL/NeMo-Skills launch
+        template watches (``nemo_skills_sandbox_ray.sub.j2``) to trigger a
+        graceful Ray teardown -- so the GRPO loop ends with a checkpoint instead
+        of hanging or silently zeroing rewards.  Mirrors the ``local_vllm``
+        ``judge_health_check`` watchdog.
+
+        Policy differs by judge type:
+
+        - ``external_vllm`` (self-hosted / BYO vLLM): watchdog ENABLED.  We own
+          the endpoint, so sustained unreachability is unambiguously a dead judge.
+        - ``openai`` (managed / OpenAI-compatible API): watchdog DISABLED by
+          default.  Managed endpoints are elastic and rate-limited; transient
+          429/503/connection resets are expected and must NOT tear the run down.
+          The in-loop NeMo-Gym client already retries these; we rely on bounded
+          retry + the cold-start gate, and fail only on the run's own timeout.
+          An operator may opt in explicitly via
+          ``judge_midrun_watchdog.enable_for_openai: true`` (with a deliberately
+          long window) when pointing at a dedicated managed deployment.
+
+        Returns an empty string when the watchdog should not run (so callers can
+        unconditionally prepend it).
+        """
+        wcfg = (config or {}).get("judge_midrun_watchdog") or {}
+        if wcfg.get("enabled") is False:
+            return ""
+        if judge_mode == "openai" and not wcfg.get("enable_for_openai", False):
+            # Managed judge: do NOT continuously poll/teardown on transient errors.
+            return ""
+        if judge_mode not in ("external_vllm", "openai"):
+            return ""
+
+        poll_secs = int(wcfg.get("poll_secs", GRPOStage._MIDRUN_POLL_SECS))
+        # openai opt-in defaults to a much more conservative window than vLLM.
+        default_threshold = (
+            max(GRPOStage._MIDRUN_FAIL_THRESHOLD, 10)
+            if judge_mode == "openai"
+            else GRPOStage._MIDRUN_FAIL_THRESHOLD
+        )
+        fail_threshold = int(wcfg.get("fail_threshold", default_threshold))
+
+        url = base_url.rstrip("/")
+        models_url = f"{url}/models"
+        health_url = (url[: -len("/v1")] if url.endswith("/v1") else url) + "/health"
+
+        return (
+            "{ _nvflow_judge_watchdog() { "
+            f'echo "[nvflow] judge mid-run watchdog started (mode={judge_mode}, '
+            f'poll={poll_secs}s, threshold={fail_threshold})"; '
+            "F=0; "
+            "while true; do "
+            f"  sleep {poll_secs}; "
+            f'  if curl -sf "{health_url}" >/dev/null 2>&1 '
+            f'|| curl -sf "{models_url}" >/dev/null 2>&1; then '
+            "    F=0; "
+            "  else "
+            "    F=$((F+1)); "
+            f'    echo "[nvflow] judge health check failed ($F/{fail_threshold})"; '
+            f"    if [ $F -ge {fail_threshold} ]; then "
+            '      echo "[nvflow] judge unreachable for sustained window, '
+            'triggering graceful shutdown via ENDED sentinel..."; '
+            f"      touch {log_dir}/ENDED; "
+            "      return; "
+            "    fi; "
+            "  fi; "
+            "done; "
+            "}; _nvflow_judge_watchdog & } && "
+        )
+
     def _submit_grpo_job(
         self, prepared: PreparedGRPOConfig, cluster_config: dict, config: dict[str, Any]
     ) -> None:
@@ -642,7 +809,8 @@ class GRPOStage(BaseStage):
         from nemo_skills.pipeline.nemo_rl.grpo import parse_kwargs
         from nemo_skills.pipeline.utils.exp import add_task, get_exp, run_exp
 
-        config_snippet, config_path = self._config_shell_snippet(prepared)
+        use_ray_jobs = is_ray_backend(cluster_config)
+        config_snippet, config_path = self._config_shell_snippet(prepared, is_ray=use_ray_jobs)
 
         train_cmd = self._build_train_cmd(
             prepared, config, config_snippet, config_path, cluster_config
@@ -650,7 +818,6 @@ class GRPOStage(BaseStage):
         stage_kwargs = config.get("stage_kwargs", {})
         partition = stage_kwargs.get("partition")
         sbatch_kwargs = parse_kwargs(stage_kwargs.get("sbatch_kwargs", ""))
-
         dependent_jobs = config.get("dependent_jobs", 0)
 
         if prepared.judge_job_info is not None:
@@ -662,14 +829,44 @@ class GRPOStage(BaseStage):
                 partition,
                 sbatch_kwargs,
                 dependent_jobs,
+                use_ray_jobs,
             )
         else:
+            # External/BYO judge: gate on endpoint reachability before training
+            # so a dead/slow endpoint fails fast instead of silently hanging the
+            # GRPO loop. (local_vllm gets its own in-job health monitor above.)
+            # Then, for self-hosted external_vllm judges, also arm a background
+            # mid-run watchdog that touches the ENDED sentinel on a sustained
+            # outage so a judge that dies *mid-run* ends the run gracefully (with
+            # a checkpoint) instead of hanging/zeroing rewards.  Managed openai
+            # judges are intentionally NOT watch-dogged (transient 429/503 != dead).
+            judge_url = self._resolve_external_judge_url(config, prepared.judge_mode)
+            log_dir = f"{prepared.output_dir}/training-logs"
+            if use_ray_jobs and judge_url:
+                watchdog = self._external_judge_midrun_watchdog(
+                    judge_url, prepared.judge_mode, log_dir, config
+                )
+                # The unauthenticated /models + /health probe is suitable for
+                # a self-hosted vLLM endpoint, but managed OpenAI-compatible
+                # APIs commonly require auth and expose neither endpoint.  The
+                # NeMo-Gym client owns authenticated retries for that mode.
+                cold_gate = (
+                    self._external_judge_health_gate(judge_url)
+                    if prepared.judge_mode == "external_vllm"
+                    else ""
+                )
+                cmd = f"{cold_gate}{watchdog}{train_cmd}"
+            else:
+                # Preserve the established Slurm command exactly.  These
+                # service gates coordinate pre-created Ray Jobs and must never
+                # add curl/sleep work to an ordinary Slurm allocation.
+                cmd = train_cmd
             with get_exp(prepared.expname, cluster_config) as exp:
                 prev_task = None
                 for job_id in range(dependent_jobs + 1):
                     prev_task = add_task(
                         exp,
-                        cmd=train_cmd,
+                        cmd=cmd,
                         task_name=f"{prepared.expname}-grpo-{job_id}",
                         log_dir=f"{prepared.output_dir}/training-logs",
                         container=cluster_config["containers"]["nemo-rl"],
@@ -701,6 +898,7 @@ class GRPOStage(BaseStage):
         partition: str | None,
         sbatch_kwargs: dict | None,
         dependent_jobs: int = 0,
+        use_ray_jobs: bool = False,
     ) -> None:
         """Submit paired (judge + training) Slurm jobs.
 
@@ -798,6 +996,8 @@ class GRPOStage(BaseStage):
                 )
 
                 judge_sbatch = {"dependency_type": "after", "time": training_timeout}
+                if use_ray_jobs:
+                    judge_sbatch = None
                 add_task(
                     exp,
                     cmd=judge_cmd_i,
@@ -807,6 +1007,7 @@ class GRPOStage(BaseStage):
                     num_gpus=judge["num_gpus"],
                     num_nodes=judge["num_nodes"],
                     cluster_config=cluster_config,
+                    with_ray=use_ray_jobs,
                     task_dependencies=[prev_train_task],
                     sbatch_kwargs=judge_sbatch,
                     partition=partition,
@@ -818,7 +1019,8 @@ class GRPOStage(BaseStage):
                 f"{num_pairs} pair(s) submitted",
             )
             run_exp(exp, cluster_config, sequential=False)
-            self._submit_judge_cleanup(exp, prepared, cluster_config, num_pairs=num_pairs)
+            if not use_ray_jobs:
+                self._submit_judge_cleanup(exp, prepared, cluster_config, num_pairs=num_pairs)
 
     def _submit_judge_cleanup(
         self,
