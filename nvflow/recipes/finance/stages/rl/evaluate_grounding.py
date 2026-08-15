@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ from nvflow.grounding_verifier.embedder import DEFAULT_EMBEDDING_MODEL
 from nvflow.grounding_verifier.nli import DEFAULT_NLI_MODEL
 
 _SIDECAR_MODULE = "nvflow.recipes.finance.utils.rl.grounding_verifier"
+_FEATURE_GATE_MODULE = "nvflow.recipes.finance.utils.rl.grounding_feature_gate"
+_FEATURE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def build_evaluate_command(
@@ -55,6 +58,39 @@ def build_evaluate_command(
     if nli_revision:
         flags["nli_model_revision"] = nli_revision
     return build_python_cmd(_SIDECAR_MODULE, **flags)
+
+
+def build_feature_gate_command(
+    *,
+    feature: str,
+    environment: str,
+    rollouts_dir: str,
+    sidecars_dir: str,
+    output_file: str,
+    starting_seed: int,
+    required_runs: int,
+    expected_rows_per_run: int,
+    max_unavailable_rate: float,
+    require_offline: bool,
+    model_root: str,
+) -> str:
+    """Build the post-evaluation repeated-run acceptance command."""
+    from nvflow.lib.cli_cmd import build_python_cmd
+
+    return build_python_cmd(
+        _FEATURE_GATE_MODULE,
+        feature=feature,
+        environment=environment,
+        rollouts_dir=rollouts_dir,
+        sidecars_dir=sidecars_dir,
+        output_file=output_file,
+        starting_seed=starting_seed,
+        required_runs=required_runs,
+        expected_rows_per_run=expected_rows_per_run,
+        max_unavailable_rate=max_unavailable_rate,
+        require_offline=int(require_offline),
+        model_root=model_root,
+    )
 
 
 @StageRegistry.register(
@@ -95,10 +131,12 @@ class EvaluateGroundingStage(BaseStage):
             "nli_revision": config.get("nli_model_revision"),
             "evidence_excerpt_length": config.get("evidence_excerpt_length", 500),
         }
+        feature_gate = config.get("feature_gate")
 
         for env_name, _env_cfg in environments.items():
             env_rollouts = f"{rollouts_dir}/{env_name}/rollout"
             env_output = f"{output_dir}/{env_name}"
+            evaluation_jobs: list[str] = []
 
             for seed in seeds:
                 input_file = f"{env_rollouts}/output-rs{seed}.jsonl"
@@ -117,16 +155,46 @@ class EvaluateGroundingStage(BaseStage):
                     environment=env_name,
                     **evaluator_options,
                 )
+                evaluation_expname = f"{expname}-{env_name}-seed{seed}"
+                evaluation_jobs.append(evaluation_expname)
 
                 run_cmd(
                     ctx=wrap_arguments(cmd),
                     cluster=cluster,
                     log_dir=f"{env_output}/logs",
-                    expname=f"{expname}-{env_name}-seed{seed}",
+                    expname=evaluation_expname,
                     run_after=run_after,
                     container=container,
                     installation_command=installation_command,
                     num_gpus=config.get("num_gpus", 0),
+                )
+
+            if feature_gate:
+                feature = feature_gate["name"]
+                output_file = f"{env_output}/feature-gate-{feature}.json"
+                console.status(f"Submitting feature gate {feature} for {env_name}")
+                gate_cmd = build_feature_gate_command(
+                    feature=feature,
+                    environment=env_name,
+                    rollouts_dir=rollouts_dir,
+                    sidecars_dir=output_dir,
+                    output_file=output_file,
+                    starting_seed=starting_seed,
+                    required_runs=feature_gate["required_runs"],
+                    expected_rows_per_run=feature_gate["expected_rows_per_run"],
+                    max_unavailable_rate=feature_gate.get("max_unavailable_rate", 0.0),
+                    require_offline=feature_gate.get("require_offline", False),
+                    model_root=feature_gate.get("model_root", "/hf_models"),
+                )
+                run_cmd(
+                    ctx=wrap_arguments(gate_cmd),
+                    cluster=cluster,
+                    log_dir=f"{env_output}/logs",
+                    expname=f"{expname}-{env_name}",
+                    run_after=evaluation_jobs,
+                    container=container,
+                    installation_command=installation_command,
+                    num_gpus=0,
                 )
 
         console.success(
@@ -150,3 +218,25 @@ class EvaluateGroundingStage(BaseStage):
             raise ValueError("output_dir must not be inside rollouts_dir")
         if rollouts_dir.is_relative_to(output_dir):
             raise ValueError("rollouts_dir must not be inside output_dir")
+
+        feature_gate = config.get("feature_gate")
+        if not feature_gate:
+            return
+        feature = feature_gate.get("name", "")
+        if not _FEATURE_NAME_RE.fullmatch(feature):
+            raise ValueError("feature_gate.name must contain lowercase letters, digits, _ or -")
+        starting_seed = config.get("starting_seed", 0)
+        seeds = config.get(
+            "seeds",
+            list(range(starting_seed, starting_seed + config.get("num_random_seeds", 0))),
+        )
+        if feature_gate.get("required_runs") != len(seeds):
+            raise ValueError("feature_gate.required_runs must match the configured seed count")
+        expected_seeds = list(range(starting_seed, starting_seed + len(seeds)))
+        if list(seeds) != expected_seeds:
+            raise ValueError("feature_gate requires contiguous seeds starting at starting_seed")
+        if feature_gate.get("expected_rows_per_run", 0) < 1:
+            raise ValueError("feature_gate.expected_rows_per_run must be positive")
+        max_unavailable = feature_gate.get("max_unavailable_rate", 0.0)
+        if not 0 <= max_unavailable <= 1:
+            raise ValueError("feature_gate.max_unavailable_rate must be between 0 and 1")

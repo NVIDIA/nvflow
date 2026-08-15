@@ -56,6 +56,32 @@ pipeline_stages:
   - evaluate_grounding
 ```
 
+## Repeated feature acceptance
+
+Every GroundingVerifier feature can define a native acceptance profile with a
+fixed number of finance-agent seeds. The first profile covers the air-gapped
+model setup and runs one prepared `finance_sec_search` task three times:
+
+```bash
+uv run nflow run-all \
+  --config nvflow/recipes/finance/workflows/grpo/feature_gates/grounding_airgap.yaml \
+  -e finance_sec_search
+```
+
+Change `feature_runs` in the profile to increase the repetition count. The
+profile always regenerates its dedicated rollouts, evaluates every row, and
+then fails unless all expected files and completion markers exist, every
+sidecar matches its rollout fingerprint, the offline model contract holds, and
+the unavailable rate stays within the configured limit. Its compact summary is
+written beside the sidecars as `feature-gate-grounding_airgap.json`.
+
+This native profile requires the demo `prepare_data` output and SEC cache from
+the quick-start workflow. Ordinary CI tests validate the gate logic without a
+GPU; executing the finance agent itself requires the configured NVFlow Slurm
+environment. `allow` and `block` are both valid execution outcomes because an
+unsupported agent answer should be blocked. Detection efficacy remains covered
+by the pinned public-model benchmark below.
+
 ## Public-model benchmark
 
 The controlled benchmark uses eight FY2024 facts from Amazon, Alphabet, Meta,

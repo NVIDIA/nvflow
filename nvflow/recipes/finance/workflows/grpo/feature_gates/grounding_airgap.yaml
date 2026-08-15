@@ -1,0 +1,39 @@
+# Native finance acceptance profile for the GroundingVerifier air-gap contract.
+#
+# This profile deliberately stops after rollout verification. It reuses the
+# prepared demo finance_sec_search input and SEC cache, but writes rollouts and
+# sidecars to a dedicated feature-gates directory.
+#
+# Usage:
+#   uv run nflow run-all \
+#     --config nvflow/recipes/finance/workflows/grpo/feature_gates/grounding_airgap.yaml \
+#     -e finance_sec_search
+
+_base_: ../qwen3_4b.yaml
+
+feature_name: grounding_airgap
+feature_runs: 3
+model_output_dir: ${base_output_dir}/feature-gates/${feature_name}
+
+pipeline_stages:
+  - collect_rollouts
+  - evaluate_grounding
+
+stages:
+  collect_rollouts:
+    rollout:
+      max_num_samples: 1
+      num_samples_in_parallel: 1
+      num_chunks: 1
+      num_random_seeds: ${feature_runs}
+      starting_seed: 0
+      rerun_done: true
+
+  evaluate_grounding:
+    feature_gate:
+      name: ${feature_name}
+      required_runs: ${feature_runs}
+      expected_rows_per_run: 1
+      max_unavailable_rate: 0.0
+      require_offline: true
+      model_root: /hf_models
