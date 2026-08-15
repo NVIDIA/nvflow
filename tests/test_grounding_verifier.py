@@ -24,9 +24,8 @@ import pytest
 import yaml
 
 from nvflow.grounding_verifier.decomposer import RuleBasedDecomposer
-from nvflow.grounding_verifier.embedder import DEFAULT_EMBEDDING_MODEL
 from nvflow.grounding_verifier.evaluator import GroundingVerifierConfig, GroundingVerifierEvaluator
-from nvflow.grounding_verifier.nli import DEFAULT_NLI_MODEL, _normalize_nli_label
+from nvflow.grounding_verifier.nli import _normalize_nli_label
 from nvflow.grounding_verifier.router import EmbeddingSourceRouter
 from nvflow.grounding_verifier.types import EvidenceChunk, NLIResult
 from nvflow.recipes.finance.stages.rl.evaluate_grounding import (
@@ -377,15 +376,17 @@ def test_unknown_nli_label_is_rejected():
         _normalize_nli_label("LABEL_0")
 
 
-def test_workflow_is_opt_in_and_pins_models():
+def test_workflow_is_opt_in_and_uses_pinned_local_models():
     path = Path("nvflow/recipes/finance/workflows/grpo/base.yaml")
     data = yaml.safe_load(path.read_text())
     stage = data["stages"]["evaluate_grounding"]
     assert "evaluate_grounding" not in data["pipeline_stages"]
     assert stage["dependencies"] == ["collect_rollouts"]
     assert stage["num_gpus"] == 0
-    assert stage["routing_model"] == DEFAULT_EMBEDDING_MODEL
-    assert stage["nli_model"] == DEFAULT_NLI_MODEL
+    assert stage["routing_model"] == "/hf_models/sentence-transformers/all-MiniLM-L6-v2"
+    assert stage["nli_model"] == "/hf_models/MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+    assert stage["routing_model_revision"] == "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    assert stage["nli_model_revision"] == "6f5cf0a2b59cabb106aca4c287eed12e357e90eb"
     assert "# - evaluate_grounding" in path.read_text()
 
 

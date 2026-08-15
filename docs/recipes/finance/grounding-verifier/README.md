@@ -18,6 +18,32 @@ Both public model revisions can be pinned. Incomplete attribution or model
 failure produces `unavailable`; unsupported or conflicting claims are blocked.
 Evidence is limited to `retrieve_information` excerpts retained by the rollout.
 
+## Air-gapped setup
+
+NVFlow workers run with Hugging Face and Transformers offline flags enabled, so
+the two public models must be staged before submitting `evaluate_grounding`.
+From a connected host, download the pinned revisions into the cluster directory
+mounted as `/hf_models`:
+
+```bash
+uv run hf download sentence-transformers/all-MiniLM-L6-v2 \
+  config.json model.safetensors special_tokens_map.json \
+  tokenizer.json tokenizer_config.json vocab.txt \
+  --revision 1110a243fdf4706b3f48f1d95db1a4f5529b4d41 \
+  --local-dir /path/to/models/hf_models/sentence-transformers/all-MiniLM-L6-v2
+
+uv run hf download MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli \
+  added_tokens.json config.json model.safetensors special_tokens_map.json \
+  spm.model tokenizer.json tokenizer_config.json \
+  --revision 6f5cf0a2b59cabb106aca4c287eed12e357e90eb \
+  --local-dir /path/to/models/hf_models/MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli
+```
+
+The workflow loads `/hf_models/sentence-transformers/all-MiniLM-L6-v2` and
+`/hf_models/MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`. See [INSTALL.md →
+Download Models](../../../../INSTALL.md#download-models) for the mount
+configuration and general model-staging procedure.
+
 ## NVFlow integration
 
 Add `evaluate_grounding` after `collect_rollouts` in a finance GRPO workflow.

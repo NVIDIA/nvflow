@@ -559,9 +559,10 @@ stages:
     container: "nemo-skills"
     installation_command: "true"
     num_gpus: 0
-    # GroundingVerifier model IDs (lazy-loaded, CPU-only).
-    routing_model: "sentence-transformers/all-MiniLM-L6-v2"
-    nli_model: "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+    # Pinned GroundingVerifier models, pre-staged under the standard /hf_models mount.
+    # See docs/recipes/finance/grounding-verifier/README.md#air-gapped-setup.
+    routing_model: "/hf_models/sentence-transformers/all-MiniLM-L6-v2"
+    nli_model: "/hf_models/MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
     routing_model_revision: "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
     nli_model_revision: "6f5cf0a2b59cabb106aca4c287eed12e357e90eb"
     # Fixed conservative policy: contradiction, no_source, conflation, and
