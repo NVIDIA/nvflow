@@ -14,6 +14,10 @@
 #
 """Pytest configuration and fixtures."""
 
+import sys
+from types import ModuleType
+from typing import Any
+
 import pytest
 
 
@@ -45,3 +49,27 @@ def test_config():
             },
         },
     }
+
+
+@pytest.fixture
+def stub_nemo_pipeline_cli(monkeypatch):
+    """Provide the NeMo pipeline calls used by stage-submission unit tests."""
+    submitted: list[dict[str, Any]] = []
+    nemo_skills_module = ModuleType("nemo_skills")
+    pipeline_module = ModuleType("nemo_skills.pipeline")
+    pipeline_cli_module = ModuleType("nemo_skills.pipeline.cli")
+
+    def run_cmd(**kwargs: Any) -> None:
+        submitted.append(kwargs)
+
+    def wrap_arguments(command: str) -> str:
+        return command
+
+    nemo_skills_module.pipeline = pipeline_module
+    pipeline_module.cli = pipeline_cli_module
+    pipeline_cli_module.run_cmd = run_cmd
+    pipeline_cli_module.wrap_arguments = wrap_arguments
+    monkeypatch.setitem(sys.modules, "nemo_skills", nemo_skills_module)
+    monkeypatch.setitem(sys.modules, "nemo_skills.pipeline", pipeline_module)
+    monkeypatch.setitem(sys.modules, "nemo_skills.pipeline.cli", pipeline_cli_module)
+    return submitted

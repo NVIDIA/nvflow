@@ -445,10 +445,13 @@ def _refusal(
         for value in extract_protected_values(answer.explanation)
     ):
         return _verdict("block", "unsupported_refusal_detail", answer)
-    company = next(
-        (fact.chunk.sec_company_name for fact in facts if fact.ticker == tickers[0]),
-        None,
-    ) or tickers[0]
+    company = (
+        next(
+            (fact.chunk.sec_company_name for fact in facts if fact.ticker == tickers[0]),
+            None,
+        )
+        or tickers[0]
+    )
     premise = _premise(
         [fact for fact in facts if fact.ticker == tickers[0]],
         f"Using only the provided evidence cards, {metric.replace('_', ' ')} for "
@@ -475,9 +478,7 @@ def evaluate_finance_support(
     tickers = _query_tickers(question, evidence)
     operation = _operation(question)
     if answer.kind == "insufficient_evidence":
-        return _refusal(
-            answer, question, facts, tickers, operation, evidence, verify_semantics
-        )
+        return _refusal(answer, question, facts, tickers, operation, evidence, verify_semantics)
     if operation in {"yoy", "margin"}:
         return _calculation(operation, answer, question, facts, tickers, verify_semantics)
     if operation in {"highest", "lowest"}:

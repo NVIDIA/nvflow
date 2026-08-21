@@ -390,14 +390,10 @@ def test_workflow_is_opt_in_and_uses_pinned_local_models():
     assert "# - evaluate_grounding" in path.read_text()
 
 
-def test_stage_builds_one_cpu_job_per_environment_and_seed(monkeypatch):
-    import nemo_skills.pipeline.cli as pipeline_cli
-
+def test_stage_builds_one_cpu_job_per_environment_and_seed(monkeypatch, stub_nemo_pipeline_cli):
     import nvflow.lib.rl.helpers as helpers
 
-    submitted = []
-    monkeypatch.setattr(pipeline_cli, "wrap_arguments", lambda command: command)
-    monkeypatch.setattr(pipeline_cli, "run_cmd", lambda **kwargs: submitted.append(kwargs))
+    submitted = stub_nemo_pipeline_cli
     monkeypatch.setattr(helpers, "resolve_environments", lambda config: {"env_a": {}, "env_b": {}})
     EvaluateGroundingStage().execute(
         {

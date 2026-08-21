@@ -136,14 +136,10 @@ def test_airgap_profile_runs_three_finance_seeds():
     }
 
 
-def test_stage_submits_gate_after_every_seed(monkeypatch):
-    import nemo_skills.pipeline.cli as pipeline_cli
-
+def test_stage_submits_gate_after_every_seed(monkeypatch, stub_nemo_pipeline_cli):
     import nvflow.lib.rl.helpers as helpers
 
-    submitted = []
-    monkeypatch.setattr(pipeline_cli, "wrap_arguments", lambda command: command)
-    monkeypatch.setattr(pipeline_cli, "run_cmd", lambda **kwargs: submitted.append(kwargs))
+    submitted = stub_nemo_pipeline_cli
     monkeypatch.setattr(helpers, "resolve_environments", lambda config: {"finance_sec_search": {}})
     EvaluateGroundingStage().execute(
         {
