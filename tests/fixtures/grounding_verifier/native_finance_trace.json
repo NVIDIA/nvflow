@@ -1,0 +1,77 @@
+{
+  "fixture_provenance": {
+    "kind": "captured_nvflow_nemo_gym_finance_sec_search",
+    "source_sha256": "52a99d90119aa18d572c3eca4776c1edd4dff4c65bd79daffc2458b3d328d79b",
+    "transform": "request metadata and unused SEC search candidates removed; response.output calls, IDs, selected filing, retrieved excerpt, and final answer preserved"
+  },
+  "response": {
+    "id": "resp_945a7e810739460d8db39018d5f34120",
+    "model": "Qwen3-4B-Instruct-2507",
+    "output": [
+      {
+        "arguments": "{\n    \"ticker\": \"AAPL\",\n    \"form_types\": [\n      \"10-K\"\n    ],\n    \"end_date\": \"2022-12-31\"\n  }",
+        "call_id": "hRMEeuzCMPQ5uqOEl1UJJKBjeaIKNxPL",
+        "name": "sec_filing_search",
+        "type": "function_call",
+        "id": "hRMEeuzCMPQ5uqOEl1UJJKBjeaIKNxPL",
+        "status": "completed"
+      },
+      {
+        "call_id": "hRMEeuzCMPQ5uqOEl1UJJKBjeaIKNxPL",
+        "output": "{\"results\":\"[\\n  {\\n    \\\"ticker\\\": \\\"AAPL\\\",\\n    \\\"company_name\\\": \\\"Apple Inc.\\\",\\n    \\\"form\\\": \\\"10-K\\\",\\n    \\\"filing_date\\\": \\\"2022-10-28\\\",\\n    \\\"report_date\\\": \\\"2022-09-24\\\",\\n    \\\"accession_number\\\": \\\"0000320193-22-000108\\\",\\n    \\\"filing_url\\\": \\\"https://www.sec.gov/Archives/edgar/data/320193/000032019322000108/aapl-20220924.htm\\\"\\n  }\\n]\"}",
+        "type": "function_call_output",
+        "id": null,
+        "status": null
+      },
+      {
+        "arguments": "{\"url\": \"https://www.sec.gov/Archives/edgar/data/320193/000032019322000108/aapl-20220924.htm\", \"key\": \"apple_2022_10k\"}",
+        "call_id": "lS2UJkZ677jZY54zcaWF6W53QEkSr2aM",
+        "name": "parse_html_page",
+        "type": "function_call",
+        "id": "lS2UJkZ677jZY54zcaWF6W53QEkSr2aM",
+        "status": "completed"
+      },
+      {
+        "call_id": "lS2UJkZ677jZY54zcaWF6W53QEkSr2aM",
+        "output": "{\"results\":\"SUCCESS: The result has been saved to the data storage under the key: apple_2022_10k.\\nThe data_storage currently contains the following keys:\\napple_2022_10k\\n\"}",
+        "type": "function_call_output",
+        "id": null,
+        "status": null
+      },
+      {
+        "arguments": "{\"prompt\": \"Extract the number of full-time equivalent employees from the Human Capital section of the following filing, which is located between characters 30,000 and 45,000: {{apple_2022_10k}}\", \"input_character_ranges\": [{\"key\": \"apple_2022_10k\", \"start\": 30000, \"end\": 45000}]}",
+        "call_id": "CllsDJXWJnrC1vGmfqVxHQ1incAEUPYw",
+        "name": "retrieve_information",
+        "type": "function_call",
+        "id": "CllsDJXWJnrC1vGmfqVxHQ1incAEUPYw",
+        "status": "completed"
+      },
+      {
+        "call_id": "CllsDJXWJnrC1vGmfqVxHQ1incAEUPYw",
+        "output": "{\"results\":\"The number of full-time equivalent employees is **164,000**.  \\n\\nThis information is found in the \\\"Human Capital\\\" section of the document, specifically in the line:  \\n\\\"As of September 24, 2022, the Company had approximately 164,000 full-time equivalent employees.\\\"\"}",
+        "type": "function_call_output",
+        "id": null,
+        "status": null
+      },
+      {
+        "arguments": "{\"final_result\": \"As of September 24, 2022, Apple had 164,000 full-time equivalent employees.\"}",
+        "call_id": "7Io4gCsJQQyg4C7rPjHkpVwOxcMckcP2",
+        "name": "submit_final_result",
+        "type": "function_call",
+        "id": "7Io4gCsJQQyg4C7rPjHkpVwOxcMckcP2",
+        "status": "completed"
+      },
+      {
+        "call_id": "7Io4gCsJQQyg4C7rPjHkpVwOxcMckcP2",
+        "output": "{\"results\":\"{\\\"success\\\": true, \\\"result\\\": \\\"As of September 24, 2022, Apple had 164,000 full-time equivalent employees.\\\"}\"}",
+        "type": "function_call_output",
+        "id": null,
+        "status": null
+      }
+    ]
+  },
+  "expected_answer": "164,000",
+  "agent_ref": {
+    "name": "finance_agent"
+  }
+}

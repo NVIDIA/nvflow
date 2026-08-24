@@ -164,6 +164,8 @@ Detailed technical specifications for each stage:
 - **[SFT Stages](stages/sft.md)** - 6 stages
 - **[Eval Stages](stages/eval.md)** - 7 stages
 - **[GRPO Stages](stages/grpo.md)** - 10 stages
+- **[GroundingVerifier](grounding-verifier/README.md)** - Finance integration,
+  evaluation protocol, and held-out results
 
 ## Quick Command Reference
 

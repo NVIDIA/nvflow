@@ -98,6 +98,7 @@ pipeline_stages:
   - prepare_data                  # Step 4: Run ng_prepare_data (CPU)
   - prefetch_cache                # Pre-warm SEC metadata cache (CPU, optional, no step-N)
   - collect_rollouts              # Step 5: Rollout collection + reward profiling + filter
+  # - evaluate_grounding           # GroundingVerifier evaluation (opt-in; depends on collect_rollouts)
   # - compute_rewards               # Step 6: Re-judge rollouts with different judge (optional)
   - train_validation_split        # Step 7: Final train/val split on reward-filtered data
   - training                      # Step 8: GRPO training with NeMo-Gym environment
@@ -126,6 +127,7 @@ directories:
   cache-finance-sec-search: ${base_output_dir}/cache/finance_sec_search
   # Model-specific stages (rollouts, training, eval).
   step-5-collect-rollouts: ${model_output_dir}/step-5-collect-rollouts
+  grounding-verifier-eval: ${model_output_dir}/grounding-verifier-eval
   step-6-compute-rewards: ${model_output_dir}/step-6-compute-rewards
   step-7-train-validation-split: ${model_output_dir}/step-7-train-validation-split
   step-8-training: ${model_output_dir}/step-8-training
@@ -531,6 +533,48 @@ stages:
     # is empty.
     filter:
       min_reward_std: 1e-6  # remove questions with zero reward variance (no GRPO gradient)
+
+  # --------------------------------------------------------------------------
+  # GroundingVerifier Evaluation  [OPT-IN]
+  # --------------------------------------------------------------------------
+  # Runs GroundingVerifier on the merged rollout
+  # files produced by collect_rollouts.  Produces sidecar JSONL files
+  # (grounding-verifier-rs<seed>.jsonl) with per-row allow/block/unavailable
+  # verdicts, evidence metadata, and extraction errors.
+  #
+  # CPU-only: attribution/value checks plus all-MiniLM-L6-v2 routing and
+  # DeBERTa NLI scoring (both lazy-loaded).
+  # Depends only on collect_rollouts.  No downstream dependencies.
+  #
+  # Input:  ${directories.step-5-collect-rollouts}/{env}/rollout/output-rs<seed>.jsonl
+  # Marker:  ${directories.step-5-collect-rollouts}/{env}/rollout/output-rs<seed>.jsonl.done
+  # Output:  ${directories.grounding-verifier-eval}/{env}/grounding-verifier-rs<seed>.jsonl
+  # Marker:  ${directories.grounding-verifier-eval}/{env}/grounding-verifier-rs<seed>.jsonl.done
+  #
+  # To enable, uncomment "# - evaluate_grounding" in pipeline_stages above.
+  evaluate_grounding:
+    output_dir: ${directories.grounding-verifier-eval}
+    rollouts_dir: ${directories.step-5-collect-rollouts}
+    environments: ${environments}
+    container: "nemo-skills"
+    installation_command: "true"
+    num_gpus: 0
+    # Pinned GroundingVerifier models, pre-staged under the standard /hf_models mount.
+    # See docs/recipes/finance/grounding-verifier/README.md#air-gapped-setup.
+    routing_model: "/hf_models/sentence-transformers/all-MiniLM-L6-v2"
+    nli_model: "/hf_models/MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+    routing_model_revision: "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    nli_model_revision: "6f5cf0a2b59cabb106aca4c287eed12e357e90eb"
+    # Fixed conservative policy: contradiction, no_source, conflation, and
+    # entity/metric/value mismatch block. Neutral requires direct deterministic
+    # support to allow; model/trace errors are unavailable.
+    # No configurable block_on_* toggles — the policy is fixed by design.
+    evidence_excerpt_length: 500
+    # Seeds dynamically inherited from collect_rollouts rollout settings.
+    starting_seed: ${stages.collect_rollouts.rollout.starting_seed}
+    num_random_seeds: ${stages.collect_rollouts.rollout.num_random_seeds}
+    dependencies:
+      - collect_rollouts
 
   # --------------------------------------------------------------------------
   # Stage 6: Compute Rewards (re-judge rollouts)  [OPTIONAL]

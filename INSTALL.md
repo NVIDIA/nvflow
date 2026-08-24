@@ -167,6 +167,25 @@ uv run hf download google/gemma-3-4b-it \
   --local-dir /path/to/models/hf_models/google/gemma-3-4b-it
 ```
 
+If you enable the finance **GroundingVerifier** stage, pre-stage its two public
+models at the pinned revisions used by the workflow:
+
+```bash
+# Claim-to-evidence routing model
+uv run hf download sentence-transformers/all-MiniLM-L6-v2 \
+  config.json model.safetensors special_tokens_map.json \
+  tokenizer.json tokenizer_config.json vocab.txt \
+  --revision 1110a243fdf4706b3f48f1d95db1a4f5529b4d41 \
+  --local-dir /path/to/models/hf_models/sentence-transformers/all-MiniLM-L6-v2
+
+# Natural-language-inference model
+uv run hf download MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli \
+  added_tokens.json config.json model.safetensors special_tokens_map.json \
+  spm.model tokenizer.json tokenizer_config.json \
+  --revision 6f5cf0a2b59cabb106aca4c287eed12e357e90eb \
+  --local-dir /path/to/models/hf_models/MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli
+```
+
 **Storage location:** Models should go in your mounted HuggingFace models directory (see cluster config `mounts` section).
 
 ### Mount Path in Cluster Config
@@ -191,13 +210,15 @@ stage_kwargs:
 <details>
 <summary><strong>Which models does each workflow need?</strong></summary>
 
-| Model | Demo SDG | Demo SFT | Demo GRPO | Demo Eval | Production GRPO |
-|-------|:--------:|:--------:|:---------:|:---------:|:---------------:|
-| `Qwen/Qwen3-4B` | | ✓ | ✓ | ✓ | |
-| `openai/gpt-oss-20b` | ✓ | | | ✓ | |
-| `google/gemma-3-4b-it` | | | | ✓ | |
-| `openai/gpt-oss-120b` | | | ✓ | | ✓ |
-| `Qwen/Qwen3-30B-A3B` | | | | | ✓ |
+| Model | Demo SDG | Demo SFT | Demo GRPO | Demo Eval | Production GRPO | GroundingVerifier |
+|-------|:--------:|:--------:|:---------:|:---------:|:---------------:|:-----------------:|
+| `Qwen/Qwen3-4B` | | ✓ | ✓ | ✓ | | |
+| `openai/gpt-oss-20b` | ✓ | | | ✓ | | |
+| `google/gemma-3-4b-it` | | | | ✓ | | |
+| `openai/gpt-oss-120b` | | | ✓ | | ✓ | |
+| `Qwen/Qwen3-30B-A3B` | | | | | ✓ | |
+| `sentence-transformers/all-MiniLM-L6-v2` | | | | | | ✓ |
+| `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` | | | | | | ✓ |
 
 **Tip:** Download commonly used models once and reuse across all workflows.
 </details>
