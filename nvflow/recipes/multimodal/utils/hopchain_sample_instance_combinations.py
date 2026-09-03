@@ -605,7 +605,8 @@ def main() -> None:
                 )
                 if was_capped:
                     capped_images += 1
-                    category_balanced_images += 1
+                    if args.selection_strategy.startswith("balanced_by_category"):
+                        category_balanced_images += 1
                 instances, deduplicated_count = deduplicate_instances_by_bbox_iou(
                     instances,
                     iou_threshold=args.iou_dedup_threshold,
