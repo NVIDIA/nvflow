@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 
 from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.lib.cli_cmd import build_python_cmd
 
 
 @StageRegistry.register(recipe="finance", workflow="download-sec", stage="sap-500")
@@ -29,6 +30,20 @@ class DownloadSecFilingsStage(BaseStage):
     """Download SEC filings (10-K, 10-Q, 8-K) from EDGAR and extract sections."""
 
     workflow = "download-sec"
+
+    def validate_config(self, config: dict[str, Any]) -> None:
+        """Validate that required configuration fields are present."""
+        for field in ("output_dir", "sec_identity_email", "sec_identity_company"):
+            if field not in config:
+                raise ValueError(f"'{field}' is required in download_sec_filings config")
+
+        if "config" not in config:
+            for field in ("tickers", "start_year", "end_year"):
+                if field not in config:
+                    raise ValueError(
+                        f"'{field}' is required in download_sec_filings config "
+                        "(or provide 'config' pointing to a filings config file)"
+                    )
 
     def execute(
         self,
@@ -73,17 +88,19 @@ class DownloadSecFilingsStage(BaseStage):
         forms_str = " ".join(forms) if isinstance(forms, list) else forms
         log_dir = Path(output_dir) / "download-logs"
 
+        rendered_cmd = build_python_cmd(
+            "nvflow.recipes.finance.utils.download.download_sec_filings",
+            tickers=tickers_str,
+            forms=forms_str,
+            start_year=start_year,
+            end_year=end_year,
+            output_dir=output_dir,
+            sec_email=sec_identity_email,
+            sec_company=sec_identity_company,
+        )
+
         run_cmd(
-            ctx=wrap_arguments(
-                f"python -m nvflow.recipes.finance.utils.download.download_sec_filings "
-                f'--tickers "{tickers_str}" '
-                f'--forms "{forms_str}" '
-                f"--start_year {start_year} "
-                f"--end_year {end_year} "
-                f"--output_dir {output_dir} "
-                f'--sec_email "{sec_identity_email}" '
-                f'--sec_company "{sec_identity_company}"'
-            ),
+            ctx=wrap_arguments(rendered_cmd),
             cluster=cluster,
             **config.get("stage_kwargs", {}),
             expname=expname,
