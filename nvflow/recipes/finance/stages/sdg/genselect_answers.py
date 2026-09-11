@@ -22,11 +22,6 @@ from nvflow.core import BaseStage, StageRegistry, console
 
 
 @StageRegistry.register(recipe="finance", workflow="template_based_sdg", stage="genselect_answers")
-@StageRegistry.register(
-    recipe="finance",
-    workflow="document_grounded_sdg",
-    stage="genselect_answers",
-)
 class GenselectAnswersStage(BaseStage):
     """Generate and select best answers using parallel thinking."""
 
