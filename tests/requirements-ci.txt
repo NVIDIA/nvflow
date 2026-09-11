@@ -16,3 +16,4 @@ rich
 orjson
 pandas
 pyarrow
+typer
