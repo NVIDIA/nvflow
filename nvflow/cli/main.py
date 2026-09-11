@@ -165,7 +165,7 @@ def list_stages(
         None, "--config", "-c", help="Optional: Show only stages defined in this config file"
     ),
     recipe: str | None = typer.Option(
-        None, "--recipe", "-r", help="Optional: Filter by recipe (finance, retail, healthcare)"
+        None, "--recipe", "-r", help="Optional: Filter by recipe (finance, example, multimodal)"
     ),
     workflow: str | None = typer.Option(
         None, "--workflow", "-w", help="Optional: Filter by workflow (training_sft, sdg_basic)"

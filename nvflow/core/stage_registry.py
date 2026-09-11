@@ -40,7 +40,7 @@ class StageRegistry:
     """Hierarchical registry for workflow stages.
 
     Stages are organized in a three-level hierarchy:
-    - Recipe (e.g., "finance", "retail")
+    - Recipe (e.g., "finance", "multimodal")
     - Workflow (e.g., "training_sft", "sdg_basic")
     - Stage (e.g., "baseline", "generate_qa")
 
@@ -70,7 +70,7 @@ class StageRegistry:
         """Decorator to register a stage class in the hierarchy.
 
         Args:
-            recipe: Recipe name (e.g., "finance", "retail")
+            recipe: Recipe name (e.g., "finance", "multimodal")
             workflow: Workflow name within recipe (e.g., "training_sft", "sdg_basic")
             stage: Stage name within workflow (e.g., "baseline", "generate_qa")
 
