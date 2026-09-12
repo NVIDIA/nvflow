@@ -168,6 +168,13 @@ class ValidateQuestionsStage(BaseStage):
 
             console.success(f"validate_questions submitted for '{env_name}' -> {final_file}")
 
+    @classmethod
+    def submitted_expnames(cls, config: dict[str, Any], expname: str) -> list[str]:
+        """Get each environment's phase-2 experiment, which runs after phase 1."""
+        from nvflow.lib.rl.helpers import resolve_environments
+
+        return [f"{expname}-{env_name}-phase2-llm" for env_name in resolve_environments(config)]
+
     def validate_config(self, config: dict[str, Any]) -> None:
         """Basic sanity checks before Slurm submission."""
         for field in ("output_dir", "source_data", "prompt_config", "environments"):

@@ -323,10 +323,7 @@ class WorkflowRunner:
         """
         section(f"Running Stage: {stage_name}")
 
-        # Get stage configuration and inject environment filter
-        stage_config = {**self.config["stages"][stage_name]}
-        if environment is not None:
-            stage_config["_environment"] = environment
+        stage_config = self._stage_config(stage_name, environment)
 
         # Get stage class from hierarchical registry with explicit context
         if not StageRegistry.has(self.recipe, self.workflow_name, stage_name):
@@ -363,6 +360,13 @@ class WorkflowRunner:
 
         success(f"Stage '{stage_name}' completed")
 
+    def _stage_config(self, stage_name: str, environment: list[str] | None) -> dict:
+        """Return the config passed to a stage, including the environment filter."""
+        stage_config = {**self.config["stages"][stage_name]}
+        if environment is not None:
+            stage_config["_environment"] = environment
+        return stage_config
+
     def _get_expname(self, stage_name: str, stage_config: dict) -> str:
         """Generate clean experiment name for a stage.
 
@@ -395,44 +399,20 @@ class WorkflowRunner:
     ) -> list[str] | None:
         """Build ``run_after`` experiment names for Slurm dependency tracking.
 
-        Per-environment stages submit jobs with ``{expname}-{env_name}``
-        suffixes.  This method expands dependency names to match those
-        suffixed experiment names so that ``nemo-run`` can resolve the
-        correct Slurm job handles.
-
-        For stages without ``environments``, the base experiment name is
-        used (unchanged from previous behaviour).
+        Each dependency stage reports the experiments it submits through
+        :meth:`BaseStage.submitted_expnames`, given the same config and
+        experiment name that :meth:`_run_stage` passes to its ``execute()``,
+        so that ``nemo-run`` can resolve the correct Slurm job handles.
         """
         if not dependencies:
             return None
         names: list[str] = []
         for dep in dependencies:
-            dep_config = self.config["stages"][dep]
-            base = self._get_expname(dep, dep_config)
-            if dep_config.get("environments"):
-                env_names = self._resolve_env_names(dep_config, environment)
-                names.extend(f"{base}-{env}" for env in env_names)
-            else:
-                names.append(base)
+            dep_config = self._stage_config(dep, environment)
+            dep_expname = self._get_expname(dep, dep_config)
+            dep_class = StageRegistry.get(self.recipe, self.workflow_name, dep)
+            names.extend(dep_class.submitted_expnames(dep_config, dep_expname))
         return names or None
-
-    @staticmethod
-    def _resolve_env_names(
-        stage_config: dict,
-        environment: list[str] | None,
-    ) -> list[str]:
-        """Return the environment names a stage will iterate over.
-
-        Mirrors the filtering logic of ``resolve_environments()`` in
-        ``nvflow.lib.rl.helpers`` but operates on the raw config dict
-        so the core module stays independent of recipe-specific code.
-        """
-        envs = stage_config.get("environments", {})
-        if not envs:
-            return []
-        if environment:
-            return [e for e in environment if e in envs]
-        return list(envs.keys())
 
     def _validate_stages(self, stages_to_run: list[str], all_stages: list[str]) -> None:
         """Validate that requested stages exist and are registered.

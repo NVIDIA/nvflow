@@ -98,3 +98,40 @@ class BaseStage(ABC):
             List of stage names this stage depends on
         """
         return config.get("dependencies", [])
+
+    @classmethod
+    def submitted_expnames(cls, config: dict[str, Any], expname: str) -> list[str]:
+        """Get the experiment names that dependent stages must wait for.
+
+        WorkflowRunner calls this on the stage class, without instantiating it,
+        and passes the names as ``run_after`` to every stage that lists this
+        stage in ``dependencies``. Each returned name must identify an
+        experiment that :meth:`execute` submits for the same ``config`` and
+        ``expname``. If :meth:`execute` chains experiments, return the
+        terminal experiment of each chain.
+
+        The default follows the convention most stages use: one experiment
+        named ``expname``, or, when ``config`` defines ``environments``, one
+        experiment per selected environment named ``f"{expname}-{env}"``.
+        Override it, as a classmethod, when :meth:`execute` names its
+        experiments differently.
+
+        Args:
+            config: Stage configuration as passed to :meth:`execute`, including
+                the ``_environment`` filter added by the runner
+            expname: Experiment name passed to :meth:`execute`
+
+        Returns:
+            Experiment names for dependent stages to use as ``run_after``
+        """
+        environments = config.get("environments")
+        if not environments:
+            return [expname]
+        selected = config.get("_environment")
+        if not selected:
+            env_names = list(environments)
+        else:
+            if isinstance(selected, str):
+                selected = [selected]
+            env_names = [env for env in selected if env in environments]
+        return [f"{expname}-{env}" for env in env_names]

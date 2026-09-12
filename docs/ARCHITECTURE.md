@@ -140,6 +140,7 @@ classDiagram
         +execute(config, cluster, expname, run_after)*
         +validate_config(config)
         +get_dependencies(config)
+        +submitted_expnames(config, expname)$
     }
 
     class StageRegistry {
@@ -392,7 +393,7 @@ graph LR
 
 **Dependency Handling:**
 1. WorkflowRunner reads `dependencies` from stage config
-2. Generates experiment names for all dependencies
+2. Asks each dependency stage for the experiment names it submits (`BaseStage.submitted_expnames`)
 3. Passes as `run_after` parameter to dependent stage
 4. Slurm uses job dependencies to ensure correct execution order
 

@@ -245,6 +245,8 @@ See the `example` recipe for a complete working example. Key steps:
    ```
 4. **Run it** with `nflow run` or `nflow run-all`
 
+**Dependencies between stages:** When a stage lists yours in `dependencies`, the runner passes it your stage's experiment names as `run_after`. By default these are `expname`, or `{expname}-{env}` for each selected environment when the stage config defines `environments`. If `execute()` submits experiments under other names, override the `submitted_expnames(config, expname)` classmethod to return the ones dependent stages should wait for (see `nvflow/recipes/finance/stages/rl/validate_questions.py`).
+
 **Terminal output in stages:** Use the `console` helpers for consistent, readable logs when your stage runs (e.g. `console.status()`, `console.detail()`, `console.success()`). See **[Console UI guide](docs/development/console-ui.md)**.
 
 Example: `nvflow/recipes/example/stages/sdg/generate_answer.py`
