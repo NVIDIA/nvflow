@@ -24,10 +24,8 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
-# Editor/local backups. Scope to cluster-config backups only -- a bare *.bak*
-# would also drop TRACKED dataset files (e.g. datasets/finance_agent/*.bak),
-# which then show up as phantom deletions and mark the baked tree dirty.
-cluster_configs/*.bak*
+# Editor/local backups.
+*.bak*
 *~
 
 # Secrets / personal cluster config (gitignored; must never be baked into an image)
