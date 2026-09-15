@@ -66,15 +66,24 @@ def resolve_gpu_layout(
         Resolved :class:`GpuLayout`.
 
     Raises:
-        ValueError: If ``total_gpus`` is not evenly divisible by
-            ``gpus_per_node``.
+        ValueError: If ``gpus_per_node`` is not a positive integer, if
+            ``total_gpus`` is not a positive integer evenly divisible by
+            ``gpus_per_node``, or if the legacy ``num_nodes``/``num_gpus``
+            fields are not positive integers.
     """
     gpus_per_node = _DEFAULT_GPUS_PER_NODE
     if cluster_config:
         gpus_per_node = cluster_config.get("gpus_per_node", _DEFAULT_GPUS_PER_NODE)
+    if gpus_per_node <= 0:
+        raise ValueError(
+            f"gpus_per_node ({gpus_per_node}) must be a positive integer.  "
+            f"Check the gpus_per_node value in the cluster config."
+        )
 
     if "total_gpus" in config:
         total = config["total_gpus"]
+        if total <= 0:
+            raise ValueError(f"total_gpus ({total}) must be a positive integer.")
         if total % gpus_per_node != 0:
             raise ValueError(
                 f"total_gpus ({total}) is not evenly divisible by "
@@ -86,7 +95,11 @@ def resolve_gpu_layout(
 
     if "num_nodes" in config:
         num_nodes = config["num_nodes"]
+        if num_nodes <= 0:
+            raise ValueError(f"num_nodes ({num_nodes}) must be a positive integer.")
         num_gpus = config.get("num_gpus", gpus_per_node)
+        if num_gpus <= 0:
+            raise ValueError(f"num_gpus ({num_gpus}) must be a positive integer.")
         LOG.debug(
             "Using legacy num_nodes=%d / num_gpus=%d (not portable across clusters)",
             num_nodes,
