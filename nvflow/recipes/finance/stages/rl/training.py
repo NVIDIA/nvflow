@@ -1018,6 +1018,17 @@ class GRPOStage(BaseStage):
             self._display_grpo_summary(prepared, combined_config)
             self._submit_grpo_job(prepared, cluster_config, combined_config)
 
+    @classmethod
+    def submitted_expnames(cls, config: dict[str, Any], expname: str) -> list[str]:
+        """Get the single training experiment submitted by :meth:`execute`.
+
+        One environment trains as ``{expname}-{env}``; several environments
+        train together as ``{expname}-{env1}+{env2}+...``.
+        """
+        from nvflow.lib.rl.helpers import resolve_environments
+
+        return [f"{expname}-{'+'.join(resolve_environments(config))}"]
+
     def validate_config(self, config: dict[str, Any]) -> None:
         """Validate configuration."""
         required = ["output_dir", "model_name", "data_source_dir"]
