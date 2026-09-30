@@ -38,6 +38,7 @@ test logic compact while preserving full byte fidelity.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,7 @@ pytest.importorskip("nemo_skills")  # heavy core dep, absent in the lightweight 
 
 from nvflow.lib.rl.helpers import LauncherFS
 from nvflow.lib.rl.rollout import (
+    _build_chunk_slice_segment,
     _build_client_cmd,
     _build_merge_cmd,
     _build_port_read_preamble,
@@ -832,3 +834,114 @@ def test_get_remaining_jobs_mixed_state(tmp_path: Path) -> None:
 
     remaining = _get_remaining_jobs(LauncherFS({}), str(tmp_path), seeds, chunks, rerun_done=False)
     assert remaining == [(1, 1)]
+
+
+# ===========================================================================
+# _build_chunk_slice_segment — runtime chunk-boundary arithmetic
+# ===========================================================================
+#
+# These tests actually execute the rendered bash against real files rather
+# than snapshotting the text, because the bug class here is arithmetic, not
+# formatting.  The previous ceiling-division formula gave
+# EFFECTIVE=4/NUM_CHUNKS=3 a last chunk with START_LINE(5) > END_LINE(4) --
+# a silently empty chunk file -- which then tripped the merge step's own
+# "chunk .done exists but file missing/empty" safety check (see the
+# _build_merge_cmd tests above) as if rollout collection had failed
+# upstream, when nothing had actually gone wrong.  A text snapshot would
+# not catch a wrong split point; only running the arithmetic does.
+
+
+def _run_chunk_slice(
+    tmp_path: Path,
+    total_lines: int,
+    num_chunks: int,
+    chunk_id: int,
+    max_num_samples: int = 0,
+) -> list[str]:
+    """Execute the rendered chunk-slice segment against a real input file.
+
+    Returns the lines (no trailing newline) written to this chunk's
+    output file, or ``[]`` if no chunk file was produced (either the
+    ``NUM_CHUNKS <= 1`` no-op path, or -- pre-fix -- an empty chunk).
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    input_data = tmp_path / "input.jsonl"
+    input_data.write_text("".join(f"line{i}\n" for i in range(1, total_lines + 1)))
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    script = (
+        "set -eu\n"
+        f'INPUT_DATA="{input_data}"\n'
+        f'OUTPUT_DIR="{output_dir}"\n'
+        f"NUM_CHUNKS={num_chunks}\n"
+        f"CHUNK_ID={chunk_id}\n"
+    ) + _build_chunk_slice_segment(max_num_samples)
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, f"chunk-slice script failed: {result.stderr}"
+
+    chunk_file = output_dir / f"chunk_input_chunk{chunk_id}.jsonl"
+    if not chunk_file.exists():
+        return []
+    return chunk_file.read_text().splitlines()
+
+
+def test_chunk_slice_no_gaps_or_overlaps_across_shapes(tmp_path: Path) -> None:
+    """For every (total_lines, num_chunks) with 2 <= num_chunks <= total_lines,
+    concatenating all chunks in order must reproduce the input exactly --
+    every line appears, in order, in exactly one chunk.
+    """
+    for total_lines in range(2, 13):
+        for num_chunks in range(2, total_lines + 1):
+            all_lines: list[str] = []
+            for chunk_id in range(num_chunks):
+                case_dir = tmp_path / f"n{total_lines}_k{num_chunks}_c{chunk_id}"
+                all_lines.extend(_run_chunk_slice(case_dir, total_lines, num_chunks, chunk_id))
+            assert all_lines == [f"line{i}" for i in range(1, total_lines + 1)], (
+                f"total_lines={total_lines}, num_chunks={num_chunks}"
+            )
+
+
+def test_chunk_slice_no_chunk_is_empty_when_num_chunks_le_total_lines(tmp_path: Path) -> None:
+    """Regression test for the ceiling-division bug: whenever there are at
+    least as many samples as chunks, every chunk must get at least one
+    line.  Previously e.g. total_lines=4/num_chunks=3 left the last
+    chunk empty, and that empty chunk was then reported by the merge
+    step as an upstream rollout failure.
+    """
+    for total_lines in range(2, 13):
+        for num_chunks in range(2, total_lines + 1):
+            for chunk_id in range(num_chunks):
+                case_dir = tmp_path / f"n{total_lines}_k{num_chunks}_c{chunk_id}"
+                lines = _run_chunk_slice(case_dir, total_lines, num_chunks, chunk_id)
+                assert lines, (
+                    f"chunk {chunk_id}/{num_chunks} was empty for total_lines={total_lines} "
+                    "-- this is the previously-fixed ceiling-division bug"
+                )
+
+
+def test_chunk_slice_previously_buggy_case_four_lines_three_chunks(tmp_path: Path) -> None:
+    """Exact repro of the bug found in review: EFFECTIVE=4, NUM_CHUNKS=3
+    used to give chunk 2 START_LINE(5) > END_LINE(4), producing a 0-byte
+    chunk file.  Balanced-remainder division instead gives chunk sizes
+    [2, 1, 1] (the first EFFECTIVE % NUM_CHUNKS chunks get one extra line).
+    """
+    assert _run_chunk_slice(tmp_path / "c0", 4, 3, 0) == ["line1", "line2"]
+    assert _run_chunk_slice(tmp_path / "c1", 4, 3, 1) == ["line3"]
+    assert _run_chunk_slice(tmp_path / "c2", 4, 3, 2) == ["line4"]
+
+
+def test_chunk_slice_single_chunk_is_a_noop(tmp_path: Path) -> None:
+    """``NUM_CHUNKS <= 1`` must skip slicing entirely (no chunk file is
+    created) -- this behavior is unchanged by the arithmetic fix.
+    """
+    assert _run_chunk_slice(tmp_path, 5, 1, 0) == []
+
+
+def test_chunk_slice_respects_max_num_samples_clamp(tmp_path: Path) -> None:
+    """``max_num_samples`` still clamps EFFECTIVE before chunking -- lines
+    beyond the clamp must not appear in any chunk.
+    """
+    assert _run_chunk_slice(tmp_path / "c0", 10, 2, 0, max_num_samples=4) == ["line1", "line2"]
+    assert _run_chunk_slice(tmp_path / "c1", 10, 2, 1, max_num_samples=4) == ["line3", "line4"]

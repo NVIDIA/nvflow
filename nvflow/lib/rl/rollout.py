@@ -580,6 +580,22 @@ def _build_chunk_slice_segment(max_num_samples: int) -> str:
     No physical pre-splitting on the launcher — keeps the launcher
     lightweight and filesystem-agnostic.  The ``if [ $NUM_CHUNKS -gt 1 ]``
     runtime guard suppresses slicing in the single-chunk case.
+
+    Chunk boundaries use balanced-remainder division (the first
+    ``EFFECTIVE % NUM_CHUNKS`` chunks get one extra line) rather than
+    ceiling division.  Ceiling division overshoots ``EFFECTIVE`` by up
+    to a full chunk once ``NUM_CHUNKS * ceil(EFFECTIVE / NUM_CHUNKS)``
+    exceeds it, which silently produces an empty trailing chunk (or
+    several) any time ``EFFECTIVE`` doesn't divide evenly by
+    ``NUM_CHUNKS`` -- a legitimately non-empty chunk range then reads
+    as a merge failure downstream, since the merge step correctly
+    treats a missing/empty chunk file as an upstream error.  Balanced
+    division covers exactly ``1..EFFECTIVE`` with no gaps or overlaps
+    for every ``CHUNK_ID`` in ``[0, NUM_CHUNKS)`` whenever
+    ``NUM_CHUNKS <= EFFECTIVE``; a chunk is only empty when
+    ``CHUNK_ID >= EFFECTIVE`` (more chunks requested than samples
+    exist), which is a real misconfiguration the merge check should
+    still catch.
     """
     return (
         'CHUNK_INPUT=""\n'
@@ -592,10 +608,16 @@ def _build_chunk_slice_segment(max_num_samples: int) -> str:
         "    if [ $MAX_SAMPLES -gt 0 ] && [ $MAX_SAMPLES -lt $TOTAL_LINES ]; then\n"
         "        EFFECTIVE=$MAX_SAMPLES\n"
         "    fi\n"
-        "    CHUNK_SIZE=$(( (EFFECTIVE + NUM_CHUNKS - 1) / NUM_CHUNKS ))\n"
-        "    START_LINE=$(( CHUNK_ID * CHUNK_SIZE + 1 ))\n"
-        "    END_LINE=$(( (CHUNK_ID + 1) * CHUNK_SIZE ))\n"
-        "    [ $END_LINE -gt $EFFECTIVE ] && END_LINE=$EFFECTIVE\n"
+        "    BASE_SIZE=$(( EFFECTIVE / NUM_CHUNKS ))\n"
+        "    REMAINDER=$(( EFFECTIVE % NUM_CHUNKS ))\n"
+        "    if [ $CHUNK_ID -lt $REMAINDER ]; then\n"
+        "        CHUNK_SIZE=$(( BASE_SIZE + 1 ))\n"
+        "        START_LINE=$(( CHUNK_ID * CHUNK_SIZE + 1 ))\n"
+        "    else\n"
+        "        CHUNK_SIZE=$BASE_SIZE\n"
+        "        START_LINE=$(( REMAINDER * (BASE_SIZE + 1) + (CHUNK_ID - REMAINDER) * BASE_SIZE + 1 ))\n"
+        "    fi\n"
+        "    END_LINE=$(( START_LINE + CHUNK_SIZE - 1 ))\n"
         '    CHUNK_INPUT="$OUTPUT_DIR/chunk_input_chunk$CHUNK_ID.jsonl"\n'
         '    head -n $END_LINE "$INPUT_DATA" | tail -n +$START_LINE > "$CHUNK_INPUT"\n'
         '    echo "  Chunk $CHUNK_ID/$NUM_CHUNKS: lines $START_LINE-$END_LINE ($((END_LINE - START_LINE + 1)) samples)"\n'

@@ -103,10 +103,16 @@ if [ $NUM_CHUNKS -gt 1 ]; then
     if [ $MAX_SAMPLES -gt 0 ] && [ $MAX_SAMPLES -lt $TOTAL_LINES ]; then
         EFFECTIVE=$MAX_SAMPLES
     fi
-    CHUNK_SIZE=$(( (EFFECTIVE + NUM_CHUNKS - 1) / NUM_CHUNKS ))
-    START_LINE=$(( CHUNK_ID * CHUNK_SIZE + 1 ))
-    END_LINE=$(( (CHUNK_ID + 1) * CHUNK_SIZE ))
-    [ $END_LINE -gt $EFFECTIVE ] && END_LINE=$EFFECTIVE
+    BASE_SIZE=$(( EFFECTIVE / NUM_CHUNKS ))
+    REMAINDER=$(( EFFECTIVE % NUM_CHUNKS ))
+    if [ $CHUNK_ID -lt $REMAINDER ]; then
+        CHUNK_SIZE=$(( BASE_SIZE + 1 ))
+        START_LINE=$(( CHUNK_ID * CHUNK_SIZE + 1 ))
+    else
+        CHUNK_SIZE=$BASE_SIZE
+        START_LINE=$(( REMAINDER * (BASE_SIZE + 1) + (CHUNK_ID - REMAINDER) * BASE_SIZE + 1 ))
+    fi
+    END_LINE=$(( START_LINE + CHUNK_SIZE - 1 ))
     CHUNK_INPUT="$OUTPUT_DIR/chunk_input_chunk$CHUNK_ID.jsonl"
     head -n $END_LINE "$INPUT_DATA" | tail -n +$START_LINE > "$CHUNK_INPUT"
     echo "  Chunk $CHUNK_ID/$NUM_CHUNKS: lines $START_LINE-$END_LINE ($((END_LINE - START_LINE + 1)) samples)"
