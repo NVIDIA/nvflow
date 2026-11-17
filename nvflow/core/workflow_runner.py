@@ -244,6 +244,15 @@ class WorkflowRunner:
         # Validate that requested stages exist in config
         self._validate_stages(stages_to_run, all_stages)
 
+        # Submit requested stages in pipeline_stages order (the order
+        # ``run-all`` uses), not CLI argument order.  A stage's run_after
+        # only resolves to Slurm job handles for experiments that were
+        # already submitted, so submitting a stage before its dependency
+        # silently drops the dependency.  This also drops repeated names.
+        if stages:
+            requested = set(stages)
+            stages_to_run = [s for s in all_stages if s in requested]
+
         # Ensure cluster-level extra_sbatch_args reach every Slurm submission.
         # Installed lazily here (not at CLI startup) because importing
         # nemo_skills.pipeline pulls in torch/transformers (~15s cold cache).
