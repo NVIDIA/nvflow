@@ -1,0 +1,4 @@
+# Generated from the root pyproject.toml by
+# `python scripts/check_project_environment_policy.py --write`; do not edit.
+nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@bcf059af55c20a89f797724598f9908d126153e6
+torch

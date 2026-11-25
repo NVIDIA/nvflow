@@ -1,0 +1,10 @@
+# VALS 1.1, workflow 2 for the SFT set's web_off dataset.
+_base_: vals11-teacher.yaml
+
+workflow:
+  name: "vals11-teacher-sft-web-off"
+  description: "Collect teacher traces for the VALS 1.1 SFT set's web_off dataset"
+  runnable: true
+
+question_set: sft
+dataset: web_off

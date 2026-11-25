@@ -1,0 +1,54 @@
+# Shared SEC filing download workflow template.
+
+workflow:
+  name: "download-sec"
+  type: "sdg"
+  description: "Download SEC filings for a configurable company scope"
+  runnable: false
+
+cluster: my_cluster
+
+scope: ???
+output_dir: /workspace/outputs/finance/${scope}/workflow-2-download-sec/step-0-download
+index_dir: /workspace/outputs/finance/${scope}/workflow-2-download-sec/step-1-index
+cache_dir: /workspace/outputs/finance/${scope}/workflow-2-download-sec/cache/finance_sec_search
+
+pipeline_stages:
+  - download
+  - build_index
+  - prefetch_cache
+
+stages:
+  download:
+    uses: project:nvfinance.stages.download.download_sec_filings:DownloadSecFilingsStage
+    run_name: ${scope}
+    output_dir: ${output_dir}
+    config: ???
+    sec_identity_email: ${oc.env:SEC_IDENTITY_EMAIL}
+    sec_identity_company: ${oc.env:SEC_IDENTITY_COMPANY}
+    dependencies: []
+
+  build_index:
+    uses: project:nvfinance.stages.download.build_index:BuildSecIndexStage
+    run_name: ${scope}
+    artifact_root: ${output_dir}
+    index_path: ${index_dir}/${scope}_sec_fts.sqlite
+    incremental: true
+    dependencies: [download]
+
+  # Warms filing metadata for sec_filing_search. Reads no corpus and no index,
+  # so it has no dependency and can be run on its own.
+  prefetch_cache:
+    uses: project:nvfinance.stages.download.prefetch_cache:PrefetchCacheStage
+    run_name: ${scope}
+    container: nemo-gym
+    num_gpus: 0
+    gym_path: /opt/nemo-gym
+    script: resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py
+    cache_dir: ${cache_dir}
+    ticker_config: ${stages.download.config}
+    supplementary_tickers: null
+    force: false
+    installation_command: |-
+      export PATH=/opt/nemo_gym_venv/bin:$PATH
+    dependencies: []

@@ -1,0 +1,15 @@
+# Small, deterministic HopChain image-filter run used by the quick start.
+# Put images under data/images in the host directory mounted at /workspace,
+# then run this file directly.
+
+_base_: full.yaml
+
+execution_id: demo
+
+stages:
+  image_filter:
+    image_directories:
+      - directory: ${worker_data_dir}/data/images
+        recursive: true
+        end_index: 100
+    num_chunks: 1

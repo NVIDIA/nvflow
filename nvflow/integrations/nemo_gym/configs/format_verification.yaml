@@ -1,0 +1,52 @@
+# ============================================================================
+# NeMo Gym's format_verification environment: each request row carries its own
+# `verifier`, and a reply that satisfies it is rewarded 1.0.
+# ============================================================================
+# A regex verifier:
+#     verifier:
+#       type: regex
+#       verify_regex: ["[Yy][Ee][Ss]"]
+#       verify_min_matches: 1
+# `verify_regex: [".*"]` with `verify_min_matches: 0` always rewards 1.0.
+# A string_match verifier rewards a reply that holds every expected marker and
+# no other match of its patterns:
+#     verifier:
+#       type: string_match
+#       expected_markers: ["Verdict: PASS"]
+#       patterns: ["Verdict: (PASS|FAIL)"]
+#
+# Usage in a nemo_gym.collect stage:
+#   environments:
+#     check:
+#       config_paths: ["{{NVFLOW_CODE_ROOT}}/nvflow/integrations/nemo_gym/configs/format_verification.yaml"]
+#       agent_name: sdg_format_verification_simple_agent
+# ============================================================================
+
+sdg_format_verification:
+  resources_servers:
+    format_verification:
+      entrypoint: app.py
+      # `domain` must be one of the upstream NeMo-Gym taxonomy values:
+      #   math, coding, agent, knowledge, instruction_following, long_context,
+      #   safety, games, translation, e2e, rlhf, other.
+      # Format and model checks aren't a task domain, so `other`. Schema
+      # validates this strictly at ng_run startup — any other value crashes the
+      # head server with an "almost-server" validation error.
+      domain: other
+      verified: false
+      description: Rewards a reply that satisfies its row's verifier
+      value: Reward signal for format checks and model checks
+
+sdg_format_verification_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        # `name` references the top-level YAML group key (`sdg_format_verification`
+        # above), NOT the inner key under `resources_servers:` (which is `format_verification`,
+        # the upstream Gym dir name used only to resolve `entrypoint: app.py`).
+        name: sdg_format_verification
+      model_server:
+        type: responses_api_models
+        name: policy_model

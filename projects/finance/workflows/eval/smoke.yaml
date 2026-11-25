@@ -1,0 +1,79 @@
+# ============================================================================
+# Baseline Evaluation - Smoke Test Configuration
+# ============================================================================
+# Minimal eval: Qwen3-4B only, SecQUE only, two repeats. Use this to check that the
+# cluster and NVFlow/NeMo-Skills-managed policy and judge work before a campaign.
+#
+# Usage:
+#   uv run nvflow run --all -c projects/finance/workflows/eval/smoke.yaml --cluster my_cluster
+# ============================================================================
+_base_: base.yaml
+workflow:
+  name: "eval"
+  type: "evaluation"
+  description: "Smoke test baseline evaluation (Qwen3-4B, SecQUE only)"
+data_root: /workspace/outputs/finance/smoke
+_judge_gptoss120b: &judge_gptoss120b
+  model_type: vllm_model
+  model: /hf_models/openai/gpt-oss-120b
+  base_url: null
+  api_key_env: null
+  num_gpus: 4
+  server_nodes: 1
+  server_type: vllm
+  gym_model:
+    return_token_id_information: false
+    uses_reasoning_parser: true
+    vllm_serve_kwargs:
+      tensor_parallel_size: 4
+      max_model_len: 32768
+      async_scheduling: true
+      reasoning_parser: openai_gptoss
+      override_generation_config:
+        temperature: 0.0
+  deployment: nvflow
+rollout:
+  # Keep the smoke test cheap: a handful of questions is enough to exercise
+  # serving, judging and aggregation. Only honoured here, not per benchmark.
+  max_num_samples: 8
+  num_chunks: 2
+benchmarks:
+  secque:
+    repeats: 2
+    gym:
+      observability_enabled: true
+      model_call_capture_dir: ${data_root}/qwen3-4b/collect-rollouts/secque/jobs/job-0-collect-rollouts/outputs/captures/model-calls
+    blade:
+      enabled: true
+      # Exploratory artifact-readiness task. Formal BLADE scoring additionally
+      # requires a benchmark-specific skill, golden reports, and anchor facts.
+      command: |-
+        {
+          echo "SecQUE exploratory BLADE artifact inventory"
+          echo "rollouts=$NVFLOW_ROLLOUTS"
+          echo "materialized_inputs=$NVFLOW_MATERIALIZED_INPUTS"
+          echo "reward_profile=$NVFLOW_REWARD_PROFILE"
+          echo "rollout_rows=$(wc -l < "$NVFLOW_ROLLOUTS")"
+          echo "materialized_rows=$(wc -l < "$NVFLOW_MATERIALIZED_INPUTS")"
+          echo "reward_profile_rows=$(wc -l < "$NVFLOW_REWARD_PROFILE")"
+        } > "$NVFLOW_BLADE_OUTPUT_DIR/artifact-inventory.txt"
+    models:
+      policy:
+        gym_model:
+          show_vllm_engine_stats: true
+      judge: *judge_gptoss120b
+environments:
+  secque: ${benchmarks.secque}
+models:
+  qwen3-4b:
+    dependencies: [eval_data]
+    model: ${model_presets.qwen3_4b}
+stages:
+  eval_data:
+    benchmarks:
+      - benchmark: secque
+        prompt_config: project://workflows/eval/prompts/secque.yaml
+        output_file: secque/eval.jsonl
+pipeline_stages:
+  - eval_data
+  - qwen3-4b

@@ -1,97 +1,178 @@
 # =============================================================================
 # NVFlow vLLM Container
 # =============================================================================
-# vLLM inference container: adds SAM 3.1 and pre-caches tokenizer encodings so
-# it serves airgapped. VLLM_VERSION selects the base tag -- both vLLM images
-# build from this file and ship in the nvflow-vllm repo under different tags.
+# vLLM's official CUDA 13 release wheel on NVFlow's Python 3.13.14, with the
+# final stage of vLLM's own image for the same release, plus NVFlow's Ray
+# runtime, SAM 3.1, and offline tokenizer files.
 #
-# Builds below are single-arch (host platform); see docker_instructions.md for
-# multi-arch.
+# vLLM's docker/Dockerfile installs Python from the deadsnakes PPA, which no
+# longer publishes 3.13.14, so this file follows that final stage on
+# uv-managed Python instead: the nvidia/cuda base-ubuntu24.04 image, the CUDA
+# compiler and headers, vLLM's requirements with its NCCL override,
+# flashinfer-cubin and flashinfer-jit-cache, and the same extra packages.
+# Not included: DeepEP and GDRCopy, which serve expert-parallel all-to-all
+# backends, the KV connectors, and the non-root user.
 #
-# Build (SDG / eval):
-#   docker build -f dockerfiles/Dockerfile.vllm -t nvflow-vllm:v0.22.0 .
+# Python packages install from dockerfiles/requirements/vllm-<version>-<arch>.txt,
+# locked from dockerfiles/requirements/vllm-<version>.in.
 #
-# Build (GRPO rollouts + judge; matches NeMo-RL v0.7.0's colocated vLLM):
-#   docker build --build-arg VLLM_VERSION=v0.20.0 \
-#     -f dockerfiles/Dockerfile.vllm -t nvflow-vllm:v0.20.0 .
-#
-# Upstream source:
-#   https://github.com/NVIDIA-NeMo/Skills/blob/main/dockerfiles/Dockerfile.vllm
+# Build:
+#   REGISTRY=<registry-host>/<namespace> scripts/build_images.sh vllm-0-29-0
 # =============================================================================
 
-ARG VLLM_VERSION=v0.22.0
+ARG CUDA_IMAGE=nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+ARG VLLM_VERSION=0.29.0
+ARG PYTHON_VERSION=3.13.14
+ARG RAY_VERSION=2.58.0
+ARG CUPY_VERSION=14.0.1
+
+FROM ghcr.io/astral-sh/uv:0.12.9@sha256:8b940d3a9d65bed080436972241af2e21c84b5e8c9193f7014ed71479ee795ff AS uv-installer
 
 FROM scratch AS sam3-src
 ARG SAM3_COMMIT=a51b9f498c84824a94702cc289ed75d9cc544c64
-ADD --keep-git-dir=true https://github.com/facebookresearch/sam3.git#${SAM3_COMMIT} /
+ADD https://github.com/facebookresearch/sam3.git#${SAM3_COMMIT} /
 
+# Checksum-pinned downloads, fetched natively.
+FROM --platform=$BUILDPLATFORM ${UBUNTU_IMAGE} AS fetch
+ARG TARGETARCH
+ARG VLLM_VERSION
+ARG VLLM_COMMIT
+ARG VLLM_WHEEL_SHA256_AMD64
+ARG VLLM_WHEEL_SHA256_ARM64
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+RUN case "${TARGETARCH}" in \
+        amd64) arch=x86_64 sha256="${VLLM_WHEEL_SHA256_AMD64}" ;; \
+        arm64) arch=aarch64 sha256="${VLLM_WHEEL_SHA256_ARM64}" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    { [ -n "${VLLM_COMMIT}" ] && [ -n "${sha256}" ] || \
+      { echo "set VLLM_COMMIT and the wheel SHA-256 args (see docker-bake.hcl)" >&2; exit 1; }; } && \
+    wheel="vllm-${VLLM_VERSION}-cp38-abi3-manylinux_2_28_${arch}.whl" && \
+    mkdir -p /out/wheels && \
+    curl -fsSL -o "/out/wheels/${wheel}" "https://wheels.vllm.ai/${VLLM_COMMIT}/${wheel}" && \
+    echo "${sha256}  /out/wheels/${wheel}" | sha256sum -c -
+# openai_harmony's Rust tiktoken client cannot download under QEMU arm64, and
+# the image must serve gpt-oss offline.
+RUN mkdir -p /out/tiktoken_cache && \
+    curl -fsSL -o /out/tiktoken_cache/o200k_base.tiktoken \
+        https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken && \
+    curl -fsSL -o /out/tiktoken_cache/cl100k_base.tiktoken \
+        https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken && \
+    printf '%s  %s\n' \
+        446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d \
+        /out/tiktoken_cache/o200k_base.tiktoken \
+        223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7 \
+        /out/tiktoken_cache/cl100k_base.tiktoken | sha256sum -c -
 
-# ===========================================================================
-# BEGIN UPSTREAM (NeMo-Skills Dockerfile.vllm)
-# ===========================================================================
+FROM ${CUDA_IMAGE}
+ARG PYTHON_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /vllm-workspace
 
-FROM vllm/vllm-openai:${VLLM_VERSION}
+# System packages from vLLM's final stage. The compiler and headers serve
+# runtime kernel builds; NCCL comes from the lock, as upstream installs it.
+RUN cuda_dash=$(echo "${CUDA_VERSION}" | cut -d. -f1,2 | tr . -) && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        curl ffmpeg libsm6 libxext6 libgl1 libibverbs-dev libnuma-dev numactl && \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
+        "cuda-nvcc-${cuda_dash}" "cuda-cudart-${cuda_dash}" "cuda-nvrtc-${cuda_dash}" \
+        "cuda-cuobjdump-${cuda_dash}" "libcurand-dev-${cuda_dash}" "libcublas-dev-${cuda_dash}" && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN pip install ray
-RUN pip install "vllm[audio]"
-# Required by vLLM for Qwen-VL model family (runtime dependency, not directly imported)
-RUN pip install qwen-vl-utils
+RUN --mount=from=uv-installer,source=/uv,target=/usr/local/bin/uv \
+    UV_PYTHON_INSTALL_DIR=/opt/python uv python install "${PYTHON_VERSION}" && \
+    managed_python="$(find /opt/python -type f -path '*/bin/python3.13' -print -quit)" && \
+    test -n "${managed_python}" && \
+    ln -sf "${managed_python}" /usr/local/bin/python && \
+    ln -sf "${managed_python}" /usr/local/bin/python3 && \
+    rm -f "$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')/EXTERNALLY-MANAGED" && \
+    python -m ensurepip --upgrade && \
+    ln -sf "$(dirname "${managed_python}")/pip3" /usr/local/bin/pip && \
+    python -c "import platform; assert platform.python_version() == '${PYTHON_VERSION}', platform.python_version()"
 
-# ===========================================================================
-# END UPSTREAM
-# ===========================================================================
+# Every RUN after an ARG depends on its value, so the version-specific
+# arguments come after the shared layers.
+ARG TARGETARCH
+ARG VLLM_VERSION
+ARG RAY_VERSION
+ARG CUPY_VERSION
+ARG FLASHINFER_VERSION
 
+# flashinfer-cubin is off PyPI from 0.6.14, so vLLM's wheel no longer lists it;
+# vLLM's image installs it and flashinfer-jit-cache from FlashInfer's index.
+# nvidia-cutlass-dsl's library packages ship overlapping files, so the CUDA 13
+# set is reinstalled last.
+COPY dockerfiles/requirements/vllm-${VLLM_VERSION}-${TARGETARCH}.txt /tmp/requirements.txt
+RUN --mount=from=uv-installer,source=/uv,target=/usr/local/bin/uv \
+    --mount=from=fetch,source=/out/wheels,target=/tmp/wheels \
+    cuda_index=cu$(echo "${CUDA_VERSION}" | cut -d. -f1,2 | tr -d .) && \
+    uv pip install --system --no-cache --no-deps --index-strategy unsafe-best-match \
+        -r /tmp/requirements.txt /tmp/wheels/vllm-*.whl && \
+    uv pip install --system --no-cache --no-deps --index-url https://flashinfer.ai/whl \
+        "flashinfer-cubin==${FLASHINFER_VERSION}" && \
+    uv pip install --system --no-cache --no-deps --index-url "https://flashinfer.ai/whl/${cuda_index}" \
+        "flashinfer-jit-cache==${FLASHINFER_VERSION}+${cuda_index}" && \
+    cutlass="$(python -c 'from importlib.metadata import version; print(version("nvidia-cutlass-dsl"))')" && \
+    uv pip install --system --no-cache --no-deps --force-reinstall \
+        "nvidia-cutlass-dsl-libs-cu13==${cutlass}" && \
+    rm /tmp/requirements.txt
 
-# ===========================================================================
-# NVFlow Additional Layers
-# ===========================================================================
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    VLLM_ENABLE_CUDA_COMPATIBILITY=0 \
+    VLLM_USAGE_SOURCE=nvflow-docker-image \
+    TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0" \
+    RAY_USAGE_STATS_ENABLED=0
+
+# enroot ignores ENV PATH; link the interpreter's console scripts onto the default PATH.
+RUN scripts="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')" && \
+    ln -sf "${scripts}/vllm" /usr/local/bin/vllm && \
+    ln -sf "${scripts}/ray" /usr/local/bin/ray
+
+# Ray's cgraph extra hardcodes cupy-cuda12x, so the lock pairs ray[default] with
+# the CUDA 13 CuPy wheel; the compiled-DAG implementation ships in the Ray wheel.
+RUN python -c "import cupy,platform,ray,ray.dashboard.optional_deps,vllm; from importlib.metadata import distributions,version; from importlib.util import find_spec; installed={dist.metadata['Name'].lower() for dist in distributions()}; cuda_runtime=cupy.cuda.runtime.runtimeGetVersion(); assert platform.python_version() == '${PYTHON_VERSION}', platform.python_version(); assert ray.__version__ == '${RAY_VERSION}', ray.__version__; assert vllm.__version__ == '${VLLM_VERSION}', vllm.__version__; assert version('cupy-cuda13x') == '${CUPY_VERSION}', version('cupy-cuda13x'); assert 'cupy-cuda12x' not in installed, installed; assert 13000 <= cuda_runtime < 14000, cuda_runtime; assert find_spec('ray.experimental.compiled_dag_ref') is not None; assert version('flashinfer-python') == version('flashinfer-cubin') == '${FLASHINFER_VERSION}'; assert version('flashinfer-jit-cache').startswith('${FLASHINFER_VERSION}+')" && \
+    ray --version | grep -F "${RAY_VERSION}"
+
+# NVIDIA's arm64 nvidia-cusparselt-cu13 wheel records the platform tag
+# manylinux2014_sbsa, which pip check reports as unsupported, and vLLM's NCCL
+# override replaces torch's exact NCCL pin; any other report fails.
+RUN python -m pip check > /tmp/pipcheck.txt 2>&1 || \
+    { cat /tmp/pipcheck.txt; ! grep -vxE \
+        -e 'nvidia-cusparselt-cu13 [0-9.]+ is not supported on this platform' \
+        -e 'torch [^ ]+ has requirement nvidia-nccl-cu13==[0-9.]+(; .+)?, but you have nvidia-nccl-cu13 [0-9.]+\.' \
+        /tmp/pipcheck.txt | grep -q .; } && \
+    rm /tmp/pipcheck.txt
+
 # Add SAM 3.1 without disturbing vLLM's tested Torch/NumPy stack: install only
 # its missing deps + source with --no-deps (SAM's numpy<2 pin would downgrade).
-# ===========================================================================
-
 COPY --from=sam3-src / /opt/sam3
-RUN pip install --no-cache-dir --no-deps \
+RUN python -m pip install --no-cache-dir --no-deps \
       ftfy==6.1.1 \
       iopath==0.1.10 \
       portalocker==3.2.0 \
       pycocotools==2.0.11 \
       wcwidth==0.2.14 && \
-    pip install --no-cache-dir --no-deps --no-build-isolation -e /opt/sam3 && \
+    python -m pip install --no-cache-dir --no-deps --no-build-isolation -e /opt/sam3 && \
     rm -rf /opt/sam3/.git
 
-# `vllm[audio]` and `ray` above are unpinned; assert the base tag's vLLM version
-# survived. Ray is only reported -- these servers run standalone.
-ARG VLLM_VERSION
-RUN python3 -c "import numpy, sam3, torch, vllm, ray; \
+RUN python -c "import numpy, sam3, torch, vllm, ray; \
 from sam3.model_builder import build_sam3_image_model; \
-assert vllm.__version__.startswith('${VLLM_VERSION#v}'), f'vllm {vllm.__version__} != ${VLLM_VERSION#v}'; \
+assert vllm.__version__ == '${VLLM_VERSION}', f'vllm {vllm.__version__} != ${VLLM_VERSION}'; \
 print(f'SAM 3.1 + vLLM imports OK: numpy={numpy.__version__}, torch={torch.__version__}, vllm={vllm.__version__}, ray={ray.__version__}')"
 
-# Pre-cache tokenizer encodings so no downloads are needed at runtime.
-ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
-ENV TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
-ENV TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
-RUN mkdir -p /opt/tiktoken_cache
+COPY --from=fetch /out/tiktoken_cache /opt/tiktoken_cache
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache \
+    TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache \
+    TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
 
-# Fetch tiktoken encodings explicitly -- the Rust tiktoken-rs client in
-# openai_harmony fails to download under QEMU arm64. Keeps the image airgapped.
-RUN curl -fSL -o /opt/tiktoken_cache/o200k_base.tiktoken \
-      https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken && \
-    curl -fSL -o /opt/tiktoken_cache/cl100k_base.tiktoken \
-      https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken
-
-# Verify the harmony encoding loads from the pre-downloaded files
-RUN python3 -c "\
+RUN python -c "\
 from openai_harmony import load_harmony_encoding, HarmonyEncodingName; \
 load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS); \
 print('openai_harmony encoding loaded OK')"
 
-# ===========================================================================
-# Security hardening (Trivy/NSPECT wave scans, 2026-07-07)
-# ===========================================================================
-# apt upgrade for base-channel security fixes (linux-libc-dev/gnupg/openssl = 227 of 233 HIGH/CRIT Trivy); headers stay INSTALLED for vLLM triton JIT
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
-
-# rm ray_dist.jar: jackson-databind RCE CVE-2026-54512/CVE-2026-54513 (Ray-Java unused); fail build if one survives
-RUN find /usr/local /opt -name 'ray_dist.jar' -type f -delete 2>/dev/null; \
-    ! find /usr/local /opt -name 'ray_dist.jar' -type f 2>/dev/null | grep -q .
+# Same entrypoint as the official vllm-openai target.
+ENTRYPOINT ["vllm", "serve"]

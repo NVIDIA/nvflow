@@ -1,0 +1,6 @@
+# SGLang's official release with the image's extras (`all` without `diffusion`),
+# plus NVFlow's Ray. outlines-core comes from the image's source-built wheel.
+sglang[http2,tracing]==0.5.17
+outlines-core==0.1.26
+ray[default]==2.58.0
+cuda-python==13.2.0

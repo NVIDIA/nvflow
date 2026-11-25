@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Shared JSONL read / write helpers for the recipes/finance utilities.
+"""Shared JSONL read/write helpers for project and platform utilities.
 
 The same buffered JSONL pattern (orjson decode/encode, ``WRITE_BUFFER_SIZE``,
 manual flush, error handling) appeared verbatim in eight files under
-``recipes/finance/``.  This module is the single source of truth so a fix
+project packages. This module is the single source of truth so a fix
 or change applies everywhere.
 
 Three primitives:
@@ -56,7 +56,7 @@ DEFAULT_BUFFER_SIZE = 1000
 """Default number of records to buffer before flushing to disk.
 
 Matches the historical ``WRITE_BUFFER_SIZE`` constant used in the
-recipes/finance utilities.  Kept centralised so future tuning needs to
+project utilities. Kept centralised so future tuning needs to
 happen in only one place.
 """
 

@@ -1,0 +1,179 @@
+# Supplied Ray Jobs Target Configuration
+#
+# Copy this file to cluster_configs/<target>.yaml (or a directory selected by
+# NVFLOW_CONFIG_DIR). NVFlow does not create, resize, or destroy these clusters;
+# the operator owns images, mounts, networking, TLS, credentials, and lifecycle.
+# Remove cluster declarations and routes not used by your workflows. A run or
+# listing fails only for clusters it uses whose jobs_url variable is unset.
+# Runtime roles use the same project-wide image versions as direct Slurm.
+#
+# DIFFERENCE FROM template-slurm.yaml: Slurm launches a container per job, so
+# its target applies `mounts:` and `env_vars:` at submission time. This target
+# attaches to already-running Ray clusters whose mounts and environment are
+# fixed when the head and workers are provisioned, so it has neither field.
+
+# =============================================================================
+# Provision supplied clusters before using this target
+# =============================================================================
+# Every head and worker in one cluster must use the same image, Python, Ray,
+# mounts, and environment. Provision these paths at identical container paths:
+#
+#   /shared/nvflow       Shared read/write artifact and run-record root
+#   /workspace           Shared workflow data and outputs
+#   /hf_models           Model storage, on every cluster whose jobs read models
+#                        or tokenizers: serving, SFT/GRPO training, and Skills,
+#                        whose SFT data preparation loads the tokenizer
+#
+# Do NOT mount the NVFlow checkout. NVFlow uploads an immutable WorkerBundle as
+# each Ray Job's working_dir and sets NVFLOW_CODE_ROOT inside the job.
+#
+# Recommended cluster-side environment (adjust to your site/workflow):
+#
+#   NVFLOW_IMAGE_ID=<exact expected_image value for this cluster>  # REQUIRED
+#   HF_HOME=/workspace/cache/huggingface
+#   NCCL_DEBUG=INFO
+#   TOKENIZERS_PARALLELISM=false
+#   HF_HUB_OFFLINE=1            # only when models are already mounted
+#   HF_DATASETS_OFFLINE=1       # only when datasets are already staged
+#   TRANSFORMERS_OFFLINE=1      # only when models/tokenizers are staged
+#
+# Ray Jobs runtime_env.env_vars is prohibited: workload variables come from the
+# cluster environment or are exported by the stage command, so NVFlow never
+# serializes secret values. Provision secrets such as WANDB_API_KEY, HF_TOKEN,
+# NVIDIA_API_KEY, or OPENAI_API_KEY in the cluster environment or as mounted
+# secret files.
+#
+# Development-only Ray-on-Slurm test clusters start from this target; see
+# scripts/ray-test/README.md. They take mounts and env_vars from a Slurm
+# target; credential-like env_vars pass only with `start --pass-credentials`.
+#
+# KubeRay example: configure `env`/`envFrom`, `volumes`, and `volumeMounts` in
+# both headGroupSpec and every workerGroupSpec before creating the RayCluster.
+
+executor: ray
+
+# =============================================================================
+# SSH Configuration (ONLY for launching from outside the cluster network)
+# =============================================================================
+# NVFlow forwards each jobs_url through this host and checks artifact_root
+# there, so every jobs_url must be an http address the host can reach, and
+# each cluster then needs allow_insecure: true. Reach https endpoints directly.
+#
+# ssh_tunnel:
+#   host: <YOUR_CLUSTER_LOGIN_NODE>           # e.g., login.cluster.example.com
+#   user: <YOUR_USERNAME>                      # Your cluster username
+#   identity: <PATH_TO_SSH_KEY>                # e.g., $HOME/.ssh/id_rsa
+
+# =============================================================================
+# Controller and shared storage
+# =============================================================================
+ray:
+  # Durable NVFlow controller runs as a Ray Job here. This cluster must reach
+  # every child Jobs endpoint and every cross-cluster service endpoint.
+  control_cluster: skills
+
+  # POSIX path mounted at the same absolute location on every participating
+  # cluster and on the launcher, or on its ssh_tunnel host.
+  artifact_root: /shared/nvflow
+
+  # ===========================================================================
+  # Supplied Jobs API cluster registry
+  # ===========================================================================
+  # Common fields:
+  #   jobs_url                    launcher-facing Ray Jobs/dashboard URL
+  #   controller_jobs_url         optional controller-facing internal URL
+  #   credential_env              launcher-local bearer-token variable name
+  #   controller_credential_env   token variable name inside control cluster
+  #   ca_file                     launcher-local TLS CA path
+  #   controller_ca_file          TLS CA path inside control cluster
+  #   allow_insecure              development-only HTTP opt-in
+  #   controller_allow_insecure   separate controller-side HTTP opt-in
+  #   expected_image/python/ray   mandatory runtime identity contract
+  #   gpus_per_node               physical node shape for GPU applications
+  #   labels                      declared string capabilities
+  #   resources                   declared non-negative cluster capacity
+  #
+  # `nvflow run` probes each cluster's Python and Ray against expected_python
+  # and expected_ray, and compares NVFLOW_IMAGE_ID, which the operator exports
+  # on every head and worker, with expected_image as an exact string. NVFlow
+  # does not inspect the image itself. Release tags are shown.
+  clusters:
+    skills:
+      jobs_url: ${oc.env:RAY_SKILLS_JOBS_URL}
+      # Internal URL used by the controller after launcher tunnels disconnect.
+      # controller_jobs_url: ${oc.env:RAY_SKILLS_CONTROLLER_JOBS_URL}
+      credential_env: RAY_SKILLS_TOKEN
+      # Optional control-cluster secret/trust references. They default to the
+      # launcher fields, whose names and paths must then exist in the controller.
+      # controller_credential_env: RAY_SKILLS_INTERNAL_TOKEN
+      # controller_ca_file: /etc/ssl/certs/internal-ray-ca.pem
+      # Optional TLS CA bundle. HTTPS is required for non-loopback endpoints
+      # unless allow_insecure is explicitly set for development.
+      # ca_file: /etc/ssl/certs/internal-ray-ca.pem
+      expected_image: nvflow-nemo-skills:v1.2.0
+      expected_python: "3.13.14"
+      expected_ray: "2.58.0"
+      # Optional declared capabilities/capacity used during preflight.
+      # labels:
+      #   workload: cpu
+      # resources:
+      #   CPU: 32
+
+    gym:
+      jobs_url: ${oc.env:RAY_GYM_JOBS_URL}
+      # controller_jobs_url: ${oc.env:RAY_GYM_CONTROLLER_JOBS_URL}
+      credential_env: RAY_GYM_TOKEN
+      expected_image: nvflow-nemo-gym:v0.7.0
+      expected_python: "3.13.14"
+      expected_ray: "2.58.0"
+      # resources:
+      #   CPU: 32
+
+    training:
+      jobs_url: ${oc.env:RAY_TRAINING_JOBS_URL}
+      # controller_jobs_url: ${oc.env:RAY_TRAINING_CONTROLLER_JOBS_URL}
+      credential_env: RAY_TRAINING_TOKEN
+      expected_image: nvflow-nemo-rl:v0.8.0
+      expected_python: "3.13.14"
+      expected_ray: "2.58.0"
+      # Required when training uses portable total_gpus.
+      gpus_per_node: 8
+      # labels:
+      #   accelerator: h100
+      # resources:
+      #   CPU: 128
+      #   GPU: 8
+
+    serving:
+      jobs_url: ${oc.env:RAY_VLLM_JOBS_URL}
+      # controller_jobs_url: ${oc.env:RAY_VLLM_CONTROLLER_JOBS_URL}
+      credential_env: RAY_VLLM_TOKEN
+      expected_image: nvflow-vllm:v0.29.0
+      expected_python: "3.13.14"
+      expected_ray: "2.58.0"
+      gpus_per_node: 8
+      # resources:
+      #   CPU: 64
+      #   GPU: 8
+
+    # Only workflows whose model profiles select SGLang use this cluster.
+    sglang:
+      jobs_url: ${oc.env:RAY_SGLANG_JOBS_URL}
+      # controller_jobs_url: ${oc.env:RAY_SGLANG_CONTROLLER_JOBS_URL}
+      credential_env: RAY_SGLANG_TOKEN
+      expected_image: nvflow-sglang:v0.5.17-ray2.58.0
+      expected_python: "3.13.14"
+      expected_ray: "2.58.0"
+      gpus_per_node: 8
+
+  # ===========================================================================
+  # Runtime-role routing
+  # ===========================================================================
+  # Workflow YAML is unchanged: each command's runtime role routes to one
+  # cluster here. Several roles may share a cluster that provides them all.
+  routes:
+    nemo-skills: skills
+    nemo-gym: gym
+    nemo-rl: training
+    vllm: serving
+    sglang: sglang

@@ -1,0 +1,61 @@
+# ============================================================================
+# Shared NeMo Gym Stage Suite - two-benchmark acceptance eval
+# ============================================================================
+# Runs the standard Finance evaluation path against the full SecQue and FABv1
+# datasets with two repeats. Both benchmarks use the hosted judge configured in
+# eval/base.yaml; policy serving comes from the normal qwen3_4b eval preset.
+#
+# The agentic fabv1 benchmark reads the SEC filing-metadata cache written by
+# finance:download/sp500's prefetch_cache. Run that workflow once first.
+#
+# Run:
+#   uv run nvflow run --all \
+#     --config projects/finance/workflows/eval/shared-gym-smoke.yaml \
+#     --cluster my_cluster
+# ============================================================================
+_base_: base.yaml
+
+workflow:
+  name: "eval"
+  type: "evaluation"
+  description: "Full SecQue + FABv1 two-repeat shared Gym acceptance eval"
+
+data_root: /workspace/outputs/finance/shared-gym-suite-smoke
+fabv1_variant: noweb
+
+benchmarks:
+  fabv1:
+    repeats: 2
+  secque:
+    repeats: 2
+
+environments:
+  fabv1: ${benchmarks.fabv1}
+  secque: ${benchmarks.secque}
+
+models:
+  qwen3-4b:
+    dependencies: [eval_data]
+    model: ${model_presets.qwen3_4b}
+
+# Keep model serving outside Gym: NVFlow composes the policy vLLM service and
+# Gym client through NeMo-Skills; the shared judge remains external.
+rollout:
+  models:
+    policy:
+      deployment: nvflow
+
+stages:
+  eval_data:
+    benchmarks:
+      - benchmark: secque
+        prompt_config: project://workflows/eval/prompts/secque.yaml
+        output_file: secque/eval.jsonl
+      - benchmark: ${fabv1_variants.${fabv1_variant}.benchmark}
+        prepared_file: ${fabv1_variants.${fabv1_variant}.prepared_file}
+        prompt_config: null
+        output_file: ${fabv1_variants.${fabv1_variant}.name}/eval.jsonl
+
+pipeline_stages:
+  - eval_data
+  - qwen3-4b

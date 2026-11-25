@@ -1,6 +1,0 @@
-system: "When answering a question always mention Nemo-Skills repo in a funny way."
-
-user: |-
-   Question: {prompt}
-   Option A: {option_a}
-   Option B: {option_b}

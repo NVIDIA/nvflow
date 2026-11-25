@@ -14,59 +14,40 @@
 #
 """Base stage class that all workflow stages should inherit from."""
 
-from abc import ABC, abstractmethod
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nvflow.execution.contracts import StageExecution
+    from nvflow.execution.planner import PlanningContext
+    from nvflow.project.context import ProjectContext
 
 
-class BaseStage(ABC):
+class BaseStage:
     """Base class for all workflow stages.
 
-    All stages must inherit from this class and implement the execute() method.
-    Stages are registered using the StageRegistry decorator pattern.
+    All runnable stages must produce an exact ``StageExecution``. Workflows
+    select implementations explicitly through their ``uses`` field.
 
     Example:
-        >>> from nvflow.core import BaseStage, StageRegistry
-        >>>
-        >>> @StageRegistry.register(recipe="finance", workflow="training_sft", stage="sft")
+        >>> from nvflow.core import BaseStage
+        ...
         >>> class SFTStage(BaseStage):
-        ...     workflow = "training_sft"
-        ...     def execute(self, config, cluster, expname, run_after=None):
-        ...         print(f"Running SFT training...")
-        ...         # Implementation here
+        ...     def execution(self, context):
+        ...         return build_sft_execution(context)
     """
 
-    # Workflow this stage belongs to (optional - for documentation/clarity)
-    # Not required by the framework, but helpful for understanding stage organization
-    workflow: str = "unknown"
+    _project_context: ProjectContext | None = None
 
-    @abstractmethod
-    def execute(
-        self,
-        config: dict[str, Any],
-        cluster: str,
-        expname: str,
-        run_after: list[str] | None = None,
-    ) -> None:
-        """Execute the stage.
+    def bind_project_context(self, context: ProjectContext) -> None:
+        """Bind the project whose resources and source paths the stage uses."""
+        self._project_context = context
 
-        This method must be implemented by all stage subclasses.
-
-        Args:
-            config: Stage configuration dictionary from the workflow config
-            cluster: Cluster name (references cluster_configs/<cluster>.yaml)
-            expname: Experiment name for this stage execution
-            run_after: List of experiment names that must complete before this stage
-                      (used for dependency management in Slurm)
-
-        Example:
-            >>> config = {
-            ...     "input_dir": "/data/raw",
-            ...     "output_dir": "/data/processed",
-            ...     "stage_kwargs": {"installation_command": "pip install -q pandas"}
-            ... }
-            >>> stage.execute(config, "nrt", "my-exp-data-download", run_after=None)
-        """
-        pass
+    @property
+    def bound_project_context(self) -> ProjectContext | None:
+        """Return the selected project context when invoked by NVFlow."""
+        return self._project_context
 
     def validate_config(self, config: dict[str, Any]) -> None:
         """Validate stage configuration (OPTIONAL - override only if needed).
@@ -87,6 +68,12 @@ class BaseStage(ABC):
         """
         # Default implementation: no validation
         return None
+
+    def execution(self, context: PlanningContext) -> StageExecution:
+        """Build the exact contract consumed by every execution engine."""
+        raise ValueError(
+            f"{type(self).__module__}.{type(self).__name__} must implement execution()"
+        )
 
     def get_dependencies(self, config: dict[str, Any]) -> list[str]:
         """Get list of stage dependencies.

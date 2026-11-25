@@ -1,0 +1,2 @@
+# vLLM's 0.29.0 image overrides torch's NCCL pin with this version.
+nvidia-nccl-cu13==2.30.7

@@ -1,0 +1,11 @@
+# Qwen3-4B SFT using the S&P 500 template-SDG dataset.
+_base_: qwen3_4b.yaml
+
+base_output_dir: /workspace/outputs/finance/sp500/workflow-4-sft/qwen3_4b
+
+directories:
+  raw_train_data: /workspace/outputs/finance/sp500/workflow-3-template-based-sdg/step-5-filter-answers
+
+stages:
+  eval:
+    eval_data_root: /workspace/outputs/finance/baselines/step-1-eval-data  # prepared by eval/baselines

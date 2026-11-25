@@ -230,7 +230,7 @@ def test_write_jsonl_invalid_buffer_size(tmp_path: Path) -> None:
 def test_write_jsonl_default_buffer_size_constant() -> None:
     """The exported constant must match the historical magic number 1000.
 
-    Recipes still document the 1000-record buffer in their stage docstrings;
+    Project stages still document the 1000-record buffer in their docstrings;
     a silent change here would surprise operators reading those docs.
     """
     assert DEFAULT_BUFFER_SIZE == 1000

@@ -1,0 +1,32 @@
+# Nemotron-3-Nano SFT over the exact full tool trajectories selected by
+# GenSelect from the combined VALS-seeded TSDG and RSDG rollout campaign.
+
+_base_: nemotron-3-nano.yaml
+
+base_output_dir: /workspace/outputs/finance/vals-noweb/sft/nemotron-3-nano
+
+pipeline_stages:
+  - training
+  - eval
+
+stages:
+  training:
+    training_data: /workspace/outputs/finance/vals-noweb/agentic-trajectories/step-9-selected-trajectories/messages.jsonl
+    validation_data: null
+    dependencies: []
+    overrides:
+      sft:
+        only_unmask_final: false
+        val_period: 0
+        val_at_start: false
+        val_at_end: false
+      data:
+        default:
+          dataset_name: openai_format
+          chat_key: messages
+          use_preserving_dataset: true
+      policy:
+        tokenizer:
+          chat_template: default
+          chat_template_kwargs:
+            enable_thinking: true

@@ -5,21 +5,22 @@
 #
 # Then update all <PLACEHOLDER> values with your settings.
 #
-# Container versions tested with this release:
-#   nemo-skills: nvflow-nemo-skills (NeMo-Skills @ e06c9b90, tag v1.1.2)
-#   vllm:        nvflow-vllm (base vllm/vllm-openai v0.22.0, standalone SDG/eval)
-#   vllm-grpo:   nvflow-vllm at the v0.20.0 tag (base vllm/vllm-openai v0.20.0, GRPO rollouts/judge)
-#   sglang:      lmsysorg/sglang v0.5.10.post1
-#   nemo-rl:     nvflow-nemo-rl (base nvcr.io/nvidia/nemo-rl v0.7.0; SFT/GRPO trainer, Gym venvs baked)
-#   nemo-gym:    nvflow-nemo-gym (base python:3.12-slim, CPU-only; per-component Gym venvs — DG-SDG gym stages)
+# Container versions tested with this release (shared with executor: ray):
+#   nemo-skills: nvflow-nemo-skills (NeMo-Skills @ bcf059af, Ray 2.58.0)
+#   vllm:        nvflow-vllm (vLLM 0.29.0, policy/judge serving)
+#   nemo-rl:     nvflow-nemo-rl (NeMo-RL 0.8.0, SFT/GRPO training)
+#   nemo-gym:    nvflow-nemo-gym (NeMo-Gym 0.7.0, evaluation and rollouts)
+#   sglang:      nvflow-sglang (SGLang 0.5.17, workflows that select SGLang)
 #
 # Reference: https://github.com/NVIDIA-NeMo/Skills
 
 executor: slurm
 
 # =============================================================================
-# Ray Cluster Template (for SLURM compatibility)
+# In-allocation Ray template (direct Slurm engine only)
 # =============================================================================
+# NeMo-Run's Ray bootstrap inside a submitted Slurm job. For supplied Ray Jobs
+# clusters (executor: ray), use cluster_configs/template-ray.yaml instead.
 # IMPORTANT: If Ray cluster hangs during initialization, use "ray_enroot.sub.j2"
 #
 # Symptoms indicating you need this fix:
@@ -44,7 +45,7 @@ executor: slurm
 # ssh_tunnel:
 #   host: <YOUR_CLUSTER_LOGIN_NODE>           # e.g., login.cluster.example.com
 #   user: <YOUR_USERNAME>                      # Your cluster username
-#   job_dir: <PATH_TO_JOB_DIR>                 # e.g., /lustre/users/<username>/nvflow/jobs
+#   job_dir: <PATH_TO_JOB_DIR>                 # e.g., /shared/users/<username>/nvflow/jobs
 #   identity: <PATH_TO_SSH_KEY>                # e.g., $HOME/.ssh/id_rsa
 
 # =============================================================================
@@ -52,17 +53,16 @@ executor: slurm
 # =============================================================================
 # If ssh_tunnel is used above, this should match the job_dir specified there.
 # If running from within the cluster, this is the only directory config needed.
-job_dir: <PATH_TO_JOB_DIR>                 # e.g., /lustre/users/<username>/nvflow/jobs
+job_dir: <PATH_TO_JOB_DIR>                 # e.g., /shared/users/<username>/nvflow/jobs
 
 # =============================================================================
 # Slurm Account & Partition
 # =============================================================================
 account: <YOUR_SLURM_ACCOUNT>                # Run: sacctmgr show associations user=$USER
 partition: <YOUR_GPU_PARTITION>              # Run: sinfo to see available partitions
-cpu_partition: <YOUR_CPU_PARTITION>          # Optional: CPU-only partition for container setup
+cpu_partition: <YOUR_CPU_PARTITION>          # Optional: partition for workflow CPU tasks
 gpus_per_node: 8                            # GPUs per node (run: sinfo -p <partition> -o "%G")
-# dependency_type: afterok                  # Caution: breaks training dependent_jobs (TIMEOUT != COMPLETED)
-#                                           # Leave as default (afterany) until per-stage types are supported
+# dependency_type: afterany                 # Optional opt-out; NVFlow defaults to afterok
 job_name_prefix: "nvflow-"
 
 # =============================================================================
@@ -78,16 +78,16 @@ extra_sandbox_args:
 # =============================================================================
 # Container Paths
 # =============================================================================
-# After converting containers to .sqsh format (see INSTALL.md), paste paths here.
+# After converting containers to .sqsh format (see docs/slurm/README.md), paste paths here.
 containers:
-  # Required containers (self-sufficient — all deps pre-installed, no runtime downloads)
+  # Required containers. Slurm and supplied Ray use these same role images.
   # setup_containers.sh names each file <yaml-key>-<tag>.sqsh.
-  nemo-skills: <PATH_TO_CONTAINERS>/nemo-skills-v1.1.2.sqsh   # Orchestration client (eval, SDG, data prep)
-  vllm: <PATH_TO_CONTAINERS>/vllm-v0.22.0.sqsh                # vLLM v0.22.0 standalone (SDG, eval)
-  vllm-grpo: <PATH_TO_CONTAINERS>/vllm-grpo-v0.20.0.sqsh      # vLLM v0.20.0 standalone (GRPO rollouts, judge); same image repo as vllm, different tag
-  sglang: <PATH_TO_CONTAINERS>/sglang-v0.5.10.post1.sqsh          # sglang inference server (SDG stages 3-5)
-  nemo-rl: <PATH_TO_CONTAINERS>/nemo-rl-v0.7.0.sqsh               # NeMo-RL v0.7.0 for SFT and GRPO training
-  nemo-gym: <PATH_TO_CONTAINERS>/nemo-gym-0.4.0.sqsh              # CPU-only Gym client for the Gym-only stages (DG-SDG gym stages; no NeMo-RL trainer)
+  nemo-skills: <PATH_TO_CONTAINERS>/nemo-skills-v1.2.0.sqsh   # Orchestration client (eval, SDG, data prep)
+  vllm: <PATH_TO_CONTAINERS>/vllm-v0.29.0.sqsh                # Shared vLLM policy/judge serving
+  nemo-rl: <PATH_TO_CONTAINERS>/nemo-rl-v0.8.0.sqsh
+  nemo-gym: <PATH_TO_CONTAINERS>/nemo-gym-v0.7.0.sqsh
+  # Required only by workflows whose model profiles select SGLang.
+  sglang: <PATH_TO_CONTAINERS>/sglang-v0.5.17-ray2.58.0.sqsh
   # Optional containers (not currently used by NVFlow recipes)
   # trtllm: <PATH_TO_CONTAINERS>/trtllm.sqsh
   # megatron: <PATH_TO_CONTAINERS>/megatron.sqsh
@@ -104,18 +104,17 @@ mounts:
   # Recipe code and checked-in assets (prompts, dataset descriptors, overlays) ship
   # via the nemo-run packaged snapshot at /nemo_run/code on every worker, so the
   # repo is never mounted. This mount only needs to hold writable runtime data:
-  #   /workspace/outputs/**            stage outputs, checkpoints, SEC cache, eval-datasets
+  #   /workspace/outputs/**            stage outputs, checkpoints, SEC cache, eval-data
   #   /workspace/cache/huggingface     HF_HOME (see env_vars below)
   # Point it at a dedicated data dir (e.g. a sibling of your repo checkout), not the
   # checkout itself.
   - <CLUSTER_PATH_TO_WORKSPACE_DATA>:/workspace   # Writable data dir (outputs + cache)
   # Add more mounts as needed:
-  # - /lustre/data:/data
+  # - /shared/data:/data
   #
-  # No Gym source mount is needed: the nemo-rl and nemo-gym images both bake
-  # their NeMo-Gym venvs, so nothing is built at job runtime. Bind-mounting a
-  # host clone over /opt/nemo-rl/3rdparty/Gym-workspace/Gym shadows those baked
-  # venvs and breaks the GRPO stages -- do it only for dev-mode work.
+  # Do not mount the NVFlow checkout: NeMo-Run packages committed source under
+  # /nemo_run/code. Do not overlay /opt/nemo-rl or /opt/nemo-gym with a host
+  # checkout; the images' locked environments must match their own source.
 
 # =============================================================================
 # Timeouts (per partition)
@@ -132,6 +131,8 @@ timeouts:
 # (e.g., /workspace, /hf_models) or a host path that is transparently
 # mounted (e.g., /shared/... when "- /shared:/shared" is in mounts).
 # Paths that only exist on the host cause "No such file or directory" at runtime.
+# Use `NAME=value` for a literal or a bare `NAME` to forward it from the
+# submitting shell without storing a secret value in this file.
 # HF_HOME is required.
 env_vars:
   - HF_HOME=<CONTAINER_PATH>/cache/huggingface  # e.g., /workspace/cache/huggingface
@@ -144,31 +145,42 @@ env_vars:
 
   # --- Offline enforcement (recommended) ---
   # Prevents accidental network calls at runtime. Clear HF_*_OFFLINE temporarily
-  # for one-time stages that download external data (download_sec_filings,
-  # create_seed_data).
+  # for one-time stages that download from Hugging Face (create_seed_data, and
+  # GRPO prepare_data with should_download: true); eval_data clears them itself.
   - HF_HUB_OFFLINE=1
   - HF_DATASETS_OFFLINE=1
   - TRANSFORMERS_OFFLINE=1
-  # UV_OFFLINE: left UNSET (global flag). The images bake every venv they need,
-  # so no stage resolves packages at runtime either way. Leaving it unset keeps
-  # the escape hatch for dev-mode work on components outside the baked set.
-  # Set true only for a strict-airgap cluster.
-  # - UV_OFFLINE=true
+  # UV_OFFLINE: the nemo-rl and nemo-gym images set it themselves. Every image
+  # ships its environments built in, so jobs install nothing at runtime.
 
-  # Pre-cached tiktoken encodings (baked into vllm/vllm-grpo containers;
-  # set here for uniform coverage across all container types).
+  # Pre-baked tiktoken / openai_harmony cache; the vLLM and SGLang images
+  # already set all three, and nemo-skills sets TIKTOKEN_CACHE_DIR.
   - TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
   - TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
   - TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
 
-  # Ray worker port range — avoids collisions with OS ephemeral ports.
-  - MIN_WORKER_PORT=7000
-  - MAX_WORKER_PORT=8000
+  # Ray worker ports on worker nodes: 0 lets the kernel assign each one from its
+  # ephemeral range, above the fixed ports NeMo-RL gives vLLM (7000-8999). The
+  # head node keeps Ray's default range.
+  - MIN_WORKER_PORT=0
+  - MAX_WORKER_PORT=0
 
   # API keys (keep these secret, don't commit to git!)
+  # A bare name (no `=value`) forwards the variable from the submitting shell,
+  # which keeps the secret out of this file. Either way the value is written
+  # into the job's sbatch script under job_dir and printed in the step's
+  # *_sbatch.log, so keep both private. NeMo-Skills also forwards HF_TOKEN,
+  # WANDB_API_KEY, NVIDIA_API_KEY, OPENAI_API_KEY, AZURE_OPENAI_API_KEY and
+  # GEMINI_API_KEY from that shell whenever they are set, listed here or not.
   # - HF_TOKEN=<YOUR_HF_TOKEN>
   # - WANDB_API_KEY=<YOUR_WANDB_KEY>
-  # - OPENAI_API_KEY=<YOUR_OPENAI_KEY>
+  # - NVIDIA_API_KEY   # hosted judge; see docs/hosted-endpoints.md
+  # - OPENAI_API_KEY
+
+  # Tools offered by the agentic eval benchmarks. A tool whose key is unset
+  # reports itself unavailable to the model rather than failing the run, so
+  # missing keys show up as lower scores, not errors.
+  # - TAVILY_API_KEY   # web_search, used by the fabv1 `web` tool set
 
 # =============================================================================
 # Email Notifications (optional)

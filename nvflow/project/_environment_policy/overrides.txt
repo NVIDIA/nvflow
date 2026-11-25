@@ -1,0 +1,15 @@
+# Generated from the root pyproject.toml by
+# `python scripts/check_project_environment_policy.py --write`; do not edit.
+httpx[http2]>=0.28.1
+nemo-run @ git+https://github.com/NVIDIA-NeMo/Run@17ae86b64d7f75653351664f5d8c9e466faede00
+cryptography>=50.0.0
+anyio>=4.14.2
+Pygments>=2.20.0
+GitPython>=3.1.58
+ray[default]==2.58.0
+urllib3>=2.8.0
+transformers>=5.20.1
+starlette>=1.3.1
+litellm>=1.106.0,<1.107
+lxml>=6.1.0
+gradio>=6.20.0

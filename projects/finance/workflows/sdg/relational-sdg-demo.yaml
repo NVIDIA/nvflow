@@ -1,0 +1,47 @@
+# ============================================================================
+# Finance Relational SDG Pipeline - Demo Configuration
+# ============================================================================
+# Quick E2E demo for relation-aware, multi-document question generation.
+# It reuses the document-grounded demo's smaller model and stage settings,
+# while sampling related SEC filings instead of single-document contexts.
+#
+# Usage:
+#   uv run nvflow run --all --config projects/finance/workflows/sdg/relational-sdg-demo.yaml --cluster my_cluster
+# ============================================================================
+
+_base_: document-grounded-sdg-demo.yaml
+
+workflow:
+  name: "document_grounded_sdg"
+  type: "sdg"
+  description: "Relation-aware multi-document SDG demo"
+
+# Keep shuffled relational outputs separate from the standard DG-SDG demo.
+base_data_dir: /workspace/outputs/finance/demo/workflow-2-relational-sdg-shuffled-genselect-demo
+
+# Reuse the seven-company SEC filings downloaded by the finance demo.
+filings_dir: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download
+
+stages:
+  dg_sdg_preprocess:
+    sampling_strategy: relational
+    input_dir: ${filings_dir}/data
+    output_dir: ${base_data_dir}/step-0-preprocess
+    # Relational preprocessing generates uniform distributions here when absent.
+    distribution_dir: ${base_data_dir}/auto_distribution
+    total_samples: 500
+    max_skip_count: 2000
+    seed: 42
+    extra_args:
+      multi_period_weight: 0.35
+      cross_form_weight: 0.15
+      cross_form_multi_period_weight: 0.15
+      same_year_multi_filing_weight: 0.20
+      multi_form_weight: 0.05
+      form_weights: '{"10-K": 5000, "10-Q": 2000}'
+
+  # Shuffle candidates before the Gym judge to remove answer-position bias.
+  gym_genselect_answers:
+    shuffle_solutions: true
+    shuffle_seed: 42
+    include_context: true

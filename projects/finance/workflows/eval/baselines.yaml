@@ -1,0 +1,93 @@
+# ============================================================================
+# Baseline Model Evaluation
+# ============================================================================
+# The full evaluation matrix, graded by the hosted judge. This is the config to
+# extend when you want more models -- see projects/finance/docs/workflows/05-eval.md.
+#
+# Every model here runs all three benchmarks. The agentic one, fabv1, needs a
+# model-specific tool-call parser, so a model that cannot tool-call is
+# narrowed to the QA pair -- see "Scoping a model" below.
+#
+# How each model is served lives in eval_presets.yaml; this file only chooses
+# the roster and the benchmark scope.
+#
+# Usage:
+#   uv run nvflow run --all -c projects/finance/workflows/eval/baselines.yaml --cluster my_cluster
+#   uv run nvflow run --all -c .../baselines.yaml --cluster my_cluster -e secque -e financebench  # QA only
+#   uv run nvflow run qwen3-14b -c .../baselines.yaml --cluster my_cluster
+# ============================================================================
+_base_: base.yaml
+workflow:
+  name: "eval"
+  type: "evaluation"
+  description: "Evaluate baseline models on finance benchmarks"
+data_root: /workspace/outputs/finance/baselines
+# Tool set offered on fabv1: `noweb` or `web` (web_search needs TAVILY_API_KEY).
+# Results land in a directory named after the choice, so the two never mix.
+fabv1_variant: noweb
+# The evaluated benchmarks; models that can't tool-call narrow this below.
+# eval_data also prepares fabv2's questions, which VALS 1.1 decontaminates
+# against; they are not evaluated.
+environments:
+  secque: ${benchmarks.secque}
+  financebench: ${benchmarks.financebench}
+  fabv1: ${benchmarks.fabv1}
+# Scoping a model:
+#   The agentic benchmark needs a tool_call_parser that vLLM ships for the
+#   model's tool format. A model whose preset declares one runs everything; a
+#   model without one is given `environments: *qa_only` here and skips fabv1.
+#
+#   fabv1 reads the SEC filing-metadata cache that finance:download/sp500's
+#   prefetch_cache writes. Run that once before an agentic campaign.
+.qa_only: &qa_only
+  secque: ${benchmarks.secque}
+  financebench: ${benchmarks.financebench}
+.agentic_deps: &agentic_deps [eval_data]
+models:
+  qwen3-4b:
+    dependencies: *agentic_deps
+    model: ${model_presets.qwen3_4b}
+  qwen3-14b:
+    dependencies: *agentic_deps
+    model: ${model_presets.qwen3_14b}
+  qwen3-32b:
+    dependencies: *agentic_deps
+    model: ${model_presets.qwen3_32b}
+  gpt-oss-120b:
+    dependencies: *agentic_deps
+    model: ${model_presets.gpt_oss_120b}
+  nemotron-3-nano-30b:
+    dependencies: *agentic_deps
+    model: ${model_presets.nemotron_3_nano_30b}
+    # Larger reference models. eval_presets.yaml already carries their serving
+    # profiles; uncomment a model here and in pipeline_stages to include it. They
+    # are heavy -- nemotron-ultra takes 8 GPUs and kimi-k2.6 takes 16.
+    #
+    # qwen3p6-35b-a3b:
+    #   dependencies: *agentic_deps
+    #   model: ${model_presets.qwen3p6_35b_a3b}
+    #
+    # nemotron-ultra:
+    #   dependencies: *agentic_deps
+    #   model: ${model_presets.nemotron_ultra}
+    #
+    # kimi-k2.6:
+    #   dependencies: *agentic_deps
+    #   model: ${model_presets.kimi_k2_6}
+    #
+    # deepseek-v4-flash:
+    #   dependencies: *agentic_deps
+    #   model: ${model_presets.deepseek_v4_flash}
+# Only the stages listed here run under `run --all`;
+# `nvflow run <name> ... --cluster my_cluster` can still target any one of them.
+pipeline_stages:
+  - eval_data
+  - qwen3-4b
+  - qwen3-14b
+  - qwen3-32b
+  - gpt-oss-120b
+  - nemotron-3-nano-30b
+  # - qwen3p6-35b-a3b
+  # - nemotron-ultra
+  # - kimi-k2.6
+  # - deepseek-v4-flash

@@ -1,0 +1,11 @@
+QUESTION:
+
+{question}
+
+REFERENCE ANSWER:
+
+{expected_answer}
+
+ASSISTANT'S ANSWER:
+
+{generated_answer}

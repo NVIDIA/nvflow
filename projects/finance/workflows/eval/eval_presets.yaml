@@ -1,0 +1,376 @@
+# ============================================================================
+# Finance Evaluation - Model Serving Presets
+# ============================================================================
+# One entry per model: how to serve it and how to sample from it. Campaign
+# configs reference an entry instead of restating it:
+#
+#   models:
+#     qwen3-4b:
+#       dependencies: [eval_data]
+#       model: ${model_presets.qwen3_4b}
+#
+# This file is NOT runnable and declares no models: section — it is data only,
+# pulled in through base.yaml.
+#
+# An entry is meant to be referenced whole. Anything that varies by benchmark
+# belongs in that entry's benchmark_models rather than in a campaign, so
+# a model is served the same way everywhere it appears. Note that a campaign
+# cannot merge extra keys into a reference: YAML's `<<:` needs an anchor and
+# does not work on an interpolation, so referencing an entry is all or nothing.
+# A model needing two genuinely different profiles wants two entries.
+#
+# Each entry may declare a benchmark_models profile for every benchmark;
+# only the profiles for benchmarks a campaign actually selects are applied, so
+# presets can be complete without forcing a campaign to run them.
+#
+# To add a model:
+#   Add an entry here, then name it from a campaign's models: section.
+#
+# Keys:
+#   model                    weights to serve
+#   num_gpus/server_nodes    NVFlow resource placement
+#   gym_model                fields passed to Gym's model component
+#     vllm_serve_kwargs      vLLM settings shared by Gym/NVFlow deployment
+#   responses_create_params  sampling
+#   benchmark_models         per-benchmark endpoint overrides
+#
+# Repeat counts are not set here: they belong to the benchmark catalog, so every
+# model is compared on the same number of repeats.
+#
+# Tool calling (enable_auto_tool_choice + tool_call_parser) is only ever set
+# under benchmark_models: the parser is model-specific, and only the
+# agentic benchmarks use tools. A model with no parser available is simply
+# absent from the agentic benchmarks and campaigns scope it to QA.
+# ============================================================================
+model_presets:
+  # --------------------------------------------------------------------------
+  # Qwen3 — thinking mode, hermes tool format
+  # --------------------------------------------------------------------------
+  # Native window is 40960. The agentic benchmarks need 131072, so those
+  # profiles enable YaRN: factor 3.2 == 131072 / 40960. Changing one without
+  # the other silently truncates long tool-use episodes.
+  qwen3_4b:
+    model: /hf_models/Qwen/Qwen3-4B
+    num_gpus: 4 # cluster QOS floor is a whole node
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      vllm_serve_kwargs:
+        reasoning_parser: qwen3
+        max_model_len: 40960
+    responses_create_params:
+      temperature: 0.6
+      top_p: 0.95
+      max_output_tokens: 16384
+    benchmark_models:
+      fabv1: &qwen3_yarn_fabv1
+        gym_model:
+          vllm_serve_kwargs:
+            enable_auto_tool_choice: true
+            tool_call_parser: hermes
+            hf_config_overrides:
+              rope_scaling:
+                rope_type: yarn
+                factor: 3.2
+                original_max_position_embeddings: 40960
+      fabv2: &qwen3_yarn_fabv2
+        gym_model:
+          vllm_serve_kwargs:
+            enable_auto_tool_choice: true
+            tool_call_parser: hermes
+            max_model_len: 131072
+            hf_config_overrides:
+              rope_scaling:
+                rope_type: yarn
+                factor: 3.2
+                original_max_position_embeddings: 40960
+  # A checkpoint trained with YaRN, such as finance_sec_search GRPO, keeps it on
+  # every benchmark.
+  qwen3_4b_yarn:
+    model: /hf_models/Qwen/Qwen3-4B
+    num_gpus: 4
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      vllm_serve_kwargs:
+        reasoning_parser: qwen3
+        max_model_len: 40960
+        hf_config_overrides:
+          rope_scaling:
+            rope_type: yarn
+            factor: 3.2
+            original_max_position_embeddings: 40960
+    responses_create_params:
+      temperature: 0.6
+      top_p: 0.95
+      max_output_tokens: 16384
+    benchmark_models:
+      fabv1: *qwen3_yarn_fabv1
+      fabv2: *qwen3_yarn_fabv2
+  qwen3_14b:
+    model: /hf_models/Qwen/Qwen3-14B
+    num_gpus: 4
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      vllm_serve_kwargs:
+        reasoning_parser: qwen3
+        max_model_len: 40960
+    responses_create_params:
+      temperature: 0.6
+      top_p: 0.95
+      max_output_tokens: 16384
+    benchmark_models:
+      fabv1: *qwen3_yarn_fabv1
+      fabv2: *qwen3_yarn_fabv2
+  qwen3_30b_a3b:
+    model: /hf_models/Qwen/Qwen3-30B-A3B
+    num_gpus: 4
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      vllm_serve_kwargs:
+        reasoning_parser: qwen3
+        max_model_len: 40960
+    responses_create_params:
+      temperature: 0.6
+      top_p: 0.95
+      max_output_tokens: 16384
+    benchmark_models:
+      fabv1: *qwen3_yarn_fabv1
+      fabv2: *qwen3_yarn_fabv2
+  qwen3_32b:
+    model: /hf_models/Qwen/Qwen3-32B
+    num_gpus: 4
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      vllm_serve_kwargs:
+        reasoning_parser: qwen3
+        max_model_len: 40960
+    responses_create_params:
+      temperature: 0.6
+      top_p: 0.95
+      max_output_tokens: 16384
+    benchmark_models:
+      fabv1: *qwen3_yarn_fabv1
+      fabv2: *qwen3_yarn_fabv2
+  # Native 262144, so the agentic profiles need no rope-scaling.
+  qwen3p6_35b_a3b:
+    model: /hf_models/Qwen/Qwen3.6-35B-A3B
+    num_gpus: 4
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      vllm_serve_kwargs:
+        reasoning_parser: qwen3
+        max_model_len: 65536
+    responses_create_params:
+      temperature: 0.6
+      top_p: 0.95
+      max_output_tokens: 32768 # must stay under max_model_len; the prompt needs the rest
+    benchmark_models:
+      fabv1: &qwen3p6_agentic
+        num_gpus: 4
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 262144
+            async_scheduling: true
+            enable_auto_tool_choice: true
+            tool_call_parser: qwen3_coder
+      fabv2: *qwen3p6_agentic
+  # --------------------------------------------------------------------------
+  # GPT-OSS — harmony format, `openai` tool parser
+  # --------------------------------------------------------------------------
+  # Native 131072. fabv2's catalog window is 262144, above that, so the fabv2
+  # profile pins the native value rather than letting the catalog raise it.
+  gpt_oss_20b:
+    model: /hf_models/openai/gpt-oss-20b
+    num_gpus: 4
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        reasoning_effort: high
+      vllm_serve_kwargs:
+        reasoning_parser: openai_gptoss
+        max_model_len: 65536
+    responses_create_params:
+      max_output_tokens: 32768
+    benchmark_models:
+      fabv1: &gpt_oss_fabv1
+        gym_model:
+          vllm_serve_kwargs:
+            enable_auto_tool_choice: true
+            tool_call_parser: openai
+      fabv2: &gpt_oss_fabv2
+        gym_model:
+          vllm_serve_kwargs:
+            enable_auto_tool_choice: true
+            tool_call_parser: openai
+            max_model_len: 131072
+  gpt_oss_120b:
+    model: /hf_models/openai/gpt-oss-120b
+    num_gpus: 4
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        reasoning_effort: high
+      vllm_serve_kwargs:
+        reasoning_parser: openai_gptoss
+        max_model_len: 65536
+    responses_create_params:
+      max_output_tokens: 32768
+    benchmark_models:
+      fabv1: *gpt_oss_fabv1
+      fabv2: *gpt_oss_fabv2
+  # --------------------------------------------------------------------------
+  # Nemotron
+  # --------------------------------------------------------------------------
+  nemotron_3_nano_30b:
+    model: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    num_gpus: 4
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      vllm_serve_kwargs:
+        reasoning_parser: deepseek_r1
+        max_model_len: 65536
+        # Hybrid Mamba attention: the fp32 SSM cache keeps long generations stable.
+        mamba_ssm_cache_dtype: float32
+    responses_create_params:
+      temperature: 1.0
+      top_p: 1.0
+      max_output_tokens: 32768
+    benchmark_models:
+      fabv1:
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 131072
+            enable_auto_tool_choice: true
+            tool_call_parser: qwen3_coder
+      fabv2: &nano_agentic
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 262144
+            enable_auto_tool_choice: true
+            tool_call_parser: qwen3_coder
+  # NVFP4 550B MoE. reasoning_parser_plugin loads an out-of-tree parser, so the
+  # path must stay valid inside the container's /workspace mount.
+  nemotron_ultra:
+    model: /hf_models/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    num_gpus: 8
+    server_nodes: 1
+    gym_model:
+      uses_reasoning_parser: true
+      vllm_serve_kwargs:
+        reasoning_parser: ultra_v3
+        max_model_len: 65536
+        dtype: bfloat16
+        kv_cache_dtype: fp8
+        gpu_memory_utilization: 0.95
+        max_num_seqs: 64
+        language_model_only: true
+        distributed_executor_backend: mp
+        enable_prefix_caching: true
+        enable_expert_parallel: true
+        reasoning_parser_plugin: project://nvfinance/utils/evaluation/ultra_v3_reasoning_parser.py
+    responses_create_params:
+      temperature: 1
+      top_p: 0.95
+      max_output_tokens: 32768 # must stay under max_model_len; the prompt needs the rest
+    benchmark_models:
+      fabv1: &ultra_agentic
+        num_gpus: 8
+        server_nodes: 1
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 262144
+            enable_auto_tool_choice: true
+            tool_call_parser: qwen3_coder
+      fabv2: *ultra_agentic
+  # --------------------------------------------------------------------------
+  # Gemma — standard chat, no reasoning channel
+  # --------------------------------------------------------------------------
+  # 8192 is a hard output cap for this model. vLLM ships no parser for its tool
+  # format, so it has no agentic profile.
+  gemma_3_4b_it:
+    model: /hf_models/google/gemma-3-4b-it
+    num_gpus: 4
+    gym_model:
+      vllm_serve_kwargs:
+        max_model_len: 40960
+    responses_create_params:
+      max_output_tokens: 8192
+  # --------------------------------------------------------------------------
+  # Frontier MoE — multi-node, reduced repeat count to bound cost
+  # --------------------------------------------------------------------------
+  kimi_k2_6:
+    model: /hf_models/Kimi-K2.6/
+    num_gpus: 8
+    server_nodes: 2
+    gym_model:
+      uses_reasoning_parser: true
+      vllm_serve_kwargs:
+        reasoning_parser: kimi_k2
+        max_model_len: 65536
+        dtype: bfloat16
+        kv_cache_dtype: fp8
+        gpu_memory_utilization: 0.95
+        max_num_seqs: 8
+        language_model_only: true
+        distributed_executor_backend: ray
+        enable_prefix_caching: true
+        enable_expert_parallel: true
+    responses_create_params:
+      temperature: 1.0
+      top_p: 0.95
+      max_output_tokens: 32768 # must stay under max_model_len; the prompt needs the rest
+    benchmark_models:
+      fabv1: &kimi_agentic
+        num_gpus: 8
+        server_nodes: 2
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 262144
+            enable_auto_tool_choice: true
+            tool_call_parser: kimi_k2
+      fabv2: *kimi_agentic
+  deepseek_v4_flash:
+    model: /hf_models/DeepSeek-V4-Flash-0731
+    num_gpus: 8
+    server_nodes: 1
+    gym_model:
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      vllm_serve_kwargs:
+        reasoning_parser: deepseek_v4
+        max_model_len: 1048576
+        dtype: bfloat16
+        kv_cache_dtype: fp8
+        block_size: 256
+        gpu_memory_utilization: 0.94
+        max_num_seqs: 8
+        language_model_only: true
+        enable_expert_parallel: true
+        # MoE backend left to vLLM: deep_gemm_mega_moe fails below SM100.
+        tokenizer_mode: deepseek_v4
+    responses_create_params:
+      temperature: 1
+      top_p: 1
+      max_output_tokens: 32768
+    benchmark_models:
+      fabv1: &deepseek_agentic
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 1048576
+            enable_auto_tool_choice: true
+            tool_call_parser: deepseek_v4
+      fabv2: *deepseek_agentic

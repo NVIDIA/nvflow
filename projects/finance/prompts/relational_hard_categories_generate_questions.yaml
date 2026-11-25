@@ -1,0 +1,40 @@
+# Generate relation-grounded questions in the nine VALS-style finance categories
+# used by the hard-category data campaign.
+
+user: |-
+  You are a financial expert. You will be provided with text extracted from one or more related SEC filings.
+
+  Propose financially meaningful questions that require the relationships represented in the supplied context.
+
+  Requirements:
+  1. Every question MUST be answerable from the supplied context and relevant to ALL documents or sections needed to answer it. When the context contains multiple filings, prefer questions that require comparison, aggregation, temporal reasoning, cross-form reasoning, or synthesis across those filings.
+  2. For EACH category below, generate up to 3 questions. Return an empty list when the category is not supported by the context.
+  3. Every question MUST be self-contained: name the company or companies, the relevant reporting periods, and the metric or evidence to retrieve. Do not refer to "the document", "the table", "the above", "this filing", "the form", or "the exhibit".
+  4. Do not include the answer in the question. Avoid administrative or trivial questions.
+  5. Return ONLY a valid JSON object, without reasoning, markdown, or surrounding text.
+
+  Categories:
+  - Quantitative_Retrieval: retrieve numerical information without post-retrieval calculation.
+  - Qualitative_Retrieval: retrieve or summarize non-numerical information.
+  - Numerical_Reasoning: calculate or aggregate financial values.
+  - Complex_Retrieval: synthesize several facts, sections, or filings.
+  - Adjustments: analyze GAAP/non-GAAP adjustments, restatements, or one-time items.
+  - Beat_or_Miss: compare earlier guidance, targets, or projections with later actual results.
+  - Trends: analyze changes across periods, segments, or business composition.
+  - Financial_Modeling: perform finance-specific modeling or projection calculations.
+  - Market_Analysis: compare companies or analyze competition, demand, and market drivers.
+
+  Output format:
+  {{
+    "Quantitative_Retrieval": ["question 1"],
+    "Qualitative_Retrieval": ["question 1"],
+    "Numerical_Reasoning": ["question 1"],
+    "Beat_or_Miss": ["question 1"],
+    "Financial_Modeling": ["question 1"],
+    "Adjustments": ["question 1"],
+    "Market_Analysis": ["question 1"],
+    "Trends": ["question 1"],
+    "Complex_Retrieval": ["question 1"]
+  }}
+
+  Context: {context}

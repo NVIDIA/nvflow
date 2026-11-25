@@ -1,0 +1,25 @@
+
+workflow:
+  name: answer_generation
+  type: sdg
+
+cluster: my_cluster
+base_output_dir: /workspace/outputs/starter
+
+pipeline_stages:
+  - generate_answer
+
+stages:
+  generate_answer:
+    uses: project:my_project.stage:GenerateAnswerStage
+    input_file: project://data/input.jsonl
+    output_dir: ${base_output_dir}/generate-answer
+    prompt_config: project://prompts/generate_answer.yaml
+    dependencies: []
+    stage_kwargs:
+      model: /hf_models/Qwen/Qwen3-4B
+      server_type: vllm
+      server_gpus: 1
+      server_nodes: 1
+      num_random_seeds: 1
+      num_chunks: 1

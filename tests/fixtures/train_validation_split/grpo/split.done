@@ -1,0 +1,1 @@
+{"schema_version": 1, "status": "complete", "train": {"rows": 32, "sha256": "98e2f77b3fa02383affdeac64647eec3f398fe8ab387bca23b7c6d1762effbcf"}, "validation": {"rows": 8, "sha256": "aa5d06a2cd68a525eb8860256760111a8ee1e87d394099215764e2583ed85f9c"}}

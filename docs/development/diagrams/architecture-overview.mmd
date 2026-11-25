@@ -1,0 +1,43 @@
+flowchart TB
+    User["CLI or Python user"]
+
+    subgraph Platform["NVFlow platform"]
+        Definition[WorkflowDefinition]
+        ProjectContracts["Project manifest, resolver, and context"]
+        StageResolver["Workflow uses and BaseStage"]
+        Planner["WorkflowPlanner and LaunchPlan"]
+        Runner[WorkflowRunner]
+        Packaging[Submission-scoped packaging]
+    end
+
+    subgraph Project["Selected project"]
+        Manifest[project.yaml]
+        Recipes["Optional recipe DAGs"]
+        Workflow[Workflow YAML]
+        Stages[Project stages]
+        Assets["Prompts, configs, and assets"]
+    end
+
+    subgraph Operator["Operator infrastructure"]
+        Target[Cluster configuration]
+        Images[Worker images]
+        Storage["Models, data, and outputs"]
+        Scheduler["NeMo-Skills, NeMo-Run, and Slurm, or supplied Ray Jobs clusters"]
+    end
+
+    User --> Definition
+    Manifest --> ProjectContracts
+    Manifest --> Recipes
+    Recipes -->|"complete selector keys"| Workflow
+    Workflow --> Definition
+    Assets --> ProjectContracts
+    Definition --> ProjectContracts
+    ProjectContracts --> StageResolver
+    StageResolver --> Stages
+    Definition --> Planner
+    Target --> Planner
+    Planner --> Runner
+    Runner --> Packaging
+    Packaging --> Scheduler
+    Images --> Scheduler
+    Storage --> Scheduler

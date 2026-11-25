@@ -1,0 +1,30 @@
+sequenceDiagram
+    actor User
+    participant CLI as nvflow
+    participant Definition as WorkflowDefinition
+    participant Resolver as ProjectResolver
+    participant Runner as WorkflowRunner
+    participant Planner as WorkflowPlanner
+    participant Stage as BaseStage
+    participant Engine as DirectSlurmEngine or SuppliedRayJobsEngine
+    participant Scheduler as Slurm or supplied Ray Jobs
+
+    User->>CLI: run --all --config workflow.yaml --cluster target
+    CLI->>Definition: load_workflow()
+    Definition->>Resolver: resolve project bundle
+    Resolver-->>Definition: ProjectContext
+    CLI->>Runner: construct with definition and target
+    Runner->>Planner: execution_graph(resolved target)
+
+    loop selected stages
+        Planner->>Definition: resolve_stage_class(stage)
+        Planner->>Stage: execution(context)
+        Stage-->>Planner: StageExecution
+    end
+
+    Planner-->>Runner: ExecutionGraph
+    Runner->>Engine: engine_for(target).submit(graph)
+    Engine->>Scheduler: submit exact tasks
+    Scheduler-->>Engine: job handles
+    Engine-->>Runner: SubmissionReceipt
+    Runner-->>User: SubmissionReceipt

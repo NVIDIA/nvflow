@@ -1,0 +1,126 @@
+# ============================================================================
+# Qwen3-4B SFT Training Configuration
+# ============================================================================
+# Inherits shared pipeline logic from base.yaml and provides all Qwen3-4B
+# specific settings (tokenizer, model paths, parallelism, etc.)
+#
+# Usage:
+#   uv run nvflow run --all --config projects/finance/workflows/sft/qwen3_4b.yaml --cluster my_cluster
+# ============================================================================
+
+# Inherit base SFT workflow
+_base_: base.yaml
+
+# Model identity (define once, reference everywhere via ${hf_model_path})
+hf_model_path: /hf_models/Qwen/Qwen3-4B
+
+# Model-specific output directory
+base_output_dir: /workspace/outputs/finance/demo/workflow-4-sft/qwen3_4b
+
+directories:
+  raw_train_data: /workspace/outputs/finance/demo/workflow-3-template-based-sdg/step-5-filter-answers
+
+# ============================================================================
+# Pipeline Stages
+# ============================================================================
+pipeline_stages:
+  - data_transformation
+  - prepare_for_sft
+  - train_validation_split
+  - sequence_length_grouping
+  - training
+  - eval
+
+# ============================================================================
+# Model-Specific Stage Overrides
+# ============================================================================
+
+stages:
+
+  # --------------------------------------------------------------------------
+  # Stage 1: Prepare for SFT - Qwen3-4B tokenizer
+  # --------------------------------------------------------------------------
+  prepare_for_sft:
+    prepare_data_kwargs:
+      ctx_args: >-
+        ++tokenizer=${hf_model_path}
+        ++prompt_config=project://prompts/secque_template.yaml
+        ++chat_template_kwargs.enable_thinking=true
+
+  # --------------------------------------------------------------------------
+  # Stage 3: Sequence Length Grouping - Qwen3-4B tokenizer
+  # --------------------------------------------------------------------------
+  sequence_length_grouping:
+    tokenizer_path: ${hf_model_path}
+
+  # --------------------------------------------------------------------------
+  # Stage 4: Training - Qwen3-4B configuration (NeMo-RL format)
+  # --------------------------------------------------------------------------
+  training:
+    model_name: Qwen/Qwen3-4B
+    hf_checkpoint_path: ${hf_model_path}
+
+    # Use Megatron backend (standard for Qwen3-4B)
+    backend: megatron
+
+    # Cluster configuration for 4B model
+    total_gpus: 8
+    dependent_jobs: 0        # No dependent jobs for demo
+
+    # Use base preset with model-specific overrides
+    preset: "sft-base"
+
+    # Qwen3-4B specific configuration (only non-default values)
+    overrides:
+      sft:
+        max_num_epochs: 2
+        val_period: 1              # Validate every step
+
+      checkpointing:
+        save_period: 10            # Demo: checkpoint at end of each epoch (~9 steps/epoch)
+        checkpoint_must_save_by: "00:03:40:00"
+
+      policy:
+        max_total_sequence_length: 32768  # 32K (matches max_token_length filter)
+
+        # Sequence packing (required for Context Parallelism in Megatron)
+        sequence_packing:
+          enabled: true
+          train_mb_tokens: 32768   # Match max_total_sequence_length
+
+        # Megatron parallelism: TP × PP × CP = 2×1×2 = 4 → DP = 8/4 = 2
+        megatron_cfg:
+          tensor_model_parallel_size: 2
+          context_parallel_size: 2    # 32K/2 = 16K tokens/rank
+          sequence_parallel: true
+          activation_checkpointing: true
+
+          optimizer:
+            min_lr: 5e-7            # Different from base (5e-6)
+
+          scheduler:
+            lr_decay_style: "cosine"
+            lr_warmup_iters: 1      # Minimal warmup for demo
+            lr_warmup_init: 1e-7
+
+      data:
+        max_input_seq_length: ${stages.training.overrides.policy.max_total_sequence_length}
+
+  # --------------------------------------------------------------------------
+  # Stage 5: Evaluate Checkpoints - Qwen3-4B
+  # --------------------------------------------------------------------------
+  eval:
+    eval_steps: [10]
+    eval_data_root: /workspace/outputs/finance/demo/workflow-1-baseline-eval/step-1-eval-data  # prepared by eval/demo
+    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-8g-tp2-pp1-cp2-seq32k
+    base_output_dir: ${base_output_dir}
+    format: megatron
+    base_model: ${hf_model_path}
+    # Conversion runs one process on one GPU; raise this on a cluster with a
+    # per-job GPU minimum.
+    conversion:
+      num_gpus: 1
+    preset: qwen3_4b
+    # Quick start stays air-gapped: the QA benchmarks are graded by a locally
+    # served judge, so no hosted-API key is needed.
+    benchmarks: [secque, financebench]

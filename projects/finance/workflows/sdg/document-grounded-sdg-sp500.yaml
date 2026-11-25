@@ -1,0 +1,7 @@
+# Production document-grounded SDG variant whose output is consumed by the
+# maintained large-model GRPO workflows.
+_base_: document-grounded-sdg-qwen-prod.yaml
+workflow:
+  description: "Production Qwen document-grounded SDG for S&P 500 GRPO training"
+  runnable: true
+base_data_dir: /workspace/outputs/finance/sp500/workflow-3-document-grounded-sdg

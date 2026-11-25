@@ -1,0 +1,277 @@
+# ============================================================================
+# NVIDIA-Nemotron-3-Nano-30B-A3B SFT Training Configuration
+# ============================================================================
+# Inherits shared pipeline logic from base.yaml and provides all
+# Nemotron-3-Nano-30B specific settings (tokenizer, model paths, parallelism).
+#
+# Model: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+# Architecture: MoE Hybrid (23 Mamba-2 + MoE layers, 6 Attention layers)
+#   - 128 experts + 1 shared expert, 6 experts active per token
+#   - Active params: 3.5B, Total params: 30B
+# Context Length: Up to 1M tokens
+# Reasoning: Thinking model - uses enable_thinking=true in chat template
+#
+# Usage:
+#   uv run nvflow run --all --config projects/finance/workflows/sft/nemotron-3-nano.yaml --cluster my_cluster
+# ============================================================================
+
+# Inherit base SFT workflow
+_base_: base.yaml
+
+# Model-specific output directory
+base_output_dir: /workspace/outputs/finance/sp500/workflow-4-sft/nemotron-3-nano
+
+directories:
+  raw_train_data: /workspace/outputs/finance/sp500/workflow-3-template-based-sdg/step-5-filter-answers
+
+# ============================================================================
+# Pipeline Stages - Standard SFT pipeline (no convert_to_messages)
+# ============================================================================
+pipeline_stages:
+  - data_transformation
+  - prepare_for_sft
+  - train_validation_split
+  - sequence_length_grouping
+  - training
+  - eval
+
+# ============================================================================
+# Model-Specific Stage Overrides
+# ============================================================================
+
+stages:
+
+  # --------------------------------------------------------------------------
+  # Stage 1: Prepare for SFT - Nemotron-3-Nano-30B tokenizer
+  # --------------------------------------------------------------------------
+  prepare_for_sft:
+    prepare_data_kwargs:
+      ctx_args: >-
+        ++tokenizer=/hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+        ++prompt_config=project://prompts/secque_template.yaml
+        ++chat_template_kwargs.enable_thinking=true
+
+  # --------------------------------------------------------------------------
+  # Stage 3: Sequence Length Grouping - Nemotron-3-Nano-30B tokenizer
+  # --------------------------------------------------------------------------
+  sequence_length_grouping:
+    tokenizer_path: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+
+  # --------------------------------------------------------------------------
+  # Stage 4: Training with Megatron Backend (ACTIVE - nano-v3 container)
+  # --------------------------------------------------------------------------
+  # Using nano-v3 container's built-in code for proper MoE support
+  # Megatron backend is production-ready for long context + MoE models
+  # --------------------------------------------------------------------------
+  training:
+    model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    hf_checkpoint_path: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+
+    # Use Megatron/MCore backend (production-ready for MoE + long context)
+    backend: megatron
+
+    # Cluster configuration for 30B MoE model
+    # Despite 30B total params, only 3.5B active - similar compute to smaller models
+    total_gpus: 256
+    dependent_jobs: 4         # Chain 5 jobs total: 1 done + 4 more (to complete Epoch 1)
+
+    # Use base preset with model-specific overrides
+    preset: "sft-base"
+
+    # Experiment tracking - W&B enabled
+    wandb_project: finance-training
+    wandb_mode: online        # online | offline | disabled
+
+    # Nemotron-3-Nano-30B specific configuration (only non-default values)
+    overrides:
+      sft:
+        max_num_epochs: 3
+        val_period: 50              # More frequent validation for S&P 500 dataset
+
+      checkpointing:
+        save_period: 200            # Save every 200 steps (reduced frequency)
+        checkpoint_must_save_by: "00:03:40:00"  # Save before 4hr SLURM timeout
+
+      data:
+        max_input_seq_length: ${stages.training.overrides.policy.max_total_sequence_length}  # Auto-match policy sequence length
+
+      policy:
+        train_global_batch_size: 128      # 2x scaled for 32 nodes (Option 2: Balanced)
+        train_micro_batch_size: 1
+        max_total_sequence_length: 49152  # 48K (matches data max_token_length)
+        precision: "bfloat16"             # Match official nano-v3 config
+        max_grad_norm: 1.0                # Gradient clipping
+
+        # Megatron parallelism for 30B MoE (16 GPUs = 2 nodes × 8 GPUs)
+        # IMPORTANT: Define this FIRST so other fields can reference it
+        megatron_cfg:
+          enabled: true
+
+          # Environment variables for optimal performance
+          env_vars:
+            PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+            UB_TIMEOUT: "720"
+            CUDA_DEVICE_MAX_CONNECTIONS: "1"
+            NVTE_FWD_LAYERNORM_SM_MARGIN: "16"
+            NVTE_BWD_LAYERNORM_SM_MARGIN: "16"
+            NCCL_P2P_NET_CHUNKSIZE: "2097152"
+            NCCL_DEBUG: "WARN"
+            TORCHINDUCTOR_WORKER_START: "fork"
+            NCCL_TIMEOUT_MS: "1800000"  # 30 min timeout for slow NFS checkpoint writes
+
+          # Parallelism (256 GPUs = 32 nodes × 8 GPUs) - Option 2: Balanced
+          # UNEQUAL DP configuration (ETP=1 pattern from NVIDIA reference):
+          #   Regular DP = 256 / (TP × CP × PP) = 256 / (4×8×1) = 8
+          #   Expert DP  = 256 / (ETP × EP × PP) = 256 / (1×8×1) = 32  (4x higher)
+          # Memory per GPU: ~48 GB (params=15GB, grads=8GB, opt=15GB, acts=8GB, overhead=2GB)
+          tensor_model_parallel_size: 4         # 7.5B params per GPU (30B/4)
+          pipeline_model_parallel_size: 1
+          context_parallel_size: 8              # 6K tokens per GPU (48K/8)
+          expert_model_parallel_size: 8         # 16 experts per GPU (128/8)
+          expert_tensor_parallel_size: 1        # ETP=1 enables unequal DP (NVIDIA pattern)
+          sequence_parallel: true
+
+          # Memory management - Activation checkpointing for OOM prevention
+          empty_unused_memory_level: 1
+          activation_checkpointing: true        # Essential with TP=4: saves ~30-50% activation memory
+
+          # Core settings from reference config
+          bias_activation_fusion: False    # Match reference (commented as False)
+          apply_rope_fusion: true          # ~20% speedup with sequence packing
+          layernorm_epsilon: 1e-6
+
+          # MoE-specific configuration
+          # NOTE: All MoE parameters now use safe defaults from sft_presets.yaml
+          # (moe_router_load_balancing_type: "none", moe_aux_loss_coeff: 0.0, etc.)
+          # No model-specific overrides needed for Nemotron-3-Nano
+
+          # Pipeline settings
+          pipeline_dtype: ${stages.training.overrides.policy.precision}
+          num_layers_in_first_pipeline_stage: null
+          num_layers_in_last_pipeline_stage: null
+
+          # Optimizer - Match reference config
+          optimizer:
+            optimizer: "adam"
+            lr: 5.00001e-5               # Match reference (~16× higher than previous 3.0e-6)
+            min_lr: 5.0e-5               # Constant LR
+            weight_decay: 0.0            # No weight decay (reference uses 0.0)
+            bf16: true
+            fp16: false
+            params_dtype: "bfloat16"
+
+            # Adam hyperparameters
+            adam_beta1: 0.9
+            adam_beta2: 0.98             # Reference uses 0.98 (vs typical 0.999)
+            adam_eps: 1e-8
+
+            # SGD (unused but in reference)
+            sgd_momentum: 0.9
+
+            # Distributed optimizer
+            use_distributed_optimizer: true
+            use_precision_aware_optimizer: false
+
+            clip_grad: ${stages.training.overrides.policy.max_grad_norm}
+
+            # CPU offload (disabled)
+            optimizer_cpu_offload: false
+            optimizer_offload_fraction: 0.0
+
+          # Scheduler - Match reference config
+          scheduler:
+            start_weight_decay: ${stages.training.overrides.policy.megatron_cfg.optimizer.weight_decay}
+            end_weight_decay: ${stages.training.overrides.policy.megatron_cfg.optimizer.weight_decay}
+            weight_decay_incr_style: "constant"
+            lr_decay_style: "constant"   # Changed from "cosine" to match reference
+            lr_decay_iters: 60000
+            lr_warmup_iters: 156         # Match reference (was 0)
+            lr_warmup_init: 3e-7         # Match reference (was 1e-7)
+            override_opt_param_scheduler: true
+
+          # Distributed Data Parallel Configuration
+          distributed_data_parallel_config:
+            grad_reduce_in_fp32: true
+            overlap_grad_reduce: true
+            overlap_param_gather: true
+            data_parallel_sharding_strategy: "no_shard"
+            use_custom_fsdp: false
+
+        # Sequence packing (REQUIRED for CP > 1 in Megatron)
+        # NOTE: Must be at policy level, not inside megatron_cfg
+        # Defined AFTER megatron_cfg so it can reference it
+        sequence_packing:
+          enabled: true
+          train_mb_tokens: ${stages.training.overrides.policy.max_total_sequence_length}
+          algorithm: "modified_first_fit_decreasing"
+          sequence_length_round: 64
+
+        # Make sequence length divisible by TP for sequence parallel
+        make_sequence_length_divisible_by: ${stages.training.overrides.policy.megatron_cfg.tensor_model_parallel_size}
+
+  # --------------------------------------------------------------------------
+  # Stage 4b: Training with the FSDP Backend (REFERENCE - For testing)
+  # --------------------------------------------------------------------------
+  # FSDP has known limitations with MoE models:
+  #   - CP > 1 causes attention mask dimension mismatch with long sequences
+  #   - MoE mesh configuration bugs during gradient computation
+  # Use for shorter sequences (<= 8K) or development testing only
+  # --------------------------------------------------------------------------
+  training_fsdp:
+    model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    hf_checkpoint_path: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+
+    # Use the FSDP (Automodel) backend
+    backend: fsdp
+
+    # Cluster configuration for 30B MoE model
+    total_gpus: 16
+    dependent_jobs: 0         # No dependent jobs for demo
+
+    # Use base preset with model-specific overrides
+    preset: "sft-base"
+
+    # Nemotron-3-Nano-30B specific configuration
+    overrides:
+      sft:
+        max_num_epochs: 3
+        val_period: 50              # More frequent validation for S&P 500 dataset
+
+      checkpointing:
+        save_period: 100            # Save every 100 steps
+        checkpoint_must_save_by: "00:03:40:00"  # Save before 4hr SLURM timeout
+
+      policy:
+        max_total_sequence_length: 8192  # 8K for FSDP testing (auto-truncates longer sequences)
+
+        # FSDP parallelism for 30B MoE (16 GPUs = 2 nodes × 8 GPUs)
+        # For FSDP MoE: world_size % (TP × CP × EP) == 0
+        # Using: TP × CP × EP = 2×1×8 = 16 → DP = 16/16 = 1
+        # Note: CP disabled due to attention mask dimension mismatch with long sequences
+        automodel_cfg:
+          tensor_parallel_size: 2
+          context_parallel_size: 1       # Disabled: CP > 1 causes tensor dimension mismatch
+          expert_parallel_size: 8        # 128 experts across 8 EP ranks
+          sequence_parallel: false       # Disabled: CP + sequence_parallel incompatible in FSDP
+          activation_checkpointing: true # Memory optimization
+
+        # FSDP optimizer (PyTorch native)
+        optimizer:
+          kwargs:
+            lr: 3.0e-6            # Lower LR for nano (base: 5.0e-6)
+
+        # Scheduler: Uses default from sft_presets.yaml (warmup + cosine decay)
+
+  # --------------------------------------------------------------------------
+  # Stage 5: Evaluate Checkpoints - Nemotron-3-Nano-30B
+  # --------------------------------------------------------------------------
+  eval:
+    eval_steps: [1400, 2600]
+    eval_data_root: /workspace/outputs/finance/baselines/step-1-eval-data  # prepared by eval/baselines
+    checkpoint_path: ${directories.step-4-training}/model-nvidia-nemotron-3-nano-30b-a3b-bf16-256g-tp4-pp1-cp8-seq48k
+    base_output_dir: ${base_output_dir}
+    format: megatron
+    base_model: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    baseline_model: /hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    preset: nemotron_3_nano_30b
+    benchmarks: [secque, financebench]

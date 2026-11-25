@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "captured_from_code_commit": "1a686de2a2465f6cd8bf0080de284fa7d157635c",
+  "remote_tip_before_migration": "b92634acbe859d4e904244e75f03fd181ef99c9f",
+  "deterministic_fixture_blobs": {
+    "tests/fixtures/rollout/aggregate_cmd_custom_filename.txt": "4fbff5f45da013237706da17103e776ef5f7af1b",
+    "tests/fixtures/rollout/aggregate_cmd_default.txt": "1458a9569b74d4b007e58510c42d29343e4ccac1",
+    "tests/fixtures/rollout/client_cmd_dual_server.txt": "043ecafb85ebca6a23dc6df770e2a57192b9a47d",
+    "tests/fixtures/rollout/client_cmd_max_samples.txt": "4fff81e81bc3f1cdfcf7260030472bea85d842f1",
+    "tests/fixtures/rollout/client_cmd_no_chunk.txt": "6b4fbcc661c742c24a991bfad19118629daabff5",
+    "tests/fixtures/rollout/client_cmd_no_rcp.txt": "48195d28f688246f78bb4f6530f249d2c555686d",
+    "tests/fixtures/rollout/client_cmd_policy_only.txt": "cb4046ecd7ae8044469db607ae6d86cdde470d35",
+    "tests/fixtures/rollout/filter_cmd_full.txt": "3d8a6463c66979ebb680792be05386ddfc247795",
+    "tests/fixtures/rollout/filter_cmd_minimal.txt": "8b1737ef7623b0e0a45a99a77afa50cc82515703",
+    "tests/fixtures/rollout/merge_cmd_1chunk.txt": "b56ec837acdb22694f5bf5935641cf52adec33a3",
+    "tests/fixtures/rollout/merge_cmd_8chunks.txt": "bbf0ab5f4d503ca7e46ff72c0023c70065201d76",
+    "tests/fixtures/verify/analysis_cmd_empty_entries.txt": "015d80ffdc4f4d91d9f2a7b9cfbb9f0338ba64ff",
+    "tests/fixtures/verify/analysis_cmd_multi_seed.txt": "842683154794410749fe5e9a205696a62d6c1cc5",
+    "tests/fixtures/verify/analysis_cmd_single_seed.txt": "7f4d972582f225b19cb7efde1638a1e75a53d2f7",
+    "tests/fixtures/verify/verify_cmd_local_judge.txt": "004e66ceced6c872b2025b9de87fcef4f98b46ed",
+    "tests/fixtures/verify/verify_cmd_openai_judge.txt": "e7e82a5a3f4cf08b7a0cd1f24ff0de89792defd9"
+  },
+  "stochastic_quality_baseline": {
+    "scope": "historical qwen3_30b_a3b smoke, finance_sec_search",
+    "output_root": "finance/sap-500/workflow-5-grpo/qwen3_30b_a3b_smoke/step-5-collect-rollouts/finance_sec_search",
+    "output_timestamp": "2026-05-29",
+    "provenance_note": "Historical output does not record its source commit; use for stochastic metric comparison, not deterministic parity.",
+    "model": "Qwen/Qwen3-30B-A3B",
+    "judge": "openai/gpt-oss-120b",
+    "num_questions": 1000,
+    "num_repeats": 3,
+    "total_rollouts": 3000,
+    "aggregate": {
+      "average_reward": 0.05166666666666666,
+      "average_reward_std": 0.06889528095680675,
+      "questions_with_signal": 180,
+      "questions_with_signal_fraction": 0.18,
+      "pass_at_1": 0.02599999999999998,
+      "pass_at_2": 0.046666666666666634,
+      "pass_at_3": 0.063
+    },
+    "repeats": [
+      {
+        "rollout_index": 0,
+        "average_reward": 0.0475,
+        "judge_failures": 0,
+        "tool_error_fraction": 0.125,
+        "completed_fraction": 0.017
+      },
+      {
+        "rollout_index": 1,
+        "average_reward": 0.0545,
+        "judge_failures": 0,
+        "tool_error_fraction": 0.143,
+        "completed_fraction": 0.024
+      },
+      {
+        "rollout_index": 2,
+        "average_reward": 0.053,
+        "judge_failures": 0,
+        "tool_error_fraction": 0.12,
+        "completed_fraction": 0.029
+      }
+    ],
+    "filter": {
+      "profiled_questions": 1000,
+      "kept": 180,
+      "removed_no_signal": 820,
+      "kept_fraction_of_profiled": 0.18,
+      "unprofiled_universe_rows": 186225
+    }
+  }
+}

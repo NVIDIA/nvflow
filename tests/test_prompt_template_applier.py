@@ -34,8 +34,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-
-from nvflow.recipes.finance.utils.rl.prompt_template_applier import DateResolver
+from nvfinance.utils.rl.prompt_template_applier import DateResolver
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -81,7 +80,7 @@ def _run_applier(
     cmd = [
         sys.executable,
         "-m",
-        "nvflow.recipes.finance.utils.rl.prompt_template_applier",
+        "nvfinance.utils.rl.prompt_template_applier",
         str(input_dir),
         str(output_dir),
         "--prompt_template",
@@ -235,7 +234,7 @@ def test_chunk_records_preserve_input_content(tmp_path: Path) -> None:
 
     Parses outputs with stdlib ``json.loads`` (the applier writes via
     ``orjson``) to guard the orjson-output ↔ stdlib-input contract that
-    downstream stages (``responses_api_converter``, ``ng_prepare_data``)
+    downstream stages (``responses_api_converter``, Gym dataset collation)
     rely on.
     """
     input_dir = tmp_path / "in"
@@ -276,6 +275,29 @@ def test_chunk_records_preserve_input_content(tmp_path: Path) -> None:
         assert rec["expected_answer"] == rec["generation"]
         # uuid is preserved verbatim from data_transformation output.
         assert rec["uuid"].startswith("uuid-")
+
+
+def test_current_date_template_uses_static_fallback_without_metadata(tmp_path: Path) -> None:
+    """Open-context prompts still receive the configured evaluation date.
+
+    VALS-seeded agent questions intentionally omit filing metadata, so dynamic
+    date resolution is unavailable. Templates containing ``{current_date}``
+    must use the normalized fallback instead of failing with ``KeyError``.
+    """
+    input_dir = tmp_path / "in"
+    output_dir = tmp_path / "out"
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        "user: |\n  Current date: {current_date}\n  Question: {problem}\n",
+        encoding="utf-8",
+    )
+    _make_input_chunks(input_dir, num_chunks=1, records_per_chunk=1)
+
+    _run_applier(input_dir, output_dir, template)
+
+    record = json.loads((output_dir / "final_result_chunk1.jsonl").read_text().strip())
+    assert record["current_date"] == "April 07, 2025"
+    assert "Current date: April 07, 2025" in record["prompt"]
 
 
 # ============================================================================

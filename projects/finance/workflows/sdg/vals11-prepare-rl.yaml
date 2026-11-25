@@ -1,0 +1,27 @@
+# VALS 1.1, workflow 1 for the RL set: merges the two for_super RL files.
+_base_: vals11-prepare.yaml
+
+workflow:
+  name: "vals11-prepare-rl"
+  description: "Prepare the VALS 1.1 RL question set"
+  runnable: true
+
+question_set: rl
+# About 300,000 expert-check calls: three chunks keep each Slurm job within the
+# cluster's 4-hour limit.
+expert_chunks: 3
+pool_inputs:
+  - path: ${pool_dir}/rl_finance_sec_search_noweb.jsonl
+    source: rl
+  - path: ${pool_dir}/rl_tool_traces_noweb.jsonl
+    source: rl
+
+# A tenth of the RL questions offer web search.
+stages:
+  build_pools:
+    substages:
+      split:
+        splits:
+          held_out: 0.05
+          web_off: 0.85
+          web_on: 0.10

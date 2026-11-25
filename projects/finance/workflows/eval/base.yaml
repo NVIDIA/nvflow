@@ -1,0 +1,342 @@
+# ============================================================================
+# Finance Evaluation - Shared Configuration (NeMo-Gym backend)
+# ============================================================================
+# Shared settings for every standalone evaluation campaign: the benchmark
+# catalog, rollout defaults, the judge, and the data-preparation stages.
+#
+# This file is NOT runnable — it declares no models and no pipeline_stages.
+# Each runnable sibling inherits it, declares its own `models:` bodies, scopes
+# `environments:` to the benchmarks it wants, and lists `pipeline_stages`:
+#   baselines.yaml -- the full matrix, hosted judge; add models here
+#   demo.yaml      -- three small models, NeMo-Skills-managed judge, no QA API key
+#   smoke.yaml     -- one model, one benchmark, two repeats
+#
+# The runner expands each model into an M models x N benchmarks matrix of Slurm
+# jobs; narrow it at the command line with `-e <benchmark>`.
+#
+# To add a benchmark:
+#   Add an entry under benchmarks: and a matching entry under
+#   stages.eval_data.benchmarks:.
+#
+# To change the judge:
+#   Edit .judge_gpt52 or override models.judge per benchmark.
+# ============================================================================
+
+# Model serving profiles, referenced by campaigns as ${model_presets.<name>}.
+_base_: eval_presets.yaml
+workflow:
+  name: "eval"
+  type: "evaluation"
+  description: "Evaluate models on NeMo-Gym benchmarks (models x benchmarks matrix)"
+uses: project:nvfinance.stages.rl.eval_model:GymModelEvaluatorStage
+cluster: my_cluster
+# Rollout output tree. Pinned by the runnable sibling so campaigns never share
+# a tree (results resume via task-local content-validated completion records).
+data_root: ???
+# Gym container: the nemo-gym image's Gym source and CLI.
+# Which Gym build runs is set by the image path in the cluster config.
+# The gated fabv1 set needs a different image and overrides this.
+container: nemo-gym
+# Policy and judge servers use the shared external `vllm` image.
+vllm_container: vllm
+base_output_dir: ${data_root}
+# Optional override for a single model stage. Multi-model campaigns leave this
+# unset and receive the default ${base_output_dir}/<model-name> layout.
+model_output_dir: null
+# ----------------------------------------------------------------------------
+# Scaffolding forwarded to expanded model stages (non-structural top-level
+# keys are merged into each models: entry by the runner).
+# ----------------------------------------------------------------------------
+gym_path: "/opt/nemo-gym"
+# The campaign's first stage, eval_data, prepares the benchmarks here. A training
+# workflow's checkpoint evaluation moves data_root to the checkpoint's folder, so
+# it sets eval_data_root to the campaign's folder explicitly.
+eval_data_root: ${data_root}/step-1-eval-data
+# Expose the preinstalled Gym CLI only. This command is also forwarded to
+# CPU-only preparation jobs, so it must not build local model environments.
+# Policy vLLM services are launched separately through NeMo-Skills.
+installation_command: &gym_install |-
+  export PATH=/opt/nemo_gym_venv/bin:$PATH
+directories:
+  # SEC filing-metadata cache, written by finance:download/sp500's prefetch_cache.
+  # Fixed path outside ${data_root} so every campaign shares it; must match the
+  # cache_dir the finance_sec_search server reads.
+  cache-finance-sec-search: /workspace/outputs/finance/sp500/workflow-2-download-sec/cache/finance_sec_search
+  # Raw Tiingo / sec-api.io / sec.gov tool responses. Also fixed outside
+  # ${data_root} so campaigns share it. Leaving it unset is not a no-op: Gym
+  # keeps use_cache on and falls back to a container-local path that is
+  # discarded when the job ends, so every run re-fetches.
+  cache-finance-agent-v2: /workspace/outputs/finance/cache/finance_agent_v2
+# One hosted judge for every benchmark here, so scores stay comparable across
+# them. Its external endpoint reserves no Slurm GPUs.
+# Requires NVIDIA_API_KEY in the job environment; see docs/hosted-endpoints.md.
+# For OpenAI: "https://api.openai.com/v1" + "gpt-5.2" + "$OPENAI_API_KEY".
+# Other providers: docs/hosted-endpoints.md.
+.judge_gpt52: &judge_gpt52
+  model_type: openai_model
+  model: "openai/openai/gpt-5.2"
+  base_url: "https://inference-api.nvidia.com/v1"
+  api_key_env: NVIDIA_API_KEY
+  deployment: external
+# ----------------------------------------------------------------------------
+# Rollout defaults (forwarded; per-model overrides go under models.<m>.model).
+# ----------------------------------------------------------------------------
+rollout:
+  num_samples_in_parallel: 16 # keep the policy busy; per-benchmark override below
+  max_num_samples: null # null = evaluate all questions
+  num_chunks: 1
+  num_repeats: 5 # per-benchmark `repeats` overrides this
+  dependent_jobs: 0
+  responses_create_params:
+    temperature: 0.6
+    top_p: 0.95
+  models:
+    policy:
+      model: null # injected per model by GymModelEvaluatorStage
+      num_gpus: 4 # QOS MinTRES=gres/gpu=4
+      server_nodes: 1
+      gym_model:
+        vllm_serve_kwargs:
+          max_model_len: 32768
+          dtype: bfloat16
+      deployment: nvflow
+    # tool-calling flags (enable_auto_tool_choice / tool_call_parser) are NOT set
+    # globally -- the parser is model-specific and only agentic benchmarks use
+    # tools. Declared per model+benchmark in benchmark_models profiles.
+# ----------------------------------------------------------------------------
+# fabv1 tool sets (public 50-question set)
+# ----------------------------------------------------------------------------
+# The SEC tool is always sec_filing_search, so web search is the only choice.
+# One runs per invocation, and each campaign config picks its own by declaring
+# `fabv1_variant` -- the value below is only a fallback for a config that
+# doesn't. web_search needs TAVILY_API_KEY, without which it reports itself
+# unavailable to the model rather than failing the run.
+#
+# The choice is baked into the prepared data, and it names both the dataset
+# directory and the output subtree, so the two never share results.
+fabv1_variant: noweb
+fabv1_variants:
+  noweb:
+    name: fabv1_noweb
+    benchmark: finance_sec_search/config_no_web_search
+    prepared_file: benchmarks/finance_sec_search/data/finance_sec_search_benchmark.jsonl
+  web:
+    name: fabv1_web
+    benchmark: finance_sec_search/config_web_search
+    prepared_file: benchmarks/finance_sec_search/data/finance_sec_search_benchmark_web_search.jsonl
+# ============================================================================
+# Benchmark Catalog
+# ============================================================================
+# Keys are nvflow names: they select benchmarks with `-e` and name the output
+# subtree, unless `output_name` overrides the latter -- which is how a benchmark
+# with more than one tool set keeps its results apart. The catalog is a menu, not
+# a scope: each campaign lists the subset it runs under `environments`, so entries
+# added here change nothing on their own.
+# The Gym-side config paths and agent instance names must match what the
+# container ships. Gym resolves implementation and resources-server topology.
+#
+# `repeats` is the rollout count for that benchmark and is the only place it is set:
+# 5 for the QA benchmarks, 3 for the agentic ones, whose live tool calls and
+# long multi-turn rollouts cost far more per repeat. Raise an agentic benchmark to
+# 5 in a campaign config when the extra precision is worth the spend.
+benchmarks:
+  # --- Agentic: Vals AI finance-agent v1.1 (multi-turn SEC tool use) ---------
+  # The public 50-question set, which ships in the image.
+  fabv1:
+    output_name: ${fabv1_variants.${fabv1_variant}.name}
+    config_paths:
+      - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
+    agent_name: finance_agent
+    # Shared 131K profile; sub-131K models add rope-scaling via benchmark_models.
+    # Set only benchmark-specific values here: anything else would override the
+    # model's own serving profile, which the model would then have to restate.
+    models:
+      judge: *judge_gpt52
+      policy:
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 131072
+    repeats: 3
+    gym:
+      finance_sec_search_resources_server:
+        resources_servers:
+          finance_sec_search:
+            max_rollout_time_seconds: 1800
+            reward_mode: binary
+            use_cache: true
+            sec_api_key: ${oc.env:SEC_API_KEY,null}
+            tavily_api_key: ${oc.env:TAVILY_API_KEY,null}
+            judge_prompt_template_fpath: project://prompts/finance_sec_search_judge.yaml
+            retrieval_system_prompt_fpath: project://prompts/finance_sec_search_retrieval.yaml
+            cache_dir: ${directories.cache-finance-sec-search}
+            judge_responses_create_params:
+              input: []
+              max_output_tokens: 8192
+              reasoning:
+                effort: high
+            retrieval_responses_create_params:
+              input: []
+              temperature: 0.0
+              top_p: 1.0
+      finance_agent:
+        responses_api_agents:
+          finance_agent:
+            max_steps: 50
+    num_samples_in_parallel: 16
+    input_data: ${eval_data_root}/${fabv1_variants.${fabv1_variant}.name}/eval.jsonl
+    responses_create_params:
+      max_output_tokens: 32768 # cap multi-turn tool-calling generation
+  # --- Agentic: Vals AI finance-agent v2 (27-question public set) ------------
+  fabv2:
+    config_paths:
+      - resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml
+    agent_name: finance_agent_v2
+    gym:
+      finance_agent_v2_resources_server:
+        resources_servers:
+          finance_agent_v2:
+            # edgar_search calls sec-api.io; live mode fails at startup without SEC_API_KEY.
+            edgar_search_mode: live
+            use_cache: true
+            cache_dir: ${directories.cache-finance-agent-v2}
+    models:
+      judge: *judge_gpt52
+      policy:
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 262144
+    repeats: 3
+    num_samples_in_parallel: 16
+    input_data: ${eval_data_root}/fabv2/eval.jsonl
+    responses_create_params:
+      max_output_tokens: 32768
+  # --- Closed/open-book QA (single-turn simple agent + equivalence judge) ----
+  # Data and prompt template come from Gym. Judge behavior is kept inline so
+  # the workflow is the complete source of its expanded Gym configuration.
+  secque:
+    config_paths:
+      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+    agent_name: equivalence_llm_judge_simple_agent
+    models:
+      judge: *judge_gpt52
+    repeats: 5
+    input_data: ${eval_data_root}/secque/eval.jsonl
+    gym: &qa_judge_gym
+      equivalence_llm_judge:
+        resources_servers:
+          equivalence_llm_judge:
+            judge_responses_create_params:
+              max_output_tokens: 8192
+              reasoning:
+                effort: high
+            judge_system_message: |
+              Please act as an impartial judge and evaluate the quality of the response provided by an AI assistant to the user question displayed below. You will be given a reference answer and the assistant's answer. Begin your evaluation by comparing the assistant's answer with the reference answer. Identify and correct any mistakes. Be as objective as possible. After providing your explanation, you must rate the response on a scale of 0 to 2 by strictly following this format: [[rating]], for example: The rating is: [[1]], or: My rating is [[0]].
+
+              Note! The answers have to answer the question correctly, but they do not have to be identical, or equally detailed, or equally helpful! You are only measuring equality of correctness, not completeness. Be forgiving of rounding errors, as long as they are not essential, as well as over/under explaining.
+
+              You should provide a 0 rating when the answer does not match the reference.
+              You should provide a 1 rating when the answer is partially correct.
+              You should provide a 2 rating when the answer is correct.
+
+              For example, if the reference answer is "It cost $5B annually" and the assistant answer is "It cost $5 billion per year", the rating should be 2.
+              If the assistant answer is "It cost $5", the rating should be 1.
+              If the assistant answer is "It cost $4 million per month", the rating should be 0.
+
+              For example, if the reference answer is a list of most major locations on Earth and the assistant replies concisely 'Globally', the rating should be 2.
+              If the assistant replies 'A variety of places worldwide', the rating should be 1.
+              If the assistant replies 'In Europe', the rating should be 0.
+
+              For example, if the question is "What was his salary?" and the reference answer is "We can see that by adding the various components in table 3, we get that 3K + 7.5K equals a total salary of 10.5K annually", and the assistant's answer is "10,500", the rating should be 2.
+              If the assistant's answer is "10.5K. This salary reflects an excellent compensation given the low cost of living in the area", the rating should still be 2.
+              If the assistant's answer is "the answer can be found in table 3 by adding 3K + 7.5K", the rating should be 1.
+              If the assistant's answer is "7.5K", the rating should be 0.
+            judge_prompt_template_fpath: project://workflows/eval/prompts/judge_user.txt
+            judge_equal_label: "[[2]]"
+            judge_not_equal_label: "[[0]]"
+            response_extract_regex: null
+            use_per_record_regex: false
+            check_twice_swap: false
+  financebench:
+    config_paths:
+      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+    agent_name: equivalence_llm_judge_simple_agent
+    models:
+      judge: *judge_gpt52
+    repeats: 5
+    input_data: ${eval_data_root}/financebench/eval.jsonl
+    gym: *qa_judge_gym
+# ============================================================================
+# Stage Configurations
+# ============================================================================
+stages:
+  # Gym CLI prepares every benchmark: `gym eval prepare` downloads and converts,
+  # then the prepared JSONL is either rendered through the benchmark's prompt
+  # template (QA) or copied as-is (agentic benchmarks bake prompts and tool
+  # schemas into responses_create_params at prepare time).
+  #
+  # `benchmark` is the Gym selector `<name>` or `<name>/<config>`. The other
+  # keys default from the benchmark directory name and only need setting when a
+  # benchmark deviates from Gym's layout.
+  eval_data:
+    uses: nemo_gym.prepare_benchmark
+    contract_version: 1
+    benchmarks:
+      # Rendered with the project's own prompt, not the benchmark's, so eval and
+      # GRPO train on identical wording. Editing a prompt does not invalidate
+      # data already prepared: delete the output JSONL to force a re-render.
+      - benchmark: secque
+        prompt_config: project://workflows/eval/prompts/secque.yaml
+        output_file: secque/eval.jsonl
+      - benchmark: financebench
+        output_file: financebench/eval.jsonl
+      - benchmark: ${fabv1_variants.${fabv1_variant}.benchmark}
+        prepared_file: ${fabv1_variants.${fabv1_variant}.prepared_file}
+        prompt_config: null # prompt + tool schemas are baked in at prepare time
+        output_file: ${fabv1_variants.${fabv1_variant}.name}/eval.jsonl
+      - benchmark: finance_agent_v2
+        prepared_file: benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl
+        prompt_config: null
+        output_file: fabv2/eval.jsonl
+    output_dir: ${eval_data_root}
+    container: ${container}
+    gym_path: ${gym_path}
+    installation_command: *gym_install
+    num_gpus: 0
+  # Optional post-hoc judge replacement over an existing model/benchmark
+  # rollout tree. A child config must set rollouts_dir and output_dir, then run
+  # this stage explicitly; normal eval campaigns do not include it.
+  rejudge:
+    uses: nemo_gym.rejudge
+    contract_version: 1
+    rollouts_dir: null
+    output_dir: null
+    container: ${container}
+    vllm_container: ${vllm_container}
+    installation_command: null
+    environments: {}
+    verification:
+      # The maintained finance verifiers are not yet marked STATELESS upstream.
+      # Set native only for an environment whose Gym safety contract permits it.
+      mode: fallback
+      num_samples_in_parallel: 64
+      dependent_jobs: 0
+      models:
+        judge: *judge_gpt52
+    extensions:
+      report:
+        contract_version: 1
+        module: nvfinance.utils.rl.eval_aggregate
+  # Optional native comparison over two compatible completed rollout bundles.
+  # A child config supplies concrete paths and invokes this stage explicitly.
+  compare:
+    uses: nemo_gym.compare
+    contract_version: 1
+    baseline_rollouts: null
+    baseline_completion: null
+    candidate_rollouts: null
+    candidate_completion: null
+    output_dir: null
+    container: ${container}
+    gym_path: ${gym_path}
+    installation_command: null
+    report_format: both

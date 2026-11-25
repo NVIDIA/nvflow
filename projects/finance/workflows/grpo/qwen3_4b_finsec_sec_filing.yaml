@@ -1,0 +1,67 @@
+# Qwen3-4B GRPO — finance_sec_search via sec_filing_search (no local FTS index).
+#
+# Reuses the existing demo validate/transform outputs and writes under
+# workflow-5-grpo-sec-filing so the edgar_search tree is left intact.
+#
+#   uv run nvflow run apply_prompt_template convert_to_responses_api prepare_data \
+#     --workflow finance:grpo/qwen3_4b_finsec_sec_filing --cluster my_cluster \
+#     -e finance_sec_search
+#   uv run nvflow run collect_rollouts train_validation_split \
+#     --workflow finance:grpo/qwen3_4b_finsec_sec_filing --cluster my_cluster \
+#     -e finance_sec_search
+#   uv run nvflow run training \
+#     --workflow finance:grpo/qwen3_4b_finsec_sec_filing --cluster my_cluster \
+#     -e finance_sec_search
+
+_base_: qwen3_4b.yaml
+
+base_output_dir: ${data_root}/workflow-5-grpo-sec-filing
+
+# Starts at apply_prompt_template: stages 0-1 are tool-independent and are read
+# from the edgar_search tree.
+pipeline_stages:
+  - apply_prompt_template
+  - convert_to_responses_api
+  - prepare_data
+  - collect_rollouts
+  - train_validation_split
+  - training
+  - eval
+
+environments:
+  finance_sec_search:
+    raw_train_data: /workspace/outputs/finance/demo/workflow-5-grpo/step-0-validate-questions/finance_sec_search
+    prompt_template: project://prompts/finance_sec_search_template_sec_filing_search_without_web.yaml
+    gym:
+      finance_sec_search_resources_server:
+        resources_servers:
+          finance_sec_search:
+            # This arm serves filings through sec_filing_search. Clearing the
+            # mode and the index path is what makes edgar_search report itself
+            # unavailable; setting them would silently give the arm both tools.
+            edgar_search_mode: null
+            local_edgar_index_path: null
+    training:
+      overrides:
+        logger:
+          wandb:
+            name: "grpo-qwen3-4b-finsec-sec-filing"
+
+stages:
+  apply_prompt_template:
+    input_dir: /workspace/outputs/finance/demo/workflow-5-grpo/step-1-data-transformation
+
+  collect_rollouts:
+    rollout:
+      num_repeats: 3
+      models:
+        policy:
+          model: ${hf_model_path}
+          num_gpus: 4
+          gym_model:
+            uses_reasoning_parser: true
+            vllm_serve_kwargs:
+              reasoning_parser: qwen3
+              compilation_config:
+                pass_config:
+                  fuse_allreduce_rms: false

@@ -1,0 +1,17 @@
+_base_: profile.yaml
+
+workflow:
+  name: profile_missing_container
+  type: evaluation
+
+stages:
+  collect_rollouts:
+    vllm_container: null
+    rollout:
+      models:
+        policy:
+          deployment: nvflow
+          model_type: vllm_model
+          model: /models/policy
+          base_url: null
+          num_gpus: 1

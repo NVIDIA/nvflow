@@ -1,0 +1,99 @@
+classDiagram
+    class ProjectManifest {
+        +manifest_version
+        +project
+        +requires_nvflow
+        +python_source_root
+        +recipes
+    }
+
+    class ProjectContext {
+        +identity
+        +root
+        +packaged_root
+    }
+
+    class RecipeDefinition {
+        +name
+        +description
+        +workflows
+        +topological_workflows()
+    }
+
+    class RecipeWorkflowNode {
+        +selector
+        +depends_on
+        +optional
+    }
+
+    class RecipeGraphPlan {
+        +project
+        +recipe
+        +workflows
+        +digest
+    }
+
+    class WorkflowDefinition {
+        +project
+        +workflow_name
+        +pipeline_stages
+        +config_view()
+        +validate()
+        +resolve_stage_class()
+    }
+
+    class BaseStage {
+        +validate_config()
+        +execution()
+    }
+
+    class WorkflowPlanner {
+        +plan()
+        +execution_graph()
+    }
+
+    class ExecutionEngine {
+        +submit()
+    }
+
+    class LaunchPlan {
+        +complete
+        +tasks
+        +digest
+        +to_dict()
+    }
+
+    class TargetBinding {
+        +cluster
+        +source
+        +resolve()
+    }
+
+    class WorkflowRunner {
+        +definition
+        +target
+        +validate_config()
+        +run()
+    }
+
+    class SubmissionReceipt {
+        +plan_digest
+        +target
+        +tasks
+    }
+
+    ProjectManifest --> ProjectContext
+    ProjectManifest --> RecipeDefinition
+    RecipeDefinition --> RecipeWorkflowNode
+    RecipeWorkflowNode --> WorkflowDefinition : complete selector
+    RecipeDefinition --> RecipeGraphPlan
+    ProjectContext --> WorkflowDefinition
+    WorkflowDefinition --> BaseStage : resolve_stage_class()
+    WorkflowDefinition --> WorkflowPlanner
+    TargetBinding --> WorkflowPlanner
+    WorkflowPlanner --> LaunchPlan
+    WorkflowRunner --> WorkflowDefinition
+    WorkflowRunner --> TargetBinding
+    WorkflowRunner --> WorkflowPlanner
+    WorkflowRunner --> ExecutionEngine : engine_for(target)
+    ExecutionEngine --> SubmissionReceipt

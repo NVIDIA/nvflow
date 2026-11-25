@@ -1,342 +1,253 @@
 # NVFlow
 
-**Workflow orchestration for end-to-end ML pipelines (data generation, training, evaluation) built on the NeMo ecosystem.**
+NVFlow is the workflow orchestration platform for NeMo-based data generation,
+training, and evaluation. Projects define workflows from their own stages and
+from NVFlow's shared stages, such as the NeMo Gym and document-grounded
+synthetic data generation (SDG) suites. NVFlow validates, plans, packages, and
+runs those workflows through its direct Slurm engine or on operator-supplied
+Ray Jobs clusters.
 
-NVFlow is a workflow orchestration framework for end-to-end synthetic data generation (SDG), training (SFT), and evaluation pipelines built on NVIDIA's NeMo ecosystem. It exists to standardize how teams build, reproduce, and scale complex ML pipelines across domains with reusable stages and declarative workflows that run locally or on Slurm clusters.
+Domain teams package their application logic as projects, optionally define
+scenario DAGs as recipes, and reuse complete workflow definitions across them.
+Projects retain ownership of their data, models, prompts, stages, dependencies,
+documentation, and quality.
 
-It provides a structured way to build, manage, and execute pipelines through:
-- **Recipes** - Domain-specific workflows (e.g., finance)
-- **Stages** - Reusable pipeline components for SDG, training, and evaluation
-- **Workflows** - YAML-based configurations that chain stages together
+## How NVFlow fits together
 
-Key features:
-- **Reusability and reproducibility** with a structured, stage-based architecture
-- **Flexible execution** via CLI (`nflow`), Python scripts, or programmatic API
-- **Cluster integration** with native Slurm support
-- **Built on NeMo** leveraging NeMo-Skills, NeMo-RL, and NeMo-Gym infrastructure
+- **Project** — A self-contained, distributable application bundle.
+- **Recipe** — An optional named project-scoped DAG of reusable workflows.
+- **Workflow** — A runnable YAML definition that selects, orders, and configures
+  stages for one objective.
+- **Stage** — A reusable Python unit of work, such as preparing data, training a
+  model, or evaluating checkpoints. A stage is either owned by a project or
+  provided by NVFlow as a shared stage.
+- **Task** — A scheduler-level command or service contributed by a stage.
 
-Example use case: The finance recipe demonstrates a complete pipeline: download SEC filings → generate synthetic Q&A data → fine-tune models → evaluate performance, producing 300K+ synthetic Q&A pairs.
-
-## 🔑 Core Concepts
-
-Understanding the terminology is key to working effectively with NVFlow:
-
-- **Recipe**: A domain-specific collection of stages and workflows organized around a particular use case (e.g., finance). Recipes provide ready-to-use pipelines for specific problem domains.
-
-
-- **Workflow**: A declarative pipeline defined in YAML that orchestrates multiple stages in a specific order. Workflows define stage dependencies, data flow between stages, and execution configuration. Think of a workflow as a recipe that connects stages together to accomplish an end-to-end objective.
-
-- **Stage**: A self-contained, reusable component that performs a single, specific task in your ML pipeline. Each stage is an independent unit of work (e.g., downloading data, generating synthetic examples, training a model). Stages are implemented as Python classes and can be composed together.
-
-**Example hierarchy:**
-```
-Recipe: finance
-├── Workflow: download_sec_filings (defined in YAML)
-│   └── Stage: demo (or sap-500)
-└── Workflow: template_based_sdg (defined in YAML)
-    ├── Stage: create_seed_data
-    ├── Stage: generate_questions
-    ├── Stage: map_questions_to_context
-    ├── Stage: generate_answers
-    ├── Stage: genselect_answers
-    └── Stage: filter_answers
+```text
+Project
+├── Workflow
+│   └── Stage
+│       └── Task
+└── Recipe (optional)
+    └── Workflow references and dependencies
 ```
 
-In practice, you define workflows in YAML configuration files, reference stages by their short names, and run them via CLI or Python API. This separation allows you to reuse stages across different workflows and maintain clean, modular pipeline code.
+“Step” is an informal documentation or output label. The formal NVFlow
+execution unit is a stage selected through `pipeline_stages`. See
+[Core concepts](docs/getting-started/concepts.md) for configuration inheritance,
+planning, targets, and receipts.
 
-## 📁 Understanding the Folder Structure
+## Why NVFlow
 
-**How concepts map to folders:**
+- Compose ordered, dependency-aware stages with declarative YAML.
+- Keep application code and dependencies in self-contained projects.
+- Validate configuration and inspect the launch plan before submitting work.
+- Use the same workflow definition through the CLI or Python API.
 
-```
-nvflow/recipes/{recipe_name}/
-├── workflows/*.yaml          # Workflow definitions (e.g., template_based_sdg.yaml)
-├── stages/{category}/*.py    # Stage implementations (e.g., stages/sdg/generate_answers.py)
-└── prompts/                  # Prompt templates used by stages
-```
+Platform code, including the shared stages under `nvflow/stages/`, lives under
+`nvflow/`. In-repo projects—including the copyable starter—live under
+`projects/`. See
+[Core concepts](docs/getting-started/concepts.md) for ownership boundaries.
 
-**Finding stage implementations:**
+## Get started
 
-When a workflow YAML references a stage like `generate_answers`, the Python implementation is located at:
-```
-nvflow/recipes/{recipe}/stages/{category}/{stage_name}.py
-```
+### 1. Install the local CLI
 
-For example:
-- Stage name in YAML: `generate_answers`
-- Implementation file: `nvflow/recipes/finance/stages/sdg/generate_answers.py`
+Prerequisites:
 
-**About category folders:**
+- Git
+- [uv](https://docs.astral.sh/uv/)
+- Python 3.13.14 (NVFlow supports `>=3.13.14,<3.14`)
+- A C++ compiler: gcc and g++ on Linux, or the Xcode Command Line Tools on
+  macOS. A project's first workflow command builds its environment, which
+  compiles `editdistance`, a NeMo-Skills dependency that publishes no Python
+  3.13 wheels.
+- Linux or macOS
 
-The `{category}` folders (like `sdg/`, `data/`, `training/`) are organizational containers that group related stages together. They help keep the codebase organized but **do not affect stage naming** - stages are always referenced by their short name in workflow YAML files, not by their folder path.
-
-**Example:**
-```yaml
-# In workflow YAML
-pipeline_stages:
-  - download_sec_filings  # Short name
-  - generate_questions    # Short name
-
-# These map to Python files:
-# stages/download/download_sec_filings.py
-# stages/sdg/generate_questions.py
-```
-
-## 📋 Prerequisites
-
-- **Git** - to clone the repository
-- **uv** - Python package manager ([docs](https://docs.astral.sh/uv/))
+On macOS, Apple silicon is required. Intel macOS is not supported because
+compatible PyTorch wheels are unavailable.
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-```
-
-## 📦 Installation
-
-```bash
 git clone https://github.com/NVIDIA/nvflow.git
 cd nvflow
-
-# For users
 uv sync
+```
 
-# For developers
-uv sync --all-extras
+> **Can't clone or install where you run `nvflow`?** Use the `nvflow-client`
+> container instead. It bundles the CLI and every project's environment, so
+> that host needs only the image, an SSH key, and a cluster config. Build it
+> once on a connected host with `scripts/build_images.sh nvflow-client`; see
+> [Remote and air-gapped launch](docs/operations/remote-launch.md).
+
+The checkout installs the lightweight NVFlow bootstrap. Each selected project
+gets a full isolated cached environment containing the execution stack and that
+project's launcher dependencies; project and workflow discovery do not create it.
+
+Repository contributors should also install the development tools and commit
+hooks:
+
+```bash
+uv sync --all-extras --group ci
 uv run pre-commit install
 ```
 
-> ⚠️ **Developers:** Always run `uv run pre-commit install` after cloning. This enables automatic code quality checks on every commit.
+`--all-extras` installs the `ray`, `execution`, and `dev` extras: Ray Jobs
+support, the execution stack, and the contributor tools. The `ci` group adds
+project-test dependencies used by the full suite. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements.
 
-> 🔌 **Air-gapped / no internet on the install host?** Skip the local install and drive `nflow` from the prebuilt `nvflow-client` container (CLI + venv baked in, no `uv sync`). See [docs/remote-launch.md](docs/remote-launch.md).
+### 2. Configure execution — required before submitting
 
-### Activating the Virtual Environment (Optional)
-
-By default, use `uv run <command>` to run commands in the project's virtual environment. If you prefer to activate the environment directly:
-
-```bash
-source .venv/bin/activate
-
-# Now you can run commands without 'uv run' prefix
-python --version  # 3.12+
-nflow --help
-pytest
-```
-
-## 🔧 Cluster Setup
-
-To run workflows on a Slurm cluster you need to: (1) build the NVFlow
-container images from the Dockerfiles in [`dockerfiles/`](dockerfiles/)
-(`nemo-rl`, `nemo-gym`, `nemo-skills`, `vllm`, `vllm-grpo`; only `sglang` is
-pulled as-is), (2) convert them to `.sqsh` for Slurm, and (3) write a cluster
-config (`cluster_configs/my_cluster.yaml`). Every image bakes the packages and
-virtual environments its stages need, so no stage resolves dependencies at job
-runtime (see [INSTALL.md](INSTALL.md)).
-
-> **See [INSTALL.md](INSTALL.md)** for the complete setup guide
-> (build, sanity-check, `.sqsh` conversion, model staging, cluster
-> configuration, and verification).
+> Before using `nvflow plan` or `nvflow run`, choose an explicit target with
+> `--cluster`. Complete [INSTALL.md](INSTALL.md), then set up a target with
+> [Slurm execution](docs/slurm/README.md) or
+> [Ray execution](docs/ray/README.md), and return here. Either target needs:
 >
-> **See [`dockerfiles/docker_instructions.md`](dockerfiles/docker_instructions.md)**
-> for the build / multi-arch / sanity-check reference.
+> - the worker images: `.sqsh` files on Slurm, or the clusters' images on Ray;
+> - the models required by the selected workflow; and
+> - writable data and output mounts.
+>
+> Both target types can launch from a workstation through an `ssh_tunnel`
+> block; see [Remote and air-gapped launch](docs/operations/remote-launch.md).
 
-Once cluster setup is complete, set the config directory:
+### 3. Inspect and run the starter
 
-```bash
-export NEMO_SKILLS_CONFIG_DIR=/path/to/nvflow/cluster_configs
-```
+For detailed prerequisites and expected output, follow
+[Run your first workflow](docs/getting-started/first-workflow.md).
 
-> **Airgapped / no local install?** Drive `nflow` from the `nvflow-client`
-> container (no `uv sync` needed) over an SSH tunnel — see [docs/remote-launch.md](docs/remote-launch.md).
-
-## 🚀 Quick Start
-
-### CLI Invocation
+The starter contains the smallest complete workflow:
 
 ```bash
-# List all stages (hierarchical display)
-uv run nflow list-stages
-
-# List stages for a specific recipe
-uv run nflow list-stages --recipe finance
-
-# Get stage details (full path: recipe.workflow.stage)
-uv run nflow stage-info example.sdg_simple.generate_answer
-
-# Or with flags (if you know recipe and workflow)
-uv run nflow stage-info generate_answer --recipe example --workflow sdg_simple
-
-# Run specific stage (short name from config)
-uv run nflow run generate_answer --config nvflow/recipes/example/workflows/sdg_simple.yaml
-
-# Run all stages in workflow
-uv run nflow run-all --config nvflow/recipes/example/workflows/sdg_simple.yaml
+uv run nvflow list-projects
+uv run nvflow list-workflows -p starter
+uv run nvflow list-stages \
+  --workflow starter:generate
 ```
 
-### Python Invocation
+The minimal starter intentionally defines no recipe. Recipes remain optional;
+projects can expose direct workflows, selector-keyed recipe DAGs, or both.
+
+`list-workflows` prints selectors accepted by every command that loads a workflow.
+`list-stages` shows the active stages for one selected workflow. The first
+`validate`, `plan`, or `run` may pause and require network access while NVFlow
+prepares the full project execution environment; later commands reuse it.
+
+Use `uv run nvflow list-stage-types` to discover NVFlow's shared stages, including
+NeMo Gym rollouts, NeMo-RL SFT and GRPO training, and a generic train/validation
+split. See [Discover shared stage types](docs/platform/cli-and-python-api.md#discover-shared-stage-types)
+for namespace filtering, detailed inspection, and workflow `uses` examples, and
+[Train with NVFlow's shared stages](docs/guides/training-stages.md) for training.
+
+Inspect its configuration locally:
 
 ```bash
-# Run a single stage (short name from config)
-uv run python scripts/run_flow.py generate_answer --config nvflow/recipes/example/workflows/sdg_simple.yaml
+uv run nvflow validate \
+  --workflow starter:generate
 
-# Run all stages
-uv run python scripts/run_flow.py --all --config nvflow/recipes/example/workflows/sdg_simple.yaml
+uv run nvflow show-config \
+  --workflow starter:generate
 ```
 
-### Programmatic Python API
+These commands do not require scheduler access and do not submit work.
+Learn what they check and see their options under
+[Validate](docs/platform/cli-and-python-api.md#validate) and
+[Inspect configuration](docs/platform/cli-and-python-api.md#inspect-configuration).
 
-```python
-from nvflow.core import WorkflowRunner
-
-# Run all stages
-runner = WorkflowRunner("nvflow/recipes/example/workflows/sdg_simple.yaml")
-runner.run()
-
-# Run specific stage (short name from config)
-runner.run(stages=["generate_answer"])
-```
-
-## 🏗️ Structure
-
-```
-nvflow/
-├── core/                      # Framework
-├── cli/                       # CLI
-└── recipes/                   # Domain recipes
-    ├── example/               # Example recipe (learning & testing)
-    │   ├── stages/sdg/        # Example SDG stage
-    │   ├── prompts/           # Prompt templates
-    │   └── workflows/         # Example workflows
-    ├── finance/               # Finance reasoning recipe
-    │   ├── stages/            # Stage implementations
-    │   ├── prompts/           # Prompt templates
-    │   └── workflows/         # Workflow configs
-    └── multimodal/            # Multimodal HopChain recipe
-        ├── stages/            # Image filtering and SDG stages
-        ├── prompts/           # Vision-language prompt templates
-        └── workflows/         # HopChain workflow configs
-```
-
-## 📝 Creating a Stage
-
-See the `example` recipe for a complete working example. Key steps:
-
-1. **Create stage file** in `nvflow/recipes/{recipe}/stages/{category}/`
-2. **Implement with hierarchical decorator:**
-   ```python
-   @StageRegistry.register(recipe="finance", workflow="sft", stage="training")
-   class SFTStage(BaseStage):
-       workflow = "sft"
-       def execute(self, config, cluster, expname, run_after=None):
-           # Your implementation
-           pass
-   ```
-3. **Add to workflow YAML** with short stage name:
-   ```yaml
-   recipe: finance
-   workflow:
-     name: "sft"
-   pipeline_stages:
-     - sft  # Short name!
-   stages:
-     sft:
-       run_name: "baseline-lr5e6"  # Optional: distinguish experiment runs
-       # Your stage configuration
-   ```
-4. **Run it** with `nflow run` or `nflow run-all`
-
-**Terminal output in stages:** Use the `console` helpers for consistent, readable logs when your stage runs (e.g. `console.status()`, `console.detail()`, `console.success()`). See **[Console UI guide](docs/development/console-ui.md)**.
-
-Example: `nvflow/recipes/example/stages/sdg/generate_answer.py`
-
-## 📦 Recipes
-
-### Example Recipe
-Simple demonstration recipe for learning the framework:
-- **Stage:** `example.sdg_simple.generate_answer` - Basic SDG workflow with nemo-skills integration
-- **Config:** `nvflow/recipes/example/workflows/sdg_simple.yaml`
-- **Purpose:** Learning NVFlow framework basics
-
-### Finance Recipe
-
-**📚 [Complete Finance Recipe Documentation →](docs/recipes/finance/README.md)**
-
-End-to-end pipeline for generating synthetic financial Q&A data from SEC filings and training financial reasoning models.
-
-**Quick Links:**
-- [Quick Start (~3 hour demo)](docs/recipes/finance/quick-start.md) - Get started quickly with 7 companies
-- [Workflow Guides](docs/recipes/finance/workflows/) - Detailed guides for all 6 workflows
-- [Stage Reference](docs/recipes/finance/stages/) - Technical specifications for all 37 stages
-
-**Pipeline:**
-```
-download-sec → template-sdg / document-sdg → sft → eval → grpo
-```
-
-**Features:**
-- 37 stages across 6 workflows (1 + 6 + 7 + 6 + 7 + 10)
-- Two SDG approaches (template-based & document-grounded)
-- Multiple model support (GPT-OSS-120B, Qwen3, Nemotron)
-- Produces 300K+ synthetic Q&A pairs
-- Complete training and evaluation pipeline
-
-### Multimodal HopChain Recipe
-
-**📚 [Complete Multimodal Recipe Documentation →](docs/recipes/multimodal/README.md)**
-
-HopChain-inspired multimodal synthetic data generation for multi-hop
-vision-language reasoning.
-
-**Pipeline:**
-```
-image-filter → identify-categories → localize-instances → sample-combinations
-  → generate-queries → verify → judge/reconcile → difficulty-filter → sft-traces
-```
-
-**Features:**
-- Two workflows: image filtering and SDG
-- SAM-backed instance localization
-- Structural verification and optional external LLM judges
-- Optional SFT reasoning-trace generation and filtering
-
-## 📚 CLI Commands
+After completing the required execution setup, inspect the target-resolved plan
+and submit, passing your Slurm or Ray target as `--cluster`:
 
 ```bash
-nflow list-stages                           # List all stages (hierarchical)
-nflow list-stages --recipe finance          # Filter by recipe
-nflow list-stages --recipe finance --workflow sft  # Filter by workflow
-nflow stage-info STAGE_PATH                 # Stage details (e.g., finance.sft.sft)
-nflow stage-info STAGE --recipe R --workflow W  # Or with flags
-nflow validate --config FILE                # Validate config
-nflow run STAGE --config FILE               # Run specific stage (short name)
-nflow run-all --config FILE                 # Run all stages
-nflow version                               # Show version
+uv run nvflow plan \
+  --workflow starter:generate \
+  --cluster my_cluster
+
+uv run nvflow run --all \
+  --workflow starter:generate \
+  --cluster my_cluster
 ```
 
-## 🛠️ Development
+On Ray, `run` returns once its controller is submitted; follow the run with
+[Monitor and verify](docs/ray/README.md#monitor-and-verify).
+
+Static `plan` does not inspect workflow storage; `--live` adds read-only
+filesystem discovery, through the target on Slurm and on the launcher on Ray.
+Neither mode submits work. See
+[Plan](docs/platform/cli-and-python-api.md#plan) for details.
+
+Use `--config projects/starter/workflows/generate.yaml` instead of `--workflow`
+when you need to select an arbitrary YAML path.
+See
+[Run the configured workflow](docs/platform/cli-and-python-api.md#run-the-configured-workflow)
+for target, environment, external-project, and output-format options.
+
+## Choose a project
+
+- **Starter project:** [overview](projects/starter/README.md) and
+  [first-workflow guide](docs/getting-started/first-workflow.md)
+- **Finance project:** [quick start](projects/finance/docs/quick-start.md) and
+  [workflow guides](projects/finance/docs/workflows/) for the validated
+  quick-start path
+- **HopChain project:** [quick start](projects/hopchain/docs/quick-start.md)
+  and [project overview](projects/hopchain/README.md)
+
+Use `nvflow list-recipes` to discover connected scenarios across projects, or
+add `--project <name>` to narrow the list. Use
+`nvflow list-workflows --project <name>` to discover reusable single-workflow definitions.
+
+## Create an NVFlow project
+
+Start from the project starter:
 
 ```bash
-# Install dev dependencies
-uv sync --all-extras
-uv run pre-commit install
-
-# Run tests
-uv run pytest
-
-# Lint code
-uv run ruff check nvflow/ tests/
-uv run mypy nvflow/
-
-# Format code
-uv run ruff format nvflow/ tests/
+cp -R projects/starter ~/my-project
+cd ~/my-project
 ```
 
-## 📄 License
+Then follow
+[Create an NVFlow project](docs/getting-started/creating-a-project.md)
+and the [project and recipe contract](docs/platform/recipe-contract.md).
 
-Apache-2.0
+In the copied project, run `uv sync` once to install its lightweight `nvflow`
+bootstrap, then use `uv run nvflow ...`. The first semantic command may pause and
+require network access while preparing the full cache-owned execution
+environment; `uv run nvflow sync-project` is only optional prewarming for CI or
+offline use. The project does not copy
+NVFlow's resolver policy. Its small `[tool.uv.sources].nvflow` entry pins only
+the tested NVFlow Git revision used to bootstrap without a package registry.
 
-## 🙏 Acknowledgments
+## Documentation
 
-Built on:
-- [NeMo-Skills](https://github.com/NVIDIA-NeMo/Skills)
-- [NeMo-RL](https://github.com/NVIDIA-NeMo/RL)
+Use the [documentation hub](docs/README.md) to navigate by role:
+
+- [Core concepts](docs/getting-started/concepts.md)
+- [Platform architecture](docs/platform/architecture.md)
+- [Project and recipe contract](docs/platform/recipe-contract.md)
+- [Workflow loading and planning](docs/platform/workflow-and-planning.md)
+- [CLI and Python API](docs/platform/cli-and-python-api.md)
+- [Cluster configuration](docs/operations/cluster-configuration.md)
+- [Slurm execution](docs/slurm/README.md)
+- [Ray execution](docs/ray/README.md)
+- [Remote launch](docs/operations/remote-launch.md)
+
+## Repository layout
+
+```text
+nvflow/              # Platform source and public contracts
+projects/            # Maintained projects and copyable starter
+docs/                # Platform, operator, contributor, and maintainer docs
+cluster_configs/     # Cluster templates
+dockerfiles/         # Worker and optional launcher images
+scripts/             # Image build, container staging, and CI scripts
+tests/               # Platform contract and integration tests
+```
+
+## Contribute
+
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+
+Project contributions should include project-owned tests and documentation.
+Platform changes must keep concrete project dependencies out of the platform
+package.

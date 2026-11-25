@@ -1,0 +1,53 @@
+# VALS-seeded template question generation. Agent answers, GenSelect, and SFT
+# trajectories are produced by vals-agentic-trajectories.yaml so TSDG questions
+# are answered in the finance environment instead of against supplied context.
+
+_base_: template-based-sdg.yaml
+
+workflow:
+  description: "Template-based SDG seeded by the no-web VALS Finance Agent benchmark"
+
+base_output_dir: /workspace/outputs/finance/vals-noweb/template-based-sdg
+
+directories:
+  step-0-prepare-vals: ${base_output_dir}/step-0-prepare-vals
+  step-0-create-seed-data: ${base_output_dir}/step-1-convert-vals
+  step-1-generate-questions: ${base_output_dir}/step-2-generate-questions
+
+pipeline_stages:
+  - prepare_vals_data
+  - convert_vals_data
+  - generate_questions
+
+stages:
+  prepare_vals_data:
+    uses: nemo_gym.prepare_benchmark
+    contract_version: 1
+    benchmarks:
+      - benchmark: finance_sec_search/config_no_web_search
+        prepared_file: benchmarks/finance_sec_search/data/finance_sec_search_benchmark.jsonl
+        prompt_config: null
+        output_file: fabv1_noweb/gym_eval.jsonl
+    output_dir: ${directories.step-0-prepare-vals}
+    container: nemo-gym
+    gym_path: /opt/nemo-gym
+    installation_command: |-
+      export PATH=/opt/nemo_gym_venv/bin:$PATH
+    num_gpus: 0
+    dependencies: []
+
+  convert_vals_data:
+    uses: project:nvfinance.stages.sdg.convert_vals_data:ConvertValsDataStage
+    input_file: ${directories.step-0-prepare-vals}/fabv1_noweb/gym_eval.jsonl
+    output_file: ${directories.step-0-create-seed-data}/seed_questions.jsonl
+    company_info_file: ${directories.step-0-create-seed-data}/company_info.tsv
+    dependencies: [prepare_vals_data]
+
+  generate_questions:
+    sampling_mode: sample
+    total_samples: 10000
+    form_weights:
+      10-K: 1.0
+      10-Q: 1.0
+      8-K: 1.0
+    dependencies: [convert_vals_data]

@@ -1,0 +1,5 @@
+manifest_version: 1
+project: shared-gym-fixture
+description: "External-style project using shared NeMo Gym stages"
+requires_nvflow: ">=1.1.3.dev0,<2"
+python_source_root: .

@@ -1,0 +1,14 @@
+
+workflow:
+  name: external_flow
+  type: custom
+
+cluster: local
+pipeline_stages:
+  - noop
+
+stages:
+  noop:
+    uses: project:fixture_project.stage:NoopStage
+    asset: project://assets/message.txt
+    dependencies: []

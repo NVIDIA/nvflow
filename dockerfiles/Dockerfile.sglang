@@ -1,0 +1,160 @@
+# =============================================================================
+# NVFlow SGLang Container
+# =============================================================================
+# SGLang's official release wheels on NVFlow's Python 3.13.14 and Ray 2.58.0,
+# on the CUDA 13.0.1 base of SGLang's own image for the same release.
+#
+# SGLang's docker/Dockerfile hard-codes Ubuntu's Python 3.12, so unlike vLLM it
+# cannot be built for Python 3.13. This file follows its install recipe:
+#   - sglang[http2,tracing]: the official `all` extra without `diffusion`, whose
+#     PyYAML==6.0.1 pin has no Python 3.13 build
+#   - Torch from the PyTorch cu130 index, flashinfer-cubin, cuda-python 13.2.0
+#   - the checksum-pinned TRT-LLM MoE cubin pool
+# outlines==0.1.11 needs outlines-core 0.1.26, which has no Python 3.13 wheel;
+# a throwaway stage compiles it from the sdist.
+# Not included: DeepEP, MSCCL++, Mooncake, NIXL, GDRCopy, HPC-Ops,
+# sgl-model-gateway, the FlashInfer DCP patch, runai-model-streamer and dev
+# tools, which serve expert-parallel MoE, prefill/decode disaggregation,
+# decode context parallelism, multi-engine routing and object-store loading
+# rather than NVFlow's server launchers.
+#
+# Python packages install from dockerfiles/requirements/sglang-<version>-<arch>.txt,
+# locked from dockerfiles/requirements/sglang-<version>.in.
+#
+# Build (dual architecture; see docker_instructions.md):
+#   REGISTRY=<registry-host>/<namespace> scripts/build_images.sh sglang-0-5-17
+# =============================================================================
+
+ARG CUDA_IMAGE=nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04@sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+ARG SGLANG_VERSION=0.5.17
+ARG PYTHON_VERSION=3.13.14
+ARG RAY_VERSION=2.58.0
+ARG OUTLINES_CORE_VERSION=0.1.26
+
+FROM ghcr.io/astral-sh/uv:0.12.9@sha256:8b940d3a9d65bed080436972241af2e21c84b5e8c9193f7014ed71479ee795ff AS uv-installer
+
+# Architecture-independent downloads, fetched natively.
+FROM --platform=$BUILDPLATFORM ${UBUNTU_IMAGE} AS fetch
+ARG TRTLLM_GEN_MOE_CUBIN_URL=https://github.com/sgl-project/whl/releases/download/trtllm_gen_moe_cubin_20260617/trtllm_gen_moe_cubin_pool_20260617_v0613rc1.zip
+ARG TRTLLM_GEN_MOE_CUBIN_SHA256=4900501cbe782a76b08a5858f9f07152287b97cb68114466dac286366b66c192
+ARG TRTLLM_GEN_MOE_CUBIN_ARCHIVE_ROOT=trtllm_gen_moe_cubin_pool_20260617_v0613rc1
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl unzip && \
+    rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/cubins.zip "${TRTLLM_GEN_MOE_CUBIN_URL}" && \
+    echo "${TRTLLM_GEN_MOE_CUBIN_SHA256}  /tmp/cubins.zip" | sha256sum -c - && \
+    mkdir -p /tmp/cubins /out/opt && \
+    unzip -q /tmp/cubins.zip -d /tmp/cubins && \
+    mv "/tmp/cubins/${TRTLLM_GEN_MOE_CUBIN_ARCHIVE_ROOT}" /out/opt/trtllm_gen_moe_cubin_pool && \
+    test "$(find /out/opt/trtllm_gen_moe_cubin_pool -type f -name '*.cubin' | wc -l)" -eq 1696 && \
+    rm -rf /tmp/cubins /tmp/cubins.zip
+# openai_harmony's Rust tiktoken client cannot download under QEMU arm64, and
+# the image must serve gpt-oss offline.
+RUN mkdir -p /out/opt/tiktoken_cache && \
+    curl -fsSL -o /out/opt/tiktoken_cache/o200k_base.tiktoken \
+        https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken && \
+    curl -fsSL -o /out/opt/tiktoken_cache/cl100k_base.tiktoken \
+        https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken && \
+    printf '%s  %s\n' \
+        446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d \
+        /out/opt/tiktoken_cache/o200k_base.tiktoken \
+        223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7 \
+        /out/opt/tiktoken_cache/cl100k_base.tiktoken | sha256sum -c -
+
+FROM ${CUDA_IMAGE} AS runtime-base
+ARG PYTHON_VERSION
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME=/usr/local/cuda \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+# FlashInfer's runtime kernel compiles need cicc from nvvm/bin.
+ENV PATH="${PATH}:/usr/local/cuda/nvvm/bin"
+
+# Runtime packages from SGLang's runtime stage that the included components use.
+# The base already ships NCCL built for its CUDA release.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl git wget netcat-openbsd locales \
+        libnuma1 libibverbs1 libibumad3 librdmacm1 libnl-3-200 libnl-route-3-200 \
+        ibverbs-providers rdma-core infiniband-diags ninja-build && \
+    locale-gen en_US.UTF-8 && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=from=uv-installer,source=/uv,target=/usr/local/bin/uv \
+    UV_PYTHON_INSTALL_DIR=/opt/python uv python install "${PYTHON_VERSION}" && \
+    managed_python="$(find /opt/python -type f -path '*/bin/python3.13' -print -quit)" && \
+    test -n "${managed_python}" && \
+    ln -sf "${managed_python}" /usr/local/bin/python && \
+    ln -sf "${managed_python}" /usr/local/bin/python3 && \
+    rm -f "$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')/EXTERNALLY-MANAGED" && \
+    python -m ensurepip --upgrade && \
+    ln -sf "$(dirname "${managed_python}")/pip3" /usr/local/bin/pip && \
+    python -c "import platform; assert platform.python_version() == '${PYTHON_VERSION}', platform.python_version()"
+
+# outlines-core's sdist has no Cargo.lock, so pin the toolchain instead.
+FROM runtime-base AS outlines-core-wheel
+ARG OUTLINES_CORE_VERSION
+ARG RUST_TOOLCHAIN=1.98.1
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | \
+        sh -s -- -y --no-modify-path --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" && \
+    PATH="/root/.cargo/bin:${PATH}" python -m pip wheel --no-cache-dir --no-deps \
+        --no-binary outlines-core --wheel-dir /wheels "outlines-core==${OUTLINES_CORE_VERSION}"
+
+FROM runtime-base
+ARG TARGETARCH
+ARG SGLANG_VERSION
+ARG PYTHON_VERSION
+ARG RAY_VERSION
+ARG OUTLINES_CORE_VERSION
+ARG FLASHINFER_VERSION=0.6.15.post1
+
+# The lock resolves SGLang's release pins against PyPI and the PyTorch cu130
+# index, taking the best match across both as SGLang's Dockerfile does with pip.
+COPY dockerfiles/requirements/sglang-${SGLANG_VERSION}-${TARGETARCH}.txt /tmp/requirements.txt
+RUN --mount=from=uv-installer,source=/uv,target=/usr/local/bin/uv \
+    --mount=from=outlines-core-wheel,source=/wheels,target=/tmp/wheels \
+    uv pip install --system --no-cache --no-deps --index-strategy unsafe-best-match \
+        --find-links /tmp/wheels -r /tmp/requirements.txt && \
+    uv pip install --system --no-cache --no-deps \
+        --index-url https://flashinfer.ai/whl "flashinfer-cubin==${FLASHINFER_VERSION}" && \
+    rm /tmp/requirements.txt
+
+# enroot ignores ENV PATH; link the interpreter's console scripts onto the default PATH.
+RUN scripts="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')" && \
+    ln -sf "${scripts}/ray" /usr/local/bin/ray && \
+    ln -sf "${scripts}/sglang" /usr/local/bin/sglang
+
+COPY --from=fetch /out/opt/ /opt/
+ENV SGLANG_TRTLLM_GEN_MOE_CUBIN_POOL=/opt/trtllm_gen_moe_cubin_pool \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache \
+    TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache \
+    TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache \
+    RAY_USAGE_STATS_ENABLED=0
+
+RUN python -c "import platform, outlines_core, ray, ray.dashboard.optional_deps, sglang, torch; \
+from importlib.metadata import version; \
+assert platform.python_version() == '${PYTHON_VERSION}', platform.python_version(); \
+assert ray.__version__ == '${RAY_VERSION}', ray.__version__; \
+assert sglang.__version__ == '${SGLANG_VERSION}', sglang.__version__; \
+assert version('outlines-core') == '${OUTLINES_CORE_VERSION}', version('outlines-core'); \
+assert version('flashinfer-python') == version('flashinfer-cubin') == '${FLASHINFER_VERSION}'; \
+assert torch.version.cuda.startswith('13.'), torch.version.cuda; \
+print('SGLang', sglang.__version__, 'torch', torch.__version__, 'ray', ray.__version__)" && \
+    ray --version | grep -F "${RAY_VERSION}" && \
+    test -x "$(readlink -f /usr/local/bin/sglang)"
+
+# NVIDIA's arm64 nvidia-cusparselt-cu13 wheel records the platform tag
+# manylinux2014_sbsa, which pip check reports as unsupported; any other report fails.
+RUN pip check > /tmp/pipcheck.txt 2>&1 || \
+    { cat /tmp/pipcheck.txt; ! grep -vxE 'nvidia-cusparselt-cu13 [0-9.]+ is not supported on this platform' /tmp/pipcheck.txt | grep -q .; } && \
+    rm /tmp/pipcheck.txt
+
+RUN python -c "\
+from openai_harmony import load_harmony_encoding, HarmonyEncodingName; \
+load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS); \
+print('openai_harmony encoding loaded OK')"

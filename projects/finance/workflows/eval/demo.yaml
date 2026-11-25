@@ -1,0 +1,76 @@
+# ============================================================================
+# Demo Baseline Evaluation (3 models)
+# ============================================================================
+# Evaluate Qwen3-4B, Gemma 3 4B IT, and GPT-OSS 20B. Covers reasoning (Qwen3),
+# standard chat (Gemma), and MoE (GPT-OSS) families.
+#
+# All benchmarks use the same NVFlow-managed local judge. The agentic benchmark,
+# fabv1, calls live SEC tools; its `web` tool set also needs TAVILY_API_KEY.
+# Pick the scope with `-e`:
+#
+#   # QA only
+#   uv run nvflow run --all -c .../demo.yaml --cluster my_cluster -e secque -e financebench
+#
+#   # Agentic only
+#   uv run nvflow run --all -c .../demo.yaml --cluster my_cluster -e fabv1
+#
+#   # Everything
+#   uv run nvflow run --all -c .../demo.yaml --cluster my_cluster
+#
+# Gemma has no vLLM tool-call parser, so it is scoped to the QA benchmarks and
+# is skipped when you select an agentic one.
+#
+# How each model is served lives in eval_presets.yaml.
+# ============================================================================
+
+# NVFlow/NeMo-Skills-managed policy and judge defaults come from here.
+_base_: embedded.yaml
+workflow:
+  name: "eval"
+  type: "evaluation"
+  description: "Demo baseline evaluation (Qwen3-4B, Gemma-3-4B-IT, GPT-OSS-20B)"
+data_root: /workspace/outputs/finance/demo/workflow-1-baseline-eval
+# The SEC filing-metadata cache that finance:download/demo writes.
+directories:
+  cache-finance-sec-search: /workspace/outputs/finance/demo/workflow-2-download-sec/cache/finance_sec_search
+# Tool set offered on fabv1: `noweb` or `web` (web_search needs TAVILY_API_KEY).
+# Results land in a directory named after the choice, so the two never mix.
+fabv1_variant: noweb
+# The demo's benchmarks; `-e` selects either scope. Gemma narrows this below.
+environments:
+  secque: ${benchmarks.secque}
+  financebench: ${benchmarks.financebench}
+  fabv1: ${benchmarks.fabv1}
+.qa_only: &qa_only
+  secque: ${benchmarks.secque}
+  financebench: ${benchmarks.financebench}
+models:
+  qwen3-4b:
+    dependencies: [eval_data]
+    model: ${model_presets.qwen3_4b}
+  # No vLLM parser for its tool format, so QA only.
+  gemma-3-4b-it:
+    dependencies: [eval_data]
+    environments: *qa_only
+    model: ${model_presets.gemma_3_4b_it}
+  gpt-oss-20b:
+    dependencies: [eval_data]
+    model: ${model_presets.gpt_oss_20b}
+stages:
+  # Prepares only the demo's benchmarks; this list replaces the catalog's.
+  eval_data:
+    benchmarks:
+      - benchmark: secque
+        prompt_config: project://workflows/eval/prompts/secque.yaml
+        output_file: secque/eval.jsonl
+      - benchmark: financebench
+        output_file: financebench/eval.jsonl
+      - benchmark: ${fabv1_variants.${fabv1_variant}.benchmark}
+        prepared_file: ${fabv1_variants.${fabv1_variant}.prepared_file}
+        prompt_config: null # prompt + tool schemas are baked in at prepare time
+        output_file: ${fabv1_variants.${fabv1_variant}.name}/eval.jsonl
+pipeline_stages:
+  - eval_data
+  - qwen3-4b
+  - gemma-3-4b-it
+  - gpt-oss-20b

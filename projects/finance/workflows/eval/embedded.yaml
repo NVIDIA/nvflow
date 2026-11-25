@@ -1,0 +1,60 @@
+# ============================================================================
+# Embedded Evaluation Defaults
+# ============================================================================
+# The campaign that SFT and GRPO pipelines score their checkpoints against.
+# It is not run on its own -- it declares no models, and `data_root` is filled
+# in by the training run so results land next to the checkpoints.
+#
+# It is the full benchmark catalog from base.yaml with one change: the QA
+# benchmarks grade with a locally served judge instead of the hosted one, so a
+# training pipeline finishes without hosted-API credentials.
+#
+# To grade with the hosted judge instead, point the training config at the
+# catalog directly and supply NVIDIA_API_KEY:
+#
+#   stages:
+#     eval:
+#       campaign: base.yaml
+# ============================================================================
+_base_: base.yaml
+workflow:
+  name: "eval"
+  type: "evaluation"
+  description: "Embedded checkpoint evaluation defaults"
+# NVFlow deploys both roles through NeMo-Skills-managed vLLM services.
+# Co-scheduled with the rollout on its own GPUs: num_gpus must stay > 0, since
+# zeroing it does not fall back to the hosted endpoint.
+.judge_gptoss120b: &judge_gptoss120b
+  model_type: vllm_model
+  model: /hf_models/openai/gpt-oss-120b
+  base_url: null
+  api_key_env: null
+  num_gpus: 4
+  server_nodes: 1
+  server_type: vllm
+  gym_model:
+    return_token_id_information: false
+    uses_reasoning_parser: true
+    vllm_serve_kwargs:
+      tensor_parallel_size: 4
+      max_model_len: 32768
+      async_scheduling: true
+      reasoning_parser: openai_gptoss
+      # Grade deterministically so rescoring is reproducible.
+      override_generation_config:
+        temperature: 0.0
+  deployment: nvflow
+# The quickstart uses one NVFlow-deployed judge consistently across benchmarks.
+benchmarks:
+  secque:
+    models:
+      judge: *judge_gptoss120b
+  financebench:
+    models:
+      judge: *judge_gptoss120b
+  fabv1:
+    models:
+      judge: *judge_gptoss120b
+  fabv2:
+    models:
+      judge: *judge_gptoss120b

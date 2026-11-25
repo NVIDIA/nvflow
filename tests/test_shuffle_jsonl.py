@@ -16,7 +16,7 @@
 
 The atomicity test is the load-bearing one: ``prepare_data`` runs this
 script as a post-pass on the multi-GB ``train.jsonl`` produced by
-``ng_prepare_data``.  Without atomic writes, an interrupted slurm job
+Gym dataset collation.  Without atomic writes, an interrupted Slurm job
 (timeout, OOM, manual cancel) would leave a partially-written
 ``train.jsonl`` that step-5 ``collect_rollouts`` silently consumes
 (``iter_jsonl`` drops the cut-off last record), giving an off-by-N
@@ -33,7 +33,7 @@ from unittest import mock
 
 import pytest
 
-from nvflow.recipes.finance.utils.rl.shuffle_jsonl import shuffle_file
+from nvflow.integrations.nemo_gym.workers.shuffle_jsonl import shuffle_file
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -66,8 +66,8 @@ def test_shuffle_is_deterministic_for_same_seed(tmp_path: Path) -> None:
     _write_jsonl(path_a, records)
     _write_jsonl(path_b, records)
 
-    shuffle_file(path_a, random_seed=42)
-    shuffle_file(path_b, random_seed=42)
+    shuffle_file(path_a, random_seed=42, chunk_bytes=256)
+    shuffle_file(path_b, random_seed=42, chunk_bytes=256)
 
     assert _read_jsonl(path_a) == _read_jsonl(path_b)
 
@@ -119,7 +119,7 @@ def test_shuffle_preserves_record_set(tmp_path: Path) -> None:
 def test_shuffle_preserves_byte_level_content(tmp_path: Path) -> None:
     """Round-trip the bytes of each line, not just the parsed dict.
 
-    ``ng_prepare_data`` writes via orjson; ``shuffle_jsonl`` operates
+    Gym dataset collation writes via orjson; ``shuffle_jsonl`` operates
     on raw ``readlines()`` bytes precisely so the orjson key-ordering
     and float formatting reach step-5 unmodified.  This test pins
     that contract: a regression that re-serialises records via stdlib
@@ -168,7 +168,7 @@ def test_atomic_write_leaves_original_on_failure(tmp_path: Path) -> None:
     # has been written but before it replaces the original -- this is
     # the exact failure window the atomic-rename protects against.
     with mock.patch(
-        "nvflow.recipes.finance.utils.rl.shuffle_jsonl.os.replace",
+        "nvflow.integrations.nemo_gym.workers.shuffle_jsonl.os.replace",
         side_effect=OSError("simulated crash mid-rename"),
     ):
         with pytest.raises(OSError, match="simulated crash"):
@@ -197,7 +197,7 @@ def test_missing_input_file_raises_clean_exit(tmp_path: Path) -> None:
     cmd = [
         sys.executable,
         "-m",
-        "nvflow.recipes.finance.utils.rl.shuffle_jsonl",
+        "nvflow.integrations.nemo_gym.workers.shuffle_jsonl",
         "--input_file",
         str(tmp_path / "does_not_exist.jsonl"),
         "--random_seed",
@@ -214,7 +214,7 @@ def test_main_smoke_via_subprocess(tmp_path: Path) -> None:
 
     Mirrors how ``prepare_data`` actually invokes the shuffle (via
     ``build_python_cmd`` which renders ``python3 -m
-    nvflow.recipes.finance.utils.rl.shuffle_jsonl --input_file ...``).
+    nvflow.integrations.nemo_gym.workers.shuffle_jsonl --input_file ...``).
     Catches argparse-level regressions that unit-level tests miss.
     """
     records = _make_records(30)
@@ -224,7 +224,7 @@ def test_main_smoke_via_subprocess(tmp_path: Path) -> None:
     cmd = [
         sys.executable,
         "-m",
-        "nvflow.recipes.finance.utils.rl.shuffle_jsonl",
+        "nvflow.integrations.nemo_gym.workers.shuffle_jsonl",
         "--input_file",
         str(path),
         "--random_seed",

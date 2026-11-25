@@ -32,8 +32,7 @@ from pathlib import Path
 
 import orjson
 import pytest
-
-from nvflow.recipes.finance.utils.rl.apply_validate_filter import (
+from nvfinance.utils.rl.apply_validate_filter import (
     MissingSdgRecordError,
     apply_validate_filter,
 )
@@ -95,7 +94,7 @@ def test_cli_omitting_raw_sdg_source_exits_nonzero(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "nvflow.recipes.finance.utils.rl.apply_validate_filter",
+            "nvfinance.utils.rl.apply_validate_filter",
             "--input_file",
             str(parsed_file),
             "--output_kept",
