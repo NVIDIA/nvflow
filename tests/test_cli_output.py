@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -186,6 +187,23 @@ with route_stdout_to_stderr():
     assert "python output" in completed.stderr
     assert "native output" in completed.stderr
     assert "subprocess output" in completed.stderr
+
+
+def test_typer_errors_stay_plain_on_github_actions() -> None:
+    environment = {
+        name: value for name, value in os.environ.items() if name not in {"NO_COLOR", "TERM"}
+    }
+    environment["GITHUB_ACTIONS"] = "true"
+    completed = subprocess.run(
+        [sys.executable, "-m", "nvflow.cli.main", "plan", "--workflow", "starter:generate"],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 2
+    assert "Missing option '--cluster'" in completed.stderr
+    assert "\x1b[" not in completed.stderr
 
 
 def test_show_config_stdout_is_parseable_yaml(

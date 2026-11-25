@@ -32,6 +32,9 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 os.environ.setdefault("NVFLOW_DISABLE_PROJECT_ENVIRONMENT", "1")
 os.environ.setdefault("SEC_IDENTITY_EMAIL", "nvflow-tests@example.com")
 os.environ.setdefault("SEC_IDENTITY_COMPANY", "NVFlow Tests")
+# Typer forces Rich terminal output when GITHUB_ACTIONS, FORCE_COLOR, or PY_COLORS is set,
+# which puts ANSI escapes into the help and error text these tests assert on.
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
 
 @pytest.fixture
