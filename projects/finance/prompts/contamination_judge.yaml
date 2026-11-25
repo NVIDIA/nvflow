@@ -1,0 +1,23 @@
+# Contamination judge for a data.decontaminate review pair.
+# Fields: text (training question), reference_text (evaluation question).
+user: |
+  Compare a training question with an evaluation question about public companies.
+
+  Training question:
+  {text}
+
+  Evaluation question:
+  {reference_text}
+
+  They are the SAME if a correct answer to the training question also answers the
+  evaluation question: the same company, the same period, and the same metric or
+  fact, however they are worded, even when the training question also asks for
+  more.
+
+  They are DIFFERENT if a correct answer to the training question does not answer
+  the evaluation question, such as when the company, the fiscal period, or the
+  metric differs.
+
+  Reply with two lines: one line of reasoning, then the verdict.
+  Reason: <one line>
+  Verdict: <SAME|DIFFERENT>

@@ -1,0 +1,42 @@
+# ============================================================================
+# Qwen3-4B SFT - Smoke Test Configuration
+# ============================================================================
+# Minimal SFT config for full pipeline smoke testing.
+# One training step, SecQUE eval with 1 seed. Points to smoke SDG output.
+#
+# Usage:
+#   uv run nvflow run --all --config projects/finance/workflows/sft/qwen3_4b_smoke.yaml --cluster my_cluster
+# ============================================================================
+
+_base_: qwen3_4b.yaml
+
+base_output_dir: /workspace/outputs/finance/smoke/workflow-4-sft/qwen3_4b
+
+directories:
+  raw_train_data: /workspace/outputs/finance/smoke/workflow-3-template-based-sdg/step-4-genselect-answers
+
+# ============================================================================
+# Smoke Test Overrides
+# ============================================================================
+stages:
+
+  training:
+    overrides:
+      sft:
+        max_num_epochs: 1
+        max_num_steps: 1
+      checkpointing:
+        save_period: 1
+      policy:
+        train_global_batch_size: 4
+
+  eval:
+    eval_steps: [1]
+    eval_data_root: /workspace/outputs/finance/smoke/step-1-eval-data  # prepared by eval/smoke
+    checkpoint_path: ${directories.step-4-training}/model-qwen3-4b-1n-tp2-pp1-cp2-seq32k
+    base_output_dir: ${base_output_dir}
+    format: megatron
+    base_model: /hf_models/Qwen/Qwen3-4B
+    preset: qwen3_4b
+    benchmarks: [secque]
+    repeats: 1

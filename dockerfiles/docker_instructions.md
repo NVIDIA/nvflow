@@ -1,442 +1,303 @@
-# NVFlow Air-Gapped Docker Images
+# Build and Stage NVFlow's Container Images
 
-Build, validate, and deploy the five NVFlow container images for use on
-air-gapped Slurm clusters.  Four of them (`nemo-rl`, `nemo-skills`, `vllm`,
-`vllm-grpo`) are produced by running `docker build` against the self-contained
-Dockerfiles in this directory; only `sglang` is pulled as-is. All custom images
-are built on a connected host (the only step that needs internet) and then run
-fully offline on the cluster.
-
-## Images
-
-| Image | Base | Purpose |
-|---|---|---|
-| `nvflow-nemo-rl` | `nvcr.io/nvidia/nemo-rl:v0.7.0` | SFT and GRPO `training`; bakes one Gym venv per component so the trainer needs no network |
-| `nvflow-nemo-skills` | `ubuntu:22.04` | SDG pipeline, evaluation, data preparation, SEC data prep |
-| `nvflow-vllm` | `vllm/vllm-openai:v0.22.0` | Standalone vLLM (SDG, eval) — multi-arch (amd64 + arm64) |
-| `nvflow-vllm` (`v0.20.0*` tag) | `vllm/vllm-openai:v0.20.0` | Standalone vLLM (GRPO rollouts, judge) — multi-arch. Same `Dockerfile.vllm` and repo as above; `--build-arg VLLM_VERSION=v0.20.0` |
-| `sglang` | `lmsysorg/sglang:v0.5.10.post1` | SGLang inference server (pulled as-is, no custom Dockerfile) |
-
-Two more images build the same way but are only needed for specific paths:
-`nvflow-nemo-gym` (CPU Gym worker, `Dockerfile.nemo-gym`, pinned by `GYM_REF`) for GRPO / DG-SDG, and `nvflow-client` (optional airgap-only launcher, `Dockerfile.nvflow`, multi-arch) for driving NVFlow over an `ssh_tunnel`. Both are covered in [containers.md](../docs/maintainers/containers.md).
-
-## Version pins
-
-| Build arg | Default | Where to find the right value |
-|---|---|---|
-| `NEMO_SKILLS_COMMIT` | `e06c9b90…` (image tag `v1.1.2`) | Must match `Dockerfile.nemo-skills` and `pyproject.toml` |
-| `GYM_REF` (nemo-gym, nemo-rl) | `33ef60369…` | A commit on upstream NeMo-Gym `main`; keep both images on the same one |
-| `VLLM_VERSION` (vllm) | `v0.22.0` | [vLLM releases](https://github.com/vllm-project/vllm/releases) |
-| `VLLM_VERSION` (vllm-grpo) | `v0.20.0` | Pinned to match NeMo-RL v0.7.0 colocated vLLM |
+NVFlow builds images for NeMo-RL, NeMo-Gym, NeMo-Skills, vLLM, SGLang, and the
+optional `nvflow-client` launcher. Slurm and Ray targets use the same images,
+and each ships its environments built in, so jobs install nothing at runtime.
+Each image's contents and version pins are in [`README.md`](README.md).
 
 ## 1. Build
 
-**Build host requirements:** any OS with Docker Engine or Docker Desktop and
-internet access (Linux, macOS, Windows/WSL2 all work).  The destination Slurm
-cluster is the constraint — it's almost always `linux/amd64`, so all examples
-below produce amd64 images.
+Use a Linux host with internet access, Docker Engine, Buildx `0.28.0` or newer
+(the build script checks it), push access to a container registry, and enough
+disk for CUDA images. The `nemo-rl` and `nemo-gym` builds are the largest: each
+leaves about 90 GB of build cache per architecture. When disk is short, build
+them in separate runs and clear the cache after each push with
+`docker buildx prune --builder nvflow-multiarch -af`.
 
-> **Default platform = host architecture.**  `docker build` produces an image
-> for the build host's arch.  On amd64 Linux / Intel macOS / Windows that's
-> `linux/amd64`.  On Apple Silicon, Graviton, or other arm64 hosts it's
-> `linux/arm64` — to get amd64 from those hosts, add `--platform linux/amd64`
-> via `buildx` (see arm64 section below).
+### Choose a registry
 
-### amd64 (default on amd64 build hosts)
+Set `REGISTRY` to a registry host and namespace your clusters can pull from,
+and log in if it requires authentication:
 
 ```bash
-cd /path/to/nvflow
-
-docker build --no-cache \
-    -f dockerfiles/Dockerfile.nemo-skills -t nvflow-nemo-skills:v1.1.2 .
-
-# Airgapped trainer. Tag tracks the base version it extends. `docker build` pulls
-# that base from nvcr.io, so `docker login nvcr.io` must have run first.
-docker build -f dockerfiles/Dockerfile.nemo-rl -t nvflow-nemo-rl:v0.7.0 .
-
-# CPU-only Gym worker. Tag tracks the baked GYM_REF; bump it when GYM_REF moves.
-docker build -f dockerfiles/Dockerfile.nemo-gym -t nvflow-nemo-gym:0.4.0 .
-
-# One Dockerfile builds both vLLM images; VLLM_VERSION picks the base tag, and
-# both ship in the nvflow-vllm repo.
-docker build -f dockerfiles/Dockerfile.vllm -t nvflow-vllm:v0.22.0 .
-docker build -f dockerfiles/Dockerfile.vllm \
-    --build-arg VLLM_VERSION=v0.20.0 -t nvflow-vllm:v0.20.0 .
-
-# sglang — pulled directly, no custom Dockerfile
-docker pull lmsysorg/sglang:v0.5.10.post1
+export REGISTRY=<registry-host>/<namespace>
+docker login <registry-host>
 ```
 
-### Cross-arch builds (e.g. amd64 image on Apple Silicon)
+Never put registry credentials in repository files. Every image builds from
+public base images, so the build host needs only this registry; logging in to
+Docker Hub raises its limit on anonymous pulls.
 
-Cross-architecture builds need `buildx` plus QEMU emulation registered on
-the host.  Register QEMU once per build host (Linux only — Docker Desktop
-ships QEMU pre-registered):
+To push to a registry on the build host instead, start one there:
+
+```bash
+docker run -d --restart=always -p 5000:5000 --name registry registry:2
+export REGISTRY=localhost:5000/nvflow
+```
+
+A cluster cannot pull from a registry on the build host, so stage those images
+[from a tarball](#without-a-registry).
+
+### Prepare the builder
+
+`scripts/build_images.sh` creates a `nvflow-multiarch` Buildx builder if it is
+missing, and stops before building unless that builder lists both
+`linux/amd64` and `linux/arm64`. Docker Desktop already emulates arm64. On an
+amd64 Linux host, register QEMU, and again after every reboot, then restart the
+builder so it detects the new platform:
 
 ```bash
 docker run --privileged --rm tonistiigi/binfmt --install all
+docker buildx stop nvflow-multiarch
 ```
 
-Then build with an explicit `--platform`:
+Emulated arm64 builds are slow. A native arm64 node avoids emulation:
+`docker buildx create --append --name nvflow-multiarch --platform linux/arm64 <arm64-docker-endpoint>`.
+
+For a registry on `localhost` or `127.*`, the script creates the builder with
+host networking and plain HTTP. If a builder of that name already exists
+without those settings, remove it with `docker buildx rm nvflow-multiarch` and
+rerun.
+
+### Build and push
+
+Build from a clean, normal clone: `nvflow-client` records the commit, so the
+script refuses a dirty tree or a linked worktree. Run it inside `tmux` or
+`screen`, because the builds take hours:
 
 ```bash
-# amd64 image from an arm64 host (most common cross-arch case for Slurm)
-docker buildx build --platform linux/amd64 \
-  -f dockerfiles/Dockerfile.vllm \
-  -t nvflow-vllm:v0.22.0 \
-  --load .
+scripts/build_images.sh
 ```
 
-QEMU-emulated builds are significantly slower than native and can take
-several hours, especially for `Dockerfile.nemo-rl`.  Prefer a native build
-host when possible.
+The script builds `nemo-skills`, `nemo-rl`, `nemo-gym`, `vllm-0-29-0`,
+`sglang-0-5-17`, and `nvflow-client` one at a time, each for `linux/amd64` and
+`linux/arm64`. It
+pushes each with `--provenance=false --sbom=false`, so registries that do not
+understand attestation manifests can read it, checks that every pushed
+manifest lists both platforms, and stops at the first failure with the end of
+that target's log. Full logs and pushed digests go to
+`~/nvflow-build-logs/<timestamp>/`. It publishes:
 
-### linux/arm64 single-arch build
+- `nvflow-nemo-skills:v1.2.0`
+- `nvflow-nemo-rl:v0.8.0`
+- `nvflow-nemo-gym:v0.7.0`
+- `nvflow-vllm:v0.29.0`
+- `nvflow-sglang:v0.5.17-ray2.58.0`
+- `nvflow-client:v1.2.0`
 
-The custom images are all built multi-arch (see below); this single-platform
-recipe is for testing one arch in isolation, and works for any of them by
-swapping `-f`.  From an arm64 host plain `docker build` works; from an amd64
-host, use `buildx` with QEMU:
+Options:
 
-```bash
-docker buildx build --platform linux/arm64 \
-  -f dockerfiles/Dockerfile.vllm \
-  -t nvflow-vllm:v0.22.0-arm64 \
-  --load .
-```
+- Name targets to build only those, in that order:
+  `scripts/build_images.sh nemo-skills nemo-rl nemo-gym vllm-0-29-0`. Only
+  workflows that select SGLang need `sglang-0-5-17`.
+- `--log-dir DIR` writes the logs to `DIR`, which must be outside the clone.
+- `--serial` builds one platform at a time and then joins them into the
+  multi-architecture tag, for hosts with limited CPU or memory. It also leaves
+  `<tag>-amd64` and `<tag>-arm64` tags.
+- `--platform linux/amd64` (or `linux/arm64`) builds one platform and pushes
+  only `<tag>-amd64` (or `<tag>-arm64`), so it never replaces a
+  dual-architecture tag. Use that tag in `my_containers.yaml` on Slurm, or in
+  your Ray clusters' image settings.
 
-`--load` only supports a single platform at a time; for multi-arch see below.
+Run one copy of the script per builder at a time. If an image fails, rerun it
+and the images after it, for example
+`scripts/build_images.sh vllm-0-29-0 sglang-0-5-17 nvflow-client`; completed steps come from
+the build cache, except in `nemo-skills`, which always rebuilds from scratch.
+Two arm64 failures come from emulation rather than from the image:
 
-### Multi-arch build (amd64 + arm64) — push to registry
+- `Exec format error`: QEMU is no longer registered, for example after a
+  reboot. Register it again and restart the builder, as in
+  [Prepare the builder](#prepare-the-builder).
+- `qemu: uncaught target signal 11` while `ldconfig` runs: a
+  [known QEMU bug](https://gitlab.com/qemu-project/qemu/-/issues/1913) with
+  Ubuntu 22.04 arm64 images. Rerun.
 
-Build for both architectures and push the manifest list in one shot.  Multi-arch
-builds **must** push to a registry — the local Docker image store can't hold a
-manifest list, so `--load` is not an option.
+## 2. Verify
 
-Needs QEMU (above) and a `docker-container` builder — the default `docker`
-driver cannot build multiple platforms:
+The `nemo-skills`, `vllm`, and `sglang` builds fail unless Python, Ray, and the
+serving engine match their pins, `pip check` passes, and the tokenizer files
+load. The `nemo-rl` and `nemo-gym` builds check the Gym environments they add,
+and the client build checks Python and Ray in every environment it bakes. The
+script also checks that every pushed manifest lists both platforms. Two checks
+remain. On a host of the other architecture they run under QEMU.
 
-```bash
-docker buildx create --name nvflow --driver docker-container --use
-docker buildx inspect --bootstrap
-```
-
-```bash
-REGISTRY=<your-registry>
-
-# Airgapped trainer. Tag tracks the base version it extends.
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f dockerfiles/Dockerfile.nemo-rl \
-  -t $REGISTRY/nvflow-nemo-rl:v0.7.0 \
-  --provenance=false --sbom=false --push .
-
-# CPU-only Gym worker. Tag tracks the baked GYM_REF; bump it when GYM_REF moves.
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f dockerfiles/Dockerfile.nemo-gym \
-  -t $REGISTRY/nvflow-nemo-gym:0.4.0 \
-  --provenance=false --sbom=false --push .
-
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f dockerfiles/Dockerfile.vllm \
-  -t $REGISTRY/nvflow-vllm:v0.22.0 \
-  --provenance=false --sbom=false --push .
-
-# Same Dockerfile and repo; VLLM_VERSION picks the base tag.
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f dockerfiles/Dockerfile.vllm \
-  --build-arg VLLM_VERSION=v0.20.0 \
-  -t $REGISTRY/nvflow-vllm:v0.20.0 \
-  --provenance=false --sbom=false --push .
-
-# --no-cache is required: ARG CACHEBUST gates the dependency-override layer, so
-# a warm cache reuses stale resolutions and skips the security floors.
-docker buildx build --platform linux/amd64,linux/arm64 --no-cache \
-  -f dockerfiles/Dockerfile.nemo-skills \
-  -t $REGISTRY/nvflow-nemo-skills:v1.1.2 \
-  --provenance=false --sbom=false --push .
-
-# Launcher, not a worker. Build from a committed tree: .baked_commit records
-# `git rev-parse HEAD`, so uncommitted changes ship under the wrong provenance.
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f dockerfiles/Dockerfile.nvflow \
-  -t $REGISTRY/nvflow-client:v1.1.2 \
-  --provenance=false --sbom=false --push .
-
-# Verify both architectures are in the manifest list
-docker buildx imagetools inspect $REGISTRY/nvflow-vllm:v0.22.0
-```
-
-`--provenance=false --sbom=false` keeps the manifest list compatible with
-older registries / consumers that don't understand attestation manifests.
-
-## 2. Sanity checks (blockers)
-
-Run these against the locally-built Docker images before the time-consuming
-enroot import step.  Each check below is a hard blocker — if it fails, the
-image will not work in production.
-
-> If your build host arch differs from the image arch (e.g. running checks
-> against an amd64 image on Apple Silicon), the checks will run under QEMU
-> emulation as long as QEMU is registered (Docker Desktop ships it; on Linux
-> see the `tonistiigi/binfmt` step above).  Without QEMU, `docker run` will
-> fail with `exec format error` — defer the checks to the cluster after
-> enroot import in that case.
-
-### nemo-rl
-
-> Required for the default release: `nvflow-nemo-rl` is built from
-> `Dockerfile.nemo-rl`, and these checks are what prove its baked Gym venvs are
-> usable offline. See
-> [`docs/development/nemo-rl-gym.md`](../docs/development/nemo-rl-gym.md) for the
-> image internals.
+The tokenizer files load without network access:
 
 ```bash
-IMAGE=nvflow-nemo-rl:v0.7.0
-
-# A. every Gym component venv is baked
-docker run --rm $IMAGE bash -c \
-  'find /opt/gym_venvs -maxdepth 3 -name .venv | sort'
-# Expect: 7 paths — resources_servers/{equivalence_llm_judge,finance_sec_search,
-#   format_verification}, responses_api_agents/{finance_agent,simple_agent},
-#   responses_api_models/{openai_model,vllm_model}
-
-# B. Gym imports with no network and no uv resolve
-docker run --rm --network=none -e UV_OFFLINE=true $IMAGE bash -c \
-  '/opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym/bin/python -c \
-     "import nemo_gym; print(\"nemo_gym OK\")"'
-# Expect: nemo_gym OK
-
-# C. /opt/NeMo-RL symlink (scripts/convert_checkpoint_to_hf.sh cd's to it)
-docker run --rm $IMAGE bash -c \
-  'cd /opt/NeMo-RL && ls examples/converters/convert_dcp_to_hf.py'
-# Expect: examples/converters/convert_dcp_to_hf.py
-
-# D. uvicorn pin (timeout_worker_healthcheck kwarg required by Gym servers)
-docker run --rm $IMAGE bash -c '
-  /opt/gym_venvs/resources_servers/finance_sec_search/.venv/bin/python -c "
-import uvicorn, inspect
-assert \"timeout_worker_healthcheck\" in inspect.signature(uvicorn.run).parameters, uvicorn.__version__
-print(\"uvicorn\", uvicorn.__version__, \"OK\")"'
-# Expect: uvicorn 0.52.x OK
-```
-
-### nemo-skills
-
-```bash
-IMAGE=nvflow-nemo-skills:v1.1.2
-
-# A. tiktoken pre-cache loads offline
-docker run --rm --network=none -e HF_HUB_OFFLINE=1 $IMAGE bash -c '
-  python3 -c "import tiktoken; tiktoken.get_encoding(\"cl100k_base\"); print(\"OK\")"'
-# Expect: OK
-
-# B. tzdata populated (otherwise pyarrow timestamps blow up at job time:
-#    ArrowInvalid: timezone "UTC" not found in timezone database)
-docker run --rm $IMAGE bash -c '
-  python3 -c "import pyarrow as pa; pa.array([], type=pa.timestamp(\"ns\", tz=\"UTC\")); print(\"OK\")"'
-# Expect: OK
-
-# C. SDG + SEC data-prep deps importable
-#    (used by workflow-2 download_sec and workflow-3 step-0 create_seed_data;
-#    all baked into Dockerfile.nemo-skills, no runtime pip install)
-docker run --rm $IMAGE bash -c '
-  python3 -c "import jsonlines, tiktoken, markdownify, backoff, func_timeout, tavily, edgartools, sec_parser, pandas, pyarrow, requests, bs4; print(\"OK\")"'
-# Expect: OK
-```
-
-### vllm and vllm-grpo
-
-Run the same set against both images:
-
-```bash
-for IMAGE in nvflow-vllm:v0.22.0 nvflow-vllm:v0.20.0; do
-  echo "=== $IMAGE ==="
-
-  # A. tiktoken encoding files present
-  docker run --rm $IMAGE bash -c "ls /opt/tiktoken_cache/*.tiktoken"
-  # Expect: o200k_base.tiktoken and cl100k_base.tiktoken
-
-  # B. openai_harmony loads offline (no network)
-  docker run --rm --network=none $IMAGE bash -c '
-    python3 -c "from openai_harmony import load_harmony_encoding, HarmonyEncodingName; \
-                load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS); print(\"OK\")"'
-  # Expect: OK
+docker run --rm --network=none --entrypoint python3 \
+  "$REGISTRY/nvflow-nemo-skills:v1.2.0" \
+  -c 'import tiktoken; tiktoken.get_encoding("cl100k_base"); print("OK")'
+for image in nvflow-vllm:v0.29.0 nvflow-sglang:v0.5.17-ray2.58.0; do
+  docker run --rm --network=none --entrypoint python3 "$REGISTRY/$image" -c '
+from openai_harmony import load_harmony_encoding, HarmonyEncodingName
+load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+print("OK")'
 done
 ```
 
-## 3. Convert to `.sqsh` for the Slurm cluster
-
-`enroot` runs on the Slurm compute/login nodes (Linux only).  There are two
-paths from a Docker image to a `.sqsh` file — pick whichever fits your air-gap
-workflow.
-
-### Option A: via a private container registry (recommended)
-
-Push each image, then `enroot import` from the registry on the cluster:
+The launcher image was built from your commit and validates a workflow without
+network access:
 
 ```bash
-REGISTRY=<your-registry>
-
-docker tag nvflow-nemo-rl:v0.7.0     $REGISTRY/nvflow-nemo-rl:v0.7.0
-docker tag nvflow-nemo-gym:0.4.0     $REGISTRY/nvflow-nemo-gym:0.4.0
-docker tag nvflow-nemo-skills:v1.1.2 $REGISTRY/nvflow-nemo-skills:v1.1.2
-docker tag nvflow-vllm:v0.22.0       $REGISTRY/nvflow-vllm:v0.22.0
-docker tag nvflow-vllm:v0.20.0       $REGISTRY/nvflow-vllm:v0.20.0
-
-docker push $REGISTRY/nvflow-nemo-rl:v0.7.0
-docker push $REGISTRY/nvflow-nemo-gym:0.4.0
-docker push $REGISTRY/nvflow-nemo-skills:v1.1.2
-docker push $REGISTRY/nvflow-vllm:v0.22.0
-docker push $REGISTRY/nvflow-vllm:v0.20.0
+docker run --rm --network=none --entrypoint bash "$REGISTRY/nvflow-client:v1.2.0" -lc "
+  set -e
+  test \"\$(cat /opt/nvflow/.baked_commit)\" = $(git rev-parse HEAD)
+  nvflow list-projects >/dev/null
+  nvflow validate --workflow starter:generate >/dev/null
+  echo OK"
 ```
 
-Then on the cluster (typically a CPU partition):
+## 3. Stage the images on Slurm
+
+Slurm runs each job in a `.sqsh` copy of an image; Ray clusters run the images
+directly. Convert them as in
+[Stage the images](../docs/slurm/README.md#2-stage-the-images): copy
+`cluster_configs/containers.yaml` to `cluster_configs/my_containers.yaml`, set
+your registry, and submit `scripts/setup_containers.sh`. It writes
+`<role>-<tag>.sqsh` files and skips any that already exist; add `--force` after
+rebuilding an image under the same tag.
+
+### Without a registry
+
+A cluster that cannot pull from your registry can import an image from a
+tarball on a Linux host with Docker and Enroot. If your Docker Engine uses the
+containerd image store, add `--platform linux/amd64` to `docker save`:
 
 ```bash
-CONTAINER_DIR=<absolute path to where .sqsh files should live>
-REGISTRY=<your-registry>
+# On the build host: pull the cluster's platform and save it.
+docker pull --platform linux/amd64 "$REGISTRY/nvflow-nemo-skills:v1.2.0"
+docker tag "$REGISTRY/nvflow-nemo-skills:v1.2.0" nvflow-nemo-skills:v1.2.0
+docker save nvflow-nemo-skills:v1.2.0 | gzip > nvflow-nemo-skills-v1.2.0.tar.gz
 
-# Name the output <yaml-key>-<tag>.sqsh to match what scripts/setup_containers.sh
-# produces, so either staging method drops in to the same my_cluster.yaml.
-enroot import \
-  --output $CONTAINER_DIR/nemo-skills-v1.1.2.sqsh \
-  "docker://$REGISTRY/nvflow-nemo-skills:v1.1.2"
-
-# Repeat for vllm, vllm-grpo, nemo-gym, nemo-rl. sglang imports directly:
-# docker://lmsysorg/sglang:v0.5.10.post1
+# On the cluster host, after copying the tarball there.
+gunzip -c nvflow-nemo-skills-v1.2.0.tar.gz | docker load
+enroot import --output <PATH_TO_CONTAINERS>/nemo-skills-v1.2.0.sqsh \
+  dockerd://nvflow-nemo-skills:v1.2.0
 ```
 
-If the cluster authenticates to your registry, drop credentials into
-`~/.config/enroot/.credentials`:
-
-```
-machine <your-registry-host> login <user> password <token>
-```
-
-### Option B: via a saved tarball (no registry required)
-
-For fully air-gapped sites without a private registry, save the Docker image
-to a tarball, transfer it to a Linux host that has both Docker and `enroot`,
-load the tarball into the local Docker daemon, then import via `dockerd://`:
+`enroot import` reads only `docker://`, `dockerd://`, and `podman://` sources.
+Without a Docker daemon on the cluster host, load the tarball with Podman and
+import it from there:
 
 ```bash
-# On the build host
-docker save nvflow-nemo-skills:v1.1.2 | gzip > nvflow-nemo-skills-v1.1.2.tar.gz
-# Transfer the .tar.gz to the cluster (scp / rsync / sneakernet)
-
-# On the cluster (requires a Docker daemon accessible to your user)
-gunzip -c nvflow-nemo-skills-v1.1.2.tar.gz | docker load
-enroot import \
-  --output $CONTAINER_DIR/nemo-skills-v1.1.2.sqsh \
-  dockerd://nvflow-nemo-skills:v1.1.2
+gunzip -c nvflow-nemo-skills-v1.2.0.tar.gz | podman load
+enroot import --output <PATH_TO_CONTAINERS>/nemo-skills-v1.2.0.sqsh \
+  podman://nvflow-nemo-skills:v1.2.0
 ```
 
-> `enroot import` natively supports only `docker://` (remote registry),
-> `dockerd://` (local Docker daemon), and `podman://` URIs.  If the cluster
-> has neither a private registry nor a Docker daemon, run a transient local
-> registry container, push to it, and import via `docker://localhost:5000/...`.
+Without Podman either, convert the image on a host that has Docker and Enroot,
+then copy the `.sqsh` file to the cluster.
 
-### Two things to watch for in either option
+### Manual `enroot import`
 
-- **Registries with a path component need `#` instead of `/`.** `enroot` parses
-  `docker://<host>/<path>` such that everything after the first `/` is image
-  path, which breaks for registries where the host itself contains a path
-  (e.g. `nvcr.io/<org>`).  Use `#` to separate host from image path:
+- Separate the registry host with `#`: `enroot` reads `docker://<host>/<path>`
+  as a Docker Hub path. `scripts/setup_containers.sh` does this for you.
+
   ```bash
-  enroot import --output vllm-v0.22.0.sqsh \
-    "docker://nvcr.io#<org>/nvflow-vllm:v0.22.0"
-  ```
-- **Filename colon.** `enroot` writes the Docker tag separator (`:`) literally
-  into the output filename.  Either pass `--output` with a shell-safe name (as
-  above) or rename after import:
-  ```bash
-  mv "nvflow-nemo-skills:v1.1.2.sqsh" nemo-skills-v1.1.2.sqsh
+  enroot import --output vllm-v0.29.0.sqsh \
+    "docker://<registry-host>#<namespace>/nvflow-vllm:v0.29.0"
   ```
 
-## 4. Cluster config (`my_cluster.yaml`)
+- Pass `--output`: otherwise `enroot` writes the tag's `:` into the file name.
 
-`cluster_configs/my_cluster.yaml` is **not tracked in git** — create it from
-the template below, replacing the `<...>` placeholders with site-specific
-values.  The two blocks below are the minimum required for air-gapped
-operation.
+## 4. Updating an image
 
-### Container paths (point at the `.sqsh` files from step 3)
+### vLLM image
 
-```yaml
-containers:
-  # Filenames are <yaml-key>-<tag>.sqsh, as produced by setup_containers.sh.
-  nemo-rl:     <CONTAINER_DIR>/nemo-rl-v0.7.0.sqsh
-  nemo-skills: <CONTAINER_DIR>/nemo-skills-v1.1.2.sqsh
-  vllm:        <CONTAINER_DIR>/vllm-v0.22.0.sqsh
-  vllm-grpo:   <CONTAINER_DIR>/vllm-grpo-v0.20.0.sqsh
-  nemo-gym:    <CONTAINER_DIR>/nemo-gym-0.4.0.sqsh
-  # sglang:    <CONTAINER_DIR>/sglang-v0.5.10.post1.sqsh
+[`Dockerfile.vllm`](Dockerfile.vllm) installs vLLM's official CUDA 13 wheel for
+the commit pinned in [`docker-bake.hcl`](../docker-bake.hcl), checked against
+its SHA-256, on uv-managed Python `3.13.14`; vLLM's own `docker/Dockerfile`
+installs Python from the deadsnakes PPA, which no longer publishes `3.13.14`.
+The image follows the final stage of vLLM's image for the same release: its
+`nvidia/cuda` base, the CUDA compiler and headers, vLLM's requirements with its
+NCCL override, `flashinfer-cubin` and `flashinfer-jit-cache`, and the same
+extra packages. It leaves out DeepEP, GDRCopy, the KV connectors, and the
+non-root user. NVFlow adds Ray, SAM 3.1, and the offline tiktoken cache. Ray's
+`cgraph` extra hardcodes CUDA 12 CuPy, so the image pairs `ray[default]` with
+`cupy-cuda13x`.
+
+For a new vLLM release, take the commit, wheel SHA-256 values, CUDA base,
+`FLASHINFER_VERSION`, and NCCL override from that release, then regenerate the
+[lock files](#lock-files).
+
+### SGLang image
+
+SGLang's own `docker/Dockerfile` hard-codes Python 3.12, so
+[`Dockerfile.sglang`](Dockerfile.sglang) follows its install recipe instead:
+the official `0.5.17` wheels on SGLang's
+`nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04` base, Torch from the PyTorch cu130
+index, `flashinfer-cubin`, and the checksum-pinned TRT-LLM MoE cubin pool, on
+uv-managed Python `3.13.14` and Ray `2.58.0`.
+
+- The extras are `http2` and `tracing`: the official `all` extra without
+  `diffusion`, whose `PyYAML==6.0.1` pin has no Python 3.13 build.
+- `outlines-core==0.1.26` has no Python 3.13 wheel, so a throwaway stage
+  compiles it from its sdist with a pinned Rust toolchain. It is the only
+  compile step in any image.
+- DeepEP, MSCCL++, Mooncake, NIXL, GDRCopy, HPC-Ops, `sgl-model-gateway`, the
+  FlashInfer DCP patch, `runai-model-streamer`, and the dev tools are left
+  out. They serve expert-parallel MoE, prefill/decode disaggregation, decode
+  context parallelism, multi-engine routing, and object-store loading, which
+  NVFlow's server launchers do not use.
+
+### Lock files
+
+The vLLM and SGLang images install their Python packages with `--no-deps` from
+per-architecture lock files, so both architectures and later rebuilds get
+identical versions: `requirements/<image>-<version>-<arch>.txt`, compiled from
+`requirements/<image>-<version>.in` and any upstream version overrides in
+`<image>-<version>.overrides.txt`. Each lock file's header records the
+`uv pip compile` command that regenerates it; rerun it after changing an `.in`
+file or a pin. The command passes `--no-config` so the locks do not pick up
+NVFlow's own uv overrides from `pyproject.toml`.
+
+Each image then runs `pip check`, ignoring known reports: NVIDIA's arm64
+`nvidia-cusparselt-cu13` wheel records the platform tag `manylinux2014_sbsa`,
+which `pip check` calls unsupported, and in the vLLM image, vLLM's NCCL
+override replaces torch's exact NCCL pin.
+
+### A new NeMo-RL or NeMo-Gym base image
+
+This is a maintainer check of a candidate base image. The stock
+`nvcr.io/nvidia/nemo-rl` and `nvcr.io/nvidia/nemo-gym` images are only the
+build bases of `nvflow-nemo-rl` and `nvflow-nemo-gym`, not worker images. Every
+image that joins a Ray cluster must have NVFlow's Python and Ray versions
+(`nvflow/execution/runtime_profile.py`), so check a candidate before building
+on it. These commands pull the candidates, about 45 GB for NeMo-RL and 14 GB
+for NeMo-Gym:
+
+```bash
+docker run --rm --entrypoint bash nvcr.io/nvidia/nemo-rl:<candidate-tag> -c '
+  set -e
+  /opt/nemo_rl_venv/bin/python -c "import platform, ray; assert (platform.python_version(), ray.__version__) == (\"3.13.14\", \"2.58.0\")"
+  test -f /opt/nemo-rl/examples/converters/convert_dcp_to_hf.py
+  for actor in models.policy.workers.automodel_policy_worker.AutomodelPolicyWorker \
+      models.policy.workers.megatron_policy_worker.MegatronPolicyWorker environments.nemo_gym.NemoGym; do
+    test -x "/opt/ray_venvs/nemo_rl.$actor/bin/python"
+  done
+  git -C /opt/nemo-rl/3rdparty/Gym-workspace/Gym rev-parse HEAD'
+
+docker run --rm --entrypoint bash nvcr.io/nvidia/nemo-gym:<candidate-tag> -c '
+  set -e
+  /opt/nemo_gym_venv/bin/python -c "import platform, ray; from importlib.metadata import version; assert (platform.python_version(), ray.__version__, version(\"vllm\")) == (\"3.13.14\", \"2.58.0\", \"0.29.0\")"
+  for command in run aggregate profile health-check reverify compare; do
+    gym eval "$command" --help >/dev/null
+  done
+  echo OK'
 ```
 
-### Air-gap enforcement
+NeMo-RL trains with the Gym commit it vendors, which the first command prints,
+while Gym stages run the standalone release. In v0.8.0 both are Gym v0.7.0
+(`1f8afc71`). When they differ, diff the resource servers between them before
+attributing a training-versus-evaluation difference to the model:
 
-These environment variables turn off all outbound package and model fetches:
-
-```yaml
-env_vars:
-  # Disable HuggingFace network access (Hub, datasets, transformers).
-  - HF_HUB_OFFLINE=1
-  - HF_DATASETS_OFFLINE=1
-  - TRANSFORMERS_OFFLINE=1
-
-  # Disable uv package and Python interpreter downloads. Left UNSET: every image
-  # bakes the venvs it needs, so no stage resolves at runtime either way, and
-  # unset keeps a dev-mode escape hatch.
-  # - UV_OFFLINE=true
-
-  # Point tiktoken / openai_harmony at the cache baked into the images.
-  # Required for nemo-skills and nemo-rl (vllm/vllm-grpo set them as ENV).
-  - TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
-  - TIKTOKEN_RS_CACHE_DIR=/opt/tiktoken_cache
-  - TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken_cache
+```bash
+git -C <gym-checkout> diff --stat <vendored-commit> <gym-release-tag> -- resources_servers/
 ```
 
-### NeMo-RL / NeMo-Gym: trainer image and Gym source
-
-The `training` stage runs on `nvflow-nemo-rl`, built here from
-`Dockerfile.nemo-rl`. It extends the NeMo-RL base with the Gym source at
-`GYM_REF` and one prebuilt venv per Gym component under `/opt/gym_venvs`, so
-nothing resolves at runtime and **no Gym source mount is required**.
-
-Do not bind-mount a host Gym or NeMo-RL clone over
-`/opt/nemo-rl/3rdparty/Gym-workspace/Gym` in production — it shadows the baked
-source and venvs and breaks the GRPO stages. That mount is a dev-mode-only tool,
-and it is the one case where `uv` resolves at runtime, so it needs `UV_OFFLINE`
-unset plus a reachable pypi mirror.
-
-The Gym-only GRPO stages (`prepare_data`, `prefetch_cache`, `collect_rollouts`,
-`compute_rewards`) run on the separate `nvflow-nemo-gym` image, also with baked
-per-component venvs and no mount.
-
-For a fully-airgapped trainer with no runtime `uv` resolve, build the custom
-image from [`Dockerfile.nemo-rl`](Dockerfile.nemo-rl) (bakes the Gym venvs) and
-drop the Gym mount. That image needs no network at job time on its own, so
-`UV_OFFLINE` still stays **unset** by policy: leaving it unset is what lets a
-developer mount local Gym source and have `uv` resolve it. See
-[`docs/development/nemo-rl-gym.md`](../docs/development/nemo-rl-gym.md).
-
-## Notes for one-time / connected-node operations
-
-A few stages legitimately need internet on first run.  Run them on a
-connected node (or off-cluster) and ship the resulting artifacts onto the
-air-gapped cluster:
-
-| Stage | Why it needs internet |
-|---|---|
-| `workflow-2 download_sec_filings` | Downloads filings from SEC EDGAR (not HF, but still external). |
-| `workflow-3 step-0 create_seed_data` | Pulls `nogabenyoash/SecQue` from HuggingFace. |
-| `workflow-1 step-0 prepare_data` (eval) | Pulls finance benchmark datasets (`secque`, `financebench`) from HuggingFace. |
-| `workflow-5 step-4 prepare_data` (GRPO) | Only if `should_download: true`; default `should_download: false` requires no internet. |
-
-For these stages, temporarily clear the three HF flags
-(`HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, `TRANSFORMERS_OFFLINE`). `UV_OFFLINE`
-stays unset as always; none of these stages invoke `uv`.
-
-Note: `huggingface_hub` interprets `TRANSFORMERS_OFFLINE=1` as
-`HF_HUB_OFFLINE=1`, so all three need to be off (or unset) for HF dataset
-pulls to succeed.
+Then update the bases of `nvflow-nemo-rl` and `nvflow-nemo-gym` (the
+`NEMO_RL_IMAGE` and `NEMO_GYM_IMAGE` defaults in `docker-bake.hcl` and the
+matching `ARG` defaults in `Dockerfile.nemo-rl` and `Dockerfile.nemo-gym`),
+their tags in `docker-bake.hcl`, the expected versions in
+`Dockerfile.nemo-gym`, and the tags in `cluster_configs/`,
+`ci/trivy-images.txt`, and the docs.

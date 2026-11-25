@@ -22,13 +22,85 @@ Note: These are for ORCHESTRATION logs (what's being submitted to cluster),
 not execution logs (which are captured by Slurm on the cluster).
 """
 
-from rich.console import Console
+from typing import TextIO
 
-# Single console instance for the entire application
-console = Console()
+from rich.console import Console
+from rich.text import Text
+from rich.theme import Theme
+
+SUCCESS_STYLE = "nvflow.success"
+INFO_STYLE = "nvflow.info"
+WARNING_STYLE = "nvflow.warning"
+ERROR_STYLE = "nvflow.error"
+STATUS_STYLE = "nvflow.status"
+HEADING_STYLE = "nvflow.heading"
+ACCENT_STYLE = "nvflow.accent"
+MUTED_STYLE = "nvflow.muted"
+
+SUCCESS_SYMBOL = "✓"
+INFO_SYMBOL = "ℹ"
+WARNING_SYMBOL = "⚠"
+ERROR_SYMBOL = "✗"
+STATUS_SYMBOL = "▶"
+
+NVFLOW_THEME = Theme(
+    {
+        SUCCESS_STYLE: "green",
+        INFO_STYLE: "blue",
+        WARNING_STYLE: "yellow",
+        ERROR_STYLE: "red",
+        STATUS_STYLE: "cyan",
+        HEADING_STYLE: "bold",
+        ACCENT_STYLE: "bold cyan",
+        MUTED_STYLE: "dim",
+    }
+)
+
+
+def create_console(
+    *,
+    stderr: bool = False,
+    file: TextIO | None = None,
+    force_terminal: bool | None = None,
+) -> Console:
+    """Create a Rich console with NVFlow's shared theme and safe defaults."""
+    if file is None:
+        return Console(
+            theme=NVFLOW_THEME,
+            highlight=False,
+            force_terminal=force_terminal,
+            stderr=stderr,
+        )
+    return Console(
+        theme=NVFLOW_THEME,
+        highlight=False,
+        force_terminal=force_terminal,
+        file=file,
+    )
+
+
+# Orchestration diagnostics are not command payloads. Keeping them on stderr
+# makes structured CLI stdout (for example,
+# ``nvflow plan --cluster <target> --format json``) directly machine-readable.
+console = create_console(stderr=True)
 
 # Convenience: alias for console.print
 print = console.print
+
+
+def message_text(
+    message: object,
+    *,
+    style: str | None = None,
+    symbol: str | None = None,
+) -> Text:
+    """Build a styled message while treating caller-provided values literally."""
+    rendered = Text()
+    if symbol is not None:
+        rendered.append(symbol, style=style)
+        rendered.append(" ")
+    rendered.append(str(message), style=style if symbol is None else None)
+    return rendered
 
 
 def header(message: str) -> None:
@@ -45,9 +117,11 @@ def header(message: str) -> None:
         Starting SDG Pipeline
         ================================================================================
     """
-    console.print(f"\n{'=' * 80}")
-    console.print(f"[bold]{message}[/bold]")
-    console.print(f"{'=' * 80}\n")
+    console.print()
+    console.print("=" * 80)
+    console.print(message_text(message, style=HEADING_STYLE))
+    console.print("=" * 80)
+    console.print()
 
 
 def section(message: str) -> None:
@@ -64,8 +138,9 @@ def section(message: str) -> None:
         ▶ Running Stage: sdg.generate_qas
         ────────────────────────────────────────────────────────────────────────────────
     """
-    console.print(f"\n{'─' * 80}")
-    console.print(f"[cyan]▶[/cyan] {message}")
+    console.print()
+    console.print("─" * 80)
+    console.print(message_text(message, style=STATUS_STYLE, symbol=STATUS_SYMBOL))
     console.print(f"{'─' * 80}")
 
 
@@ -81,7 +156,7 @@ def success(message: str) -> None:
         >>> success("Job submitted successfully")
         ✓ Job submitted successfully
     """
-    console.print(f"[green]✓[/green] {message}")
+    console.print(message_text(message, style=SUCCESS_STYLE, symbol=SUCCESS_SYMBOL))
 
 
 def info(message: str) -> None:
@@ -96,7 +171,7 @@ def info(message: str) -> None:
         >>> info("Found 3 input files")
         ℹ Found 3 input files
     """
-    console.print(f"[blue]ℹ[/blue] {message}")
+    console.print(message_text(message, style=INFO_STYLE, symbol=INFO_SYMBOL))
 
 
 def warning(message: str) -> None:
@@ -111,7 +186,7 @@ def warning(message: str) -> None:
         >>> warning("Job may take 10+ minutes")
         ⚠ Job may take 10+ minutes
     """
-    console.print(f"[yellow]⚠[/yellow]  {message}")
+    console.print(message_text(message, style=WARNING_STYLE, symbol=WARNING_SYMBOL))
 
 
 def error(message: str) -> None:
@@ -126,7 +201,7 @@ def error(message: str) -> None:
         >>> error("Job submission failed")
         ✗ Job submission failed
     """
-    console.print(f"[red]✗[/red] {message}")
+    console.print(message_text(message, style=ERROR_STYLE, symbol=ERROR_SYMBOL))
 
 
 def status(message: str) -> None:
@@ -141,7 +216,7 @@ def status(message: str) -> None:
         >>> status("Submitting job to cluster...")
         ▶ Submitting job to cluster...
     """
-    console.print(f"[cyan]▶[/cyan] {message}")
+    console.print(message_text(message, style=STATUS_STYLE, symbol=STATUS_SYMBOL))
 
 
 def detail(key: str, value: str) -> None:
@@ -159,7 +234,10 @@ def detail(key: str, value: str) -> None:
           Model: /path/to/model
           GPUs: 8
     """
-    console.print(f"  [dim]{key}:[/dim] {value}")
+    rendered = Text("  ")
+    rendered.append(f"{key}:", style=MUTED_STYLE)
+    rendered.append(f" {value}")
+    console.print(rendered)
 
 
 def blank() -> None:
@@ -183,6 +261,8 @@ def rule(title: str = "") -> None:
 # Convenience: Export console for advanced usage
 __all__ = [
     "console",
+    "create_console",
+    "message_text",
     "print",
     "header",
     "section",

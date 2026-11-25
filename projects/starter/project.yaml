@@ -1,0 +1,5 @@
+manifest_version: 1
+project: starter
+description: "Minimal runnable NVFlow project starter"
+requires_nvflow: ">=1.1,<2"
+python_source_root: .

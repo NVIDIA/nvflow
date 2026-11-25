@@ -1,0 +1,49 @@
+# Nemotron-3.5-Lightning-30B-A3B SFT over the same GenSelect-selected full
+# finance-agent trajectories as the Nano workflow.
+
+_base_: nemotron-3-nano-vals-noweb.yaml
+
+base_output_dir: /workspace/outputs/finance/nemotron-3.5-lightning-sft-combined-noweb
+
+stages:
+  training:
+    model_name: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+    hf_checkpoint_path: /hf_models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+
+    total_gpus: 64
+    dependent_jobs: 18
+    wandb_project: finance-sft
+    wandb_mode: disabled
+
+    overrides:
+      sft:
+        max_num_steps: 1000000
+
+      checkpointing:
+        # One epoch is approximately 552 optimizer steps at GBS 128.
+        save_period: 552
+
+      data:
+        max_input_seq_length: 49152
+
+      policy:
+        train_global_batch_size: 128
+        train_micro_batch_size: 1
+        max_total_sequence_length: 49152
+        megatron_cfg:
+          layernorm_epsilon: 1.0e-5
+          # allgather is inherited from the proven Nano setup and is not
+          # compatible with shared-expert overlap.
+          moe_shared_expert_overlap: false
+          mtp_num_layers: 1
+          mtp_loss_scaling_factor: 0.0
+          mtp_use_repeated_layer: false
+          mtp_detach_heads: false
+
+  eval:
+    eval_steps: [552, 1104, 1656]
+    checkpoint_path: ${directories.step-4-training}/model-nvidia-nemotron-3.5-lightning-30b-a3b-bf16-64g-tp4-pp1-cp8-seq48k
+    base_model: /hf_models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+    baseline_model: null
+    conversion:
+      num_gpus: 8

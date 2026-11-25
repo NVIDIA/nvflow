@@ -7,15 +7,15 @@ This document lists third-party open source and other software packages used in 
 | Package | Version | License | Link to license info |
 |---------|---------|---------|---------------------|
 | zipp | 3.23.0 | MIT | [License](https://github.com/jaraco/zipp) |
-| yarl | 1.22.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/aio-libs/yarl/refs/heads/master/LICENSE) |
+| yarl | 1.25.1 | Apache 2.0 | [License](https://raw.githubusercontent.com/aio-libs/yarl/refs/heads/master/LICENSE) |
 | xxhash | 3.6.0 | BSD  | [License](https://raw.githubusercontent.com/ifduyue/python-xxhash/refs/tags/v3.6.0/LICENSE) |
 | xflr6/graphviz | 0.21 | MIT | [License](https://github.com/xflr6/graphviz/blob/master/LICENSE.txt) |
 | wrapt | 2.1.0 | BSD  | [License](https://raw.githubusercontent.com/GrahamDumpleton/wrapt/develop/LICENSE) |
 | websockets | 15.0.1 | BSD  | [License](https://github.com/python-websockets/websockets/blob/main/LICENSE) |
 | wcwidth | 0.5.3 | MIT | [License](https://raw.githubusercontent.com/jquast/wcwidth/master/LICENSE) |
-| wandb | 0.28.1 | MIT | [License](https://github.com/wandb/wandb/blob/main/LICENSE) |
-| virtualenv | 20.36.1 | MIT | [License](https://raw.githubusercontent.com/pypa/virtualenv/main/LICENSE) |
-| urllib3 | 2.7.0 | MIT | [License](https://github.com/urllib3/urllib3/blob/main/LICENSE.txt) |
+| wandb | 0.31.2 | MIT | [License](https://github.com/wandb/wandb/blob/main/LICENSE) |
+| virtualenv | 21.15.11 | MIT | [License](https://raw.githubusercontent.com/pypa/virtualenv/main/LICENSE) |
+| urllib3 | 2.8.0 | MIT | [License](https://github.com/urllib3/urllib3/blob/main/LICENSE.txt) |
 | typing-inspection | 0.4.2 | MIT | [License](https://github.com/pydantic/typing-inspection/blob/main/LICENSE) |
 | typing-inspect | 0.9.0 | MIT | [License](https://raw.githubusercontent.com/ilevkivskyi/typing_inspect/refs/heads/master/LICENSE) |
 | types-PyYAML | 6.0.12.20250915 | Apache 2.0 | [License](https://pypi.org/project/types-PyYAML/) |
@@ -28,26 +28,25 @@ This document lists third-party open source and other software packages used in 
 | tree-sitter-embedded-template | 0.25.0 | MIT | [License](https://raw.githubusercontent.com/tree-sitter/tree-sitter-embedded-template/master/LICENSE) |
 | tree-sitter-c-sharp | 0.23.1 | MIT | [License](https://github.com/tree-sitter/tree-sitter-c-sharp/blob/master/LICENSE) |
 | tree-sitter | 0.25.2 | MIT | [License](https://raw.githubusercontent.com/tree-sitter/py-tree-sitter/master/LICENSE) |
-| transformers | 5.13.1 | Apache 2.0 | [License](https://github.com/huggingface/transformers/blob/main/LICENSE) |
+| transformers | 5.20.2 | Apache 2.0 | [License](https://github.com/huggingface/transformers/blob/main/LICENSE) |
 | tqdm | 4.67.2 | MIT and MPL | [License](https://raw.githubusercontent.com/tqdm/tqdm/master/LICENCE) |
 | torchx | 0.7.0 | BSD  | [License](https://github.com/meta-pytorch/torchx/blob/main/LICENSE) |
 | tomlkit | 0.13.3 | MIT | [License](https://github.com/sdispater/tomlkit/blob/master/LICENSE) |
-| tokenizers | 0.22.2 | Apache 2.0 | [License](https://github.com/huggingface/tokenizers/blob/master/LICENSE) |
+| tokenizers | 0.23.3 | Apache 2.0 | [License](https://github.com/huggingface/tokenizers/blob/master/LICENSE) |
 | tiktoken | 0.12.0 | MIT | [License](https://raw.githubusercontent.com/openai/tiktoken/main/LICENSE) |
 | threadpoolctl | 3.6.0 | BSD  | [License](https://github.com/joblib/threadpoolctl/blob/master/LICENSE) |
 | termcolor-pypi | 3.3.0 | MIT | [License](https://github.com/termcolor/termcolor) |
 | tabulate | 0.9.0 | MIT | [License](https://github.com/astanin/python-tabulate/blob/master/LICENSE) |
 | stack-data | 0.6.3 | MIT | [License](https://pypi.org/project/stack-data/) |
 | sse-starlette | 3.2.0 | BSD  | [License](https://github.com/sysid/sse-starlette/blob/main/LICENSE) |
-| soupsieve | 2.9.1 | MIT | [License](https://github.com/facelessuser/soupsieve/blob/main/LICENSE.md) |
+| soupsieve | 4.1.3 | MIT | [License](https://github.com/facelessuser/soupsieve/blob/main/LICENSE.md) |
 | sniffio | 1.3.1 | Apache 2.0 | [License](https://github.com/python-trio/sniffio/blob/master/LICENSE) |
-| smmap | 5.0.2 | BSD  | [License](https://github.com/gitpython-developers/smmap/blob/main/LICENSE) |
 | smart-open | 7.5.0 | MIT | [License](https://github.com/getcrest/smart-open/blob/dev/LICENSE) |
 | simple-parsing | 0.1.8 | MIT | [License](https://raw.githubusercontent.com/lebrice/SimpleParsing/master/LICENSE) |
 | shellingham | 1.5.4 | ISC (Internet Software Consortium) | [License](https://github.com/sarugaku/shellingham/blob/master/LICENSE) |
 | serpapi | 0.1.5 | MIT | [License](https://github.com/serpapi/google-search-results-python/blob/master/LICENSE) |
 | sentry-sdk | 2.51.0 | MIT | [License](https://github.com/getsentry/sentry-python/blob/master/LICENSE) |
-| sentence-transformers | 5.2.2 | Apache 2.0 | [License](https://github.com/huggingface/sentence-transformers/blob/main/LICENSE) |
+| sentence-transformers | 6.1.0 | Apache 2.0 | [License](https://github.com/huggingface/sentence-transformers/blob/main/LICENSE) |
 | scikit-learn | 1.8.0 | BSD  | [License](https://github.com/scikit-learn/scikit-learn/blob/main/COPYING) |
 | safetensors | 0.8.0 | Apache 2.0 | [License](https://github.com/huggingface/safetensors/blob/main/LICENSE) |
 | safehttpx | 0.1.7 | MIT | [License](https://github.com/gradio-app/safehttpx/blob/main/LICENSE) |
@@ -74,7 +73,7 @@ This document lists third-party open source and other software packages used in 
 | python-decorator | 5.2.1 | BSD  | [License](https://github.com/micheles/decorator/blob/master/LICENSE) |
 | python-dateutil | 2.9.0.post0 | BSD  | [License](https://github.com/dateutil/dateutil/blob/master/LICENSE) |
 | python-dateutil | 2.9.0.post0 | Apache 2.0 | [License](https://github.com/dateutil/dateutil/blob/master/LICENSE) |
-| python-certifi | 2026.1.4 | MPL | [License](https://github.com/certifi/python-certifi/blob/master/LICENSE) |
+| python-certifi | 2026.11.20 | MPL | [License](https://github.com/certifi/python-certifi/blob/master/LICENSE) |
 | python-attrs | 25.4.0 | MIT | [License](https://raw.githubusercontent.com/python-attrs/attrs/main/LICENSE) |
 | python-aiofiles | 24.1.0 | Apache 2.0 | [License](https://github.com/Tinche/aiofiles/blob/main/LICENSE) |
 | python cffi | 2.0.0 | MIT | [License](https://github.com/python-cffi/cffi/blob/main/LICENSE) |
@@ -86,19 +85,19 @@ This document lists third-party open source and other software packages used in 
 | pypa/sampleproject | 0.0.32 | MIT | [License](https://github.com/pypa/sampleproject/blob/main/LICENSE.txt) |
 | pyinvoke | 2.2.1 | BSD  | [License](https://github.com/pyinvoke/invoke/blob/main/LICENSE) |
 | pydub | v0.25.1 | MIT | [License](https://github.com/jiaaro/pydub/blob/master/LICENSE) |
-| pydantic-settings | 2.12.0 | MIT | [License](https://github.com/pydantic/pydantic-settings/blob/main/LICENSE) |
+| pydantic-settings | 2.16.0 | MIT | [License](https://github.com/pydantic/pydantic-settings/blob/main/LICENSE) |
 | pydantic-core | 2.41.5 | MIT | [License](https://github.com/pydantic/pydantic-core/blob/main/LICENSE) |
 | pydantic | 2.12.5 | MIT | [License](https://github.com/pydantic/pydantic/blob/main/LICENSE) |
 | pycparser | 3.0 | BSD  | [License](https://github.com/eliben/pycparser/blob/master/LICENSE) |
 | pyca/pynacl | 1.6.2 | Apache 2.0 | [License](https://raw.githubusercontent.com/pyca/pynacl/main/LICENSE) |
-| pyca/cryptography | 49.0.0 | BSD  | [License](https://raw.githubusercontent.com/pyca/cryptography/main/LICENSE) |
-| pyca/cryptography | 49.0.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/pyca/cryptography/main/LICENSE) |
+| pyca/cryptography | 50.0.0 | BSD  | [License](https://raw.githubusercontent.com/pyca/cryptography/main/LICENSE) |
+| pyca/cryptography | 50.0.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/pyca/cryptography/main/LICENSE) |
 | pyasn1-modules | 0.4.2 | BSD  | [License](https://raw.githubusercontent.com/pyasn1/pyasn1-modules/master/LICENSE.txt) |
-| pyasn1 | 0.6.4 | BSD  | [License](https://raw.githubusercontent.com/pyasn1/pyasn1/master/LICENSE.txt) |
+| pyasn1 | 0.6.5 | BSD  | [License](https://raw.githubusercontent.com/pyasn1/pyasn1/master/LICENSE.txt) |
 | pyarrow | 25.0.0 | Apache 2.0 | [License](https://github.com/apache/arrow/blob/main/LICENSE) |
 | py3-google-auth | 2.48.0 | Apache 2.0 | [License](https://github.com/googleapis/google-auth-library-python/blob/main/LICENSE) |
 | py-spy | 0.4.1 | MIT | [License](https://raw.githubusercontent.com/benfred/py-spy/master/LICENSE) |
-| py-filelock | 3.20.3 | MIT | [License](https://py-filelock.readthedocs.io/en/latest/license.html) |
+| py-filelock | 4.2.12 | MIT | [License](https://py-filelock.readthedocs.io/en/latest/license.html) |
 | pure-eval | 0.2.3 | MIT | [License](https://github.com/alexmojaki/pure_eval/blob/master/LICENSE.txt) |
 | ptyprocess | 0.7.0 | ISC (Internet Software Consortium) | [License](https://github.com/pexpect/ptyprocess) |
 | psutil | 7.2.2 | BSD  | [License](https://github.com/giampaolo/psutil/blob/master/LICENSE) |
@@ -107,7 +106,7 @@ This document lists third-party open source and other software packages used in 
 | propcache | 0.4.1 | Apache 2.0 | [License](https://github.com/aio-libs/propcache/blob/master/LICENSE) |
 | prompt-toolkit/python-prompt-toolkit | 3.0.52 | BSD  | [License](https://github.com/prompt-toolkit/python-prompt-toolkit/blob/main/LICENSE) |
 | prometheus-fastapi-instrumentator | 7.0.0 | ISC (Internet Software Consortium) | [License](https://raw.githubusercontent.com/trallnag/prometheus-fastapi-instrumentator/master/LICENSE) |
-| projectray | 2.56.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/ray-project/ray/master/LICENSE) |
+| projectray | 2.58.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/ray-project/ray/master/LICENSE) |
 | pre-commit/pre-commit | 4.5.1 | MIT | [License](https://github.com/pre-commit/pre-commit/blob/main/LICENSE) |
 | portalocker | 3.2.0 | BSD  | [License](https://github.com/wolph/portalocker/blob/develop/LICENSE) |
 | platformdirs | 4.5.1 | MIT | [License](https://raw.githubusercontent.com/tox-dev/platformdirs/main/LICENSE) |
@@ -118,13 +117,14 @@ This document lists third-party open source and other software packages used in 
 | paramiko | 4.0.0 | LGPL (Library or Lesser GPL) | [License](https://github.com/paramiko/paramiko/blob/main/LICENSE) |
 | pandas-python | 3.0.0 | BSD  | [License](https://github.com/pandas-dev/pandas/blob/main/LICENSE) |
 | orjson | 3.11.7 | Apache 2.0 | [License](https://github.com/ijl/orjson/blob/master/LICENSE-APACHE,https://github.com/ijl/orjson/blob/master/LICENSE-MIT) |
-| opentelemetry-semantic-conventions | 0.60b1 | Apache 2.0 | [License](https://raw.githubusercontent.com/open-telemetry/opentelemetry-python/main/LICENSE) |
-| opentelemetry-sdk | 1.39.1 | Apache 2.0 | [License](https://raw.githubusercontent.com/open-telemetry/opentelemetry-python/refs/heads/main/LICENSE) |
+| opentelemetry-semantic-conventions | 0.66b1 | Apache 2.0 | [License](https://raw.githubusercontent.com/open-telemetry/opentelemetry-python/main/LICENSE) |
+| opentelemetry-sdk | 1.45.1 | Apache 2.0 | [License](https://raw.githubusercontent.com/open-telemetry/opentelemetry-python/refs/heads/main/LICENSE) |
 | opentelemetry-python | 1.39.1 | Apache 2.0 | [License](https://github.com/open-telemetry/opentelemetry-python/blob/main/LICENSE) |
 | opentelemetry packages | 0.60b1 | Apache 2.0 | [License](https://github.com/open-telemetry/opentelemetry-python/blob/main/LICENSE) |
 | opencensus | 0.11.4 | Apache 2.0 | [License](https://github.com/census-instrumentation/opencensus-python/blob/master/LICENSE) |
 | openai | 2.24.0 | Apache 2.0 | [License](https://github.com/openai/openai-python/blob/main/LICENSE) |
 | omegaconf | 2.3.0 | BSD  | [License](https://github.com/omry/omegaconf/blob/master/LICENSE) |
+| oauthlib | 4.0.1 | BSD  | [License](https://github.com/oauthlib/oauthlib/blob/master/LICENSE) |
 | nvidia-nvtx-cu12 | 12.8.90 | Apache 2.0 | [License](https://pypi.org/project/nvidia-nvtx-cu12/) |
 | nvidia-nvshmem-cu12 | 3.4.5 | Nvidia Proprietary License | [License](https://raw.githubusercontent.com/NVIDIA/nvshmem/devel/License.txt) |
 | nvidia-nvjitlink-cu12 | 12.8.93 | Nvidia Proprietary License | [License](https://docs.nvidia.com/cuda/eula/index.html) |
@@ -141,6 +141,7 @@ This document lists third-party open source and other software packages used in 
 | nvidia-cuda-cupti-cu12 | 12.8.90 | Nvidia Proprietary License | [License](https://docs.nvidia.com/cuda/eula/index.html) |
 | nvidia-cublas-cu12 | 12.8.4.1 | Nvidia Proprietary License | [License](https://docs.nvidia.com/cuda/eula/index.html) |
 | nodeenv | 1.10.0 | BSD  | [License](https://github.com/ekalinin/nodeenv/blob/master/LICENSE) |
+| nltk | 3.10.4 | Apache 2.0 | [License](https://github.com/nltk/nltk/blob/develop/LICENSE.txt) |
 | nemo-run | 0.9.0rc0.dev0 | Apache 2.0 | [License](https://github.com/NVIDIA/NeMo-Run/blob/main/LICENSE) |
 | nemo-evaluator-launcher | 0.1.46 | Apache 2.0 | [License](https://pypi.org/project/cuda-bindings/) |
 | mypy-extensions | 1.1.0 | MIT | [License](https://github.com/python/mypy_extensions/blob/master/LICENSE) |
@@ -148,17 +149,17 @@ This document lists third-party open source and other software packages used in 
 | multipledispatch | 1.0.0 | BSD  | [License](https://github.com/mrocklin/multipledispatch/blob/master/LICENSE.txt) |
 | multidict | 6.7.1 | Apache 2.0 | [License](https://raw.githubusercontent.com/aio-libs/multidict/master/LICENSE) |
 | multi_process | 0.70.16 | BSD  | [License](https://github.com/uqfoundation/multiprocess/blob/master/LICENSE) |
-| msgpack | 1.2.1 | Apache 2.0 | [License](https://raw.githubusercontent.com/msgpack/msgpack-python/main/COPYING) |
+| msgpack | 1.2.4 | Apache 2.0 | [License](https://raw.githubusercontent.com/msgpack/msgpack-python/main/COPYING) |
 | mpmath | 1.3.0 | BSD  | [License](https://github.com/fredrik-johansson/mpmath/blob/master/LICENSE) |
 | mdurl | 0.1.2 | MIT | [License](https://raw.githubusercontent.com/executablebooks/mdurl/master/LICENSE) |
-| mcp | 1.28.1 | MIT | [License](https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE) |
+| mcp | 1.30.0 | MIT | [License](https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE) |
 | matplotlib-inline | 0.2.1 | BSD  | [License](https://github.com/ipython/matplotlib-inline/blob/master/LICENSE) |
 | math-verify | 0.9.0 | Apache 2.0 | [License](https://github.com/huggingface/math-verify/blob/main/LICENCE) |
 | markdown-it-py | 4.0.0 | MIT | [License](https://github.com/executablebooks/markdown-it-py/blob/master/LICENSE) |
 | marisa-trie | 1.3.1 | MIT | [License](https://github.com/pytries/marisa-trie/blob/master/LICENSE) |
 | lxml | 6.1.1 | BSD  | [License](https://github.com/lxml/lxml/blob/main/LICENSE) |
 | loguru | 0.7.3 | MIT | [License](https://github.com/Delgan/loguru/blob/master/LICENSE) |
-| litellm | 1.84.10 | MIT | [License](https://github.com/BerriAI/litellm/blob/main/LICENSE) |
+| litellm | 1.106.12 | MIT | [License](https://github.com/BerriAI/litellm/blob/main/LICENSE) |
 | librt | 0.7.8 | MIT | [License](https://github.com/mypyc/librt/blob/main/LICENSE) |
 | libcst | 1.8.6 | MIT | [License](https://github.com/Instagram/LibCST/blob/main/LICENSE) |
 | leptonai | 0.27.0 | Apache 2.0 | [License](https://sourceforge.net/projects/lepton-ai.mirror/) |
@@ -179,30 +180,29 @@ This document lists third-party open source and other software packages used in 
 | idna | 3.11 | BSD  | [License](https://github.com/kjd/idna/blob/master/LICENSE.md) |
 | identify | 2.6.16 | MIT | [License](https://github.com/pre-commit/identify/blob/main/LICENSE) |
 | hyperframe | 6.1.0 | MIT | [License](https://github.com/python-hyper/hyperframe/blob/master/LICENSE) |
-| hydra-core | 1.3.2 | MIT | [License](https://github.com/facebookresearch/hydra/blob/main/LICENSE) |
-| huggingface-hub | 1.16.1 | Apache 2.0 | [License](https://github.com/huggingface/huggingface_hub/blob/main/LICENSE) |
+| hydra-core | 1.3.8 | MIT | [License](https://github.com/facebookresearch/hydra/blob/main/LICENSE) |
+| huggingface-hub | 1.33.0 | Apache 2.0 | [License](https://github.com/huggingface/huggingface_hub/blob/main/LICENSE) |
 | httpx-sse | 0.4.3 | MIT | [License](https://raw.githubusercontent.com/florimondmanca/httpx-sse/master/LICENSE) |
 | httpx | 0.28.1 | BSD  | [License](https://github.com/encode/httpx/blob/master/LICENSE.md) |
 | httpcore | 1.0.9 | BSD  | [License](https://raw.githubusercontent.com/encode/httpcore/master/LICENSE.md) |
-| hf-xet | 1.5.1 | Apache 2.0 | [License](https://raw.githubusercontent.com/huggingface/xet-core/main/LICENSE) |
+| hf-xet | 1.7.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/huggingface/xet-core/main/LICENSE) |
 | h2 | 4.3.0 | MIT | [License](https://github.com/python-hyper/h2/blob/master/LICENSE) |
 | h11 | 0.16.0 | MIT | [License](https://github.com/python-hyper/h11/blob/master/LICENSE.txt) |
-| grpc | 1.76.0 | Apache 2.0 | [License](https://github.com/grpc/grpc/blob/master/LICENSE) |
+| grpc | 1.85.3 | Apache 2.0 | [License](https://github.com/grpc/grpc/blob/master/LICENSE) |
 | groovy | 0.1.2 | MIT | [License](https://github.com/abidlabs/groovy/blob/main/LICENSE) |
-| gradio-client | 2.5.0 | Apache 2.0 | [License](https://github.com/gradio-app/gradio/blob/main/LICENSE) |
-| gradio | 6.20.0 | Apache 2.0 | [License](https://github.com/gradio-app/gradio/blob/main/LICENSE) |
+| gradio-client | 2.7.2 | Apache 2.0 | [License](https://github.com/gradio-app/gradio/blob/main/LICENSE) |
+| gradio | 6.32.0 | Apache 2.0 | [License](https://github.com/gradio-app/gradio/blob/main/LICENSE) |
 | googleapis-common-protos | 1.72.0 | Apache 2.0 | [License](https://github.com/gradio-app/gradio/blob/main/LICENSE) |
 | google/fiddle | 0.3.0 | Apache 2.0 | [License](https://github.com/gradio-app/gradio/blob/main/LICENSE) |
 | google-api-core | 2.29.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/googleapis/python-api-common-protos/main/LICENSE) |
-| gitdb | 4.0.12 | BSD  | [License](https://pypi.org/project/gitdb/) |
 | func-timeout | 4.3.5 | GPL (GNU Public License) | [License](https://raw.githubusercontent.com/kata198/func_timeout/master/LICENSE) |
 | frozenlist | 1.8.0 | Apache 2.0 | [License](https://github.com/aio-libs/frozenlist/blob/master/LICENSE) |
 | fire | 0.7.1 | Apache 2.0 | [License](https://raw.githubusercontent.com/google/python-fire/master/LICENSE) |
 | filesystem_spec | 2025.3.0 | BSD  | [License](https://raw.githubusercontent.com/fsspec/filesystem_spec/master/LICENSE) |
 | ffmpy | 1.0.0 | MIT | [License](https://pypi.org/project/ffmpy/0.6.3/) |
 | fastuuid | 0.14.0 | BSD  | [License](https://github.com/thedrow/fastuuid/blob/master/LICENSE) |
-| fastapi | 0.128.0 | MIT | [License](https://raw.githubusercontent.com/tiangolo/fastapi/master/LICENSE) |
-| fastapi | 0.128.0 | MIT | [License](https://github.com/fastapi/fastapi/blob/master/LICENSE) |
+| fastapi | 0.141.1 | MIT | [License](https://raw.githubusercontent.com/tiangolo/fastapi/master/LICENSE) |
+| fastapi | 0.141.1 | MIT | [License](https://github.com/fastapi/fastapi/blob/master/LICENSE) |
 | faiss-cpu | 1.13.2 | BSD  | [License](https://github.com/kyamagu/faiss-wheels/blob/main/LICENSE) |
 | faiss-cpu | 1.13.2 | MIT | [License](https://github.com/kyamagu/faiss-wheels/blob/main/LICENSE) |
 | fabric | 3.2.2 | BSD  | [License](https://github.com/fabric/fabric/blob/main/LICENSE) |
@@ -216,7 +216,7 @@ This document lists third-party open source and other software packages used in 
 | docker | 7.1.0 | Apache 2.0 | [License](https://github.com/docker/docker-py/blob/main/LICENSE) |
 | distro | 1.9.0 | Apache 2.0 | [License](https://github.com/python-distro/distro/blob/master/LICENSE) |
 | diskcache | 5.6.3 | Apache 2.0 | [License](http://www.apache.org/licenses/LICENSE-2.0) |
-| datasets | 3.6.0 | Apache 2.0 | [License](https://github.com/huggingface/datasets/blob/main/LICENSE) |
+| datasets | 5.1.0 | Apache 2.0 | [License](https://github.com/huggingface/datasets/blob/main/LICENSE) |
 | cuda-pathfinder | 1.5.6 | Apache 2.0 | [License](https://www.apache.org/licenses/LICENSE-2.0) |
 | cuda-bindings | 13.3.1 | NVIDIA CUDA Toolkit License Agreement | [License](https://pypi.org/project/cuda-bindings/) |
 | contextlib2 | 21.6.0 | Apache 2.0 | [License](https://policies.python.org/pypi.org/Acceptable-Use-Policy/#credits-license) |
@@ -226,20 +226,20 @@ This document lists third-party open source and other software packages used in 
 | cfgv | 3.5.0 | MIT | [License](https://raw.githubusercontent.com/asottile/cfgv/main/LICENSE) |
 | catalogue | 2.0.10 | MIT | [License](https://github.com/explosion/catalogue/blob/master/LICENSE) |
 | bs4 | 0.0.2 | MIT | [License](https://www.crummy.com/software/BeautifulSoup/bs4/download/) |
-| brotli | 1.2.0 | MIT | [License](https://github.com/google/brotli/blob/master/LICENSE) |
+| brotli | 1.2.1 | MIT | [License](https://github.com/google/brotli/blob/master/LICENSE) |
 | blinker-pypi | 1.9.0 | MIT | [License](https://github.com/pallets-eco/blinker/blob/main/LICENSE.txt) |
 | bcrypt | 5.0.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/pyca/bcrypt/main/LICENSE) |
 | asttokens | 3.0.1 | Apache 2.0 | [License](https://raw.githubusercontent.com/gristlabs/asttokens/master/LICENSE) |
 | appdirs | 1.4.4 | MIT | [License](https://pypi.org/project/appdirs/1.4.4/) |
-| anyio | 4.9.0 | MIT | [License](https://github.com/agronholm/anyio/blob/master/LICENSE) |
+| anyio | 4.14.2 | MIT | [License](https://github.com/agronholm/anyio/blob/master/LICENSE) |
 | antlr4-python3-runtime | 4.9.3 | BSD  | [License](https://pypi.org/project/antlr4-python3-runtime/) |
 | anthropic | 0.77.0 | MIT | [License](https://github.com/anthropics/anthropic-sdk-python/blob/main/LICENSE) |
 | annotated-types | 0.7.0 | MIT | [License](https://raw.githubusercontent.com/annotated-types/annotated-types/main/LICENSE) |
 | annotated-doc | 0.0.4 | MIT | [License](https://github.com/fastapi/annotated-doc/blob/main/LICENSE) |
 | aiosignal | 1.4.0 | Apache 2.0 | [License](https://github.com/aio-libs/aiosignal/blob/master/LICENSE) |
 | aiohttp-cors | 0.8.1 | Apache 2.0 | [License](https://github.com/aio-libs/aiohttp-cors/blob/master/LICENSE) |
-| aiohttp | 3.14.1 | MIT | [License](https://github.com/aio-libs/aiohttp/blob/main/LICENSE) |
-| aiohttp | 3.14.1 | Apache 2.0 | [License](https://github.com/aio-libs/aiohttp/blob/main/LICENSE) |
+| aiohttp | 3.14.5 | MIT | [License](https://github.com/aio-libs/aiohttp/blob/main/LICENSE) |
+| aiohttp | 3.14.5 | Apache 2.0 | [License](https://github.com/aio-libs/aiohttp/blob/main/LICENSE) |
 | aiohappyeyeballs | 2.6.1 | Python Software Foundation License 2.0 | [License](https://github.com/aio-libs/aiohappyeyeballs/blob/main/LICENSE) |
 | aiofiles | 24.1.0 | Apache 2.0 | [License](https://github.com/Tinche/aiofiles/blob/main/LICENSE) |
 | absl-py | 2.4.0 | Apache 2.0 | [License](https://raw.githubusercontent.com/abseil/abseil-py/master/LICENSE) |
@@ -248,7 +248,7 @@ This document lists third-party open source and other software packages used in 
 | Traitlets | 5.14.3 | BSD  | [License](https://github.com/ipython/traitlets/blob/main/LICENSE) |
 | TOML | 0.10.2 | MIT | [License](https://github.com/uiri/toml/blob/master/LICENSE) |
 | SymPy | 1.14.0 | BSD  | [License](https://github.com/sympy/sympy/blob/main/LICENSE) |
-| Starlette | 1.3.1 | BSD  | [License](https://github.com/Kludex/starlette/blob/main/LICENSE.md) |
+| Starlette | 1.7.0 | BSD  | [License](https://github.com/Kludex/starlette/blob/main/LICENSE.md) |
 | SciPy | 1.17.0 | BSD  | [License](https://github.com/scipy/scipy/blob/main/LICENSE.txt) |
 | RonnyPfannschmidt/iniconfig | 2.3.0 | MIT | [License](https://github.com/pytest-dev/iniconfig/blob/main/LICENSE) |
 | Python-RSA | 4.9.1 | Apache 2.0 | [License](https://github.com/sybrenstuvel/python-rsa/blob/main/LICENSE) |
@@ -257,16 +257,15 @@ This document lists third-party open source and other software packages used in 
 | Pygments - Python syntax highlighter | 2.20.0 | BSD  | [License](https://github.com/pygments/pygments/blob/master/LICENSE) |
 | PyYAML | 6.0.3 | MIT | [License](https://github.com/yaml/pyyaml/blob/main/LICENSE) |
 | PyTZ - Python Time Zone Library | 2025.2 | MIT | [License](https://github.com/stub42/pytz/blob/master/LICENSE.txt) |
-| PyJWT | 2.13.0 | MIT | [License](https://spdx.org/licenses/MIT.html) |
-| PillowPython | 12.3.0 | MIT | [License](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
-| Packaging | 26.0 | BSD  | [License](https://github.com/pypa/packaging/blob/main/LICENSE) |
-| Packaging | 26.0 | Apache 2.0 | [License](https://github.com/pypa/packaging/blob/main/LICENSE) |
+| PyJWT | 2.15.1 | MIT | [License](https://spdx.org/licenses/MIT.html) |
+| PillowPython | 13.0.0 | MIT | [License](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
+| Packaging | 26.3 | BSD  | [License](https://github.com/pypa/packaging/blob/main/LICENSE) |
+| Packaging | 26.3 | Apache 2.0 | [License](https://github.com/pypa/packaging/blob/main/LICENSE) |
 | opencensus-context | 0.1.3 | Apache 2.0 | [License](https://github.com/census-instrumentation/opencensus-python/blob/master/LICENSE) |
 | NumPy | 2.1.3 | BSD  | [License](https://github.com/numpy/numpy/blob/main/LICENSE.txt) |
 | NetworkX | 3.6.1 | BSD  | [License](https://github.com/networkx/networkx/blob/master/LICENSE.txt) |
 | MarkupSafe | 3.0.3 | BSD  | [License](https://github.com/pallets/markupsafe/blob/main/LICENSE.txt) |
 | IPython | 9.10.0 | BSD  | [License](https://github.com/ipython/ipython/blob/main/LICENSE) |
-| GitPython | 3.1.46 | BSD  | [License](https://github.com/gitpython-developers/GitPython/blob/main/LICENSE) |
 | Flask | 3.1.2 | BSD  | [License](https://raw.githubusercontent.com/pallets/flask/main/LICENSE.txt) |
 | Deprecated | 1.3.1 | MIT | [License](https://raw.githubusercontent.com/laurent-laporte-pro/deprecated/master/LICENSE.rst) |
 | Coverage | 7.13.2 | Apache 2.0 | [License](https://github.com/nedbat/coveragepy/blob/master/LICENSE.txt) |

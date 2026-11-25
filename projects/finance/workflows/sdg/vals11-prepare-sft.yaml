@@ -1,0 +1,15 @@
+# VALS 1.1, workflow 1 for the SFT set: the SFT tool traces from before their
+# prompt template was applied, so each row has its question and answer. The
+# no-tool SFT file is left out: its questions are answered from a given excerpt.
+_base_: vals11-prepare.yaml
+
+workflow:
+  name: "vals11-prepare-sft"
+  description: "Prepare the VALS 1.1 SFT question set"
+  runnable: true
+
+question_set: sft
+pool_dir: /workspace/inputs/sft-pre-prompt
+pool_inputs:
+  - path: ${pool_dir}/sft_tool_traces_noweb_pre_prompt.jsonl
+    source: sft

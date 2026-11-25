@@ -18,26 +18,37 @@ from typing import TYPE_CHECKING, Any
 
 from nvflow.core import console
 from nvflow.core.base_stage import BaseStage
-from nvflow.core.stage_registry import StageRegistry
 
 if TYPE_CHECKING:
-    from nvflow.core.workflow_runner import WorkflowRunner
+    from nvflow.core.workflow_definition import WorkflowDefinition, load_workflow
+    from nvflow.execution.runner import WorkflowRunner
 
-__all__ = ["BaseStage", "StageRegistry", "WorkflowRunner", "console"]
+__all__ = [
+    "BaseStage",
+    "WorkflowDefinition",
+    "WorkflowRunner",
+    "console",
+    "load_workflow",
+]
 
 
 def __getattr__(name: str) -> Any:
-    # WorkflowRunner pulls in omegaconf, which is absent from minimal worker
-    # containers (e.g. the SAM localization image). Those workers import only
-    # leaf helper modules under nvflow.recipes, and recipe auto-discovery
-    # touches this package -- so importing WorkflowRunner eagerly here would
-    # crash them with ModuleNotFoundError. Resolve it lazily instead.
+    # WorkflowDefinition and WorkflowRunner pull in omegaconf, which is absent
+    # from minimal worker containers. Resolve them lazily so workers can import
+    # dependency-light leaf modules without loading the launcher stack.
+    if name in {"WorkflowDefinition", "load_workflow"}:
+        from nvflow.core.workflow_definition import WorkflowDefinition, load_workflow
+
+        return {
+            "WorkflowDefinition": WorkflowDefinition,
+            "load_workflow": load_workflow,
+        }[name]
     if name == "WorkflowRunner":
-        from nvflow.core.workflow_runner import WorkflowRunner
+        from nvflow.execution.runner import WorkflowRunner
 
         return WorkflowRunner
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # Note: nemo-skills functions are imported directly in stage files when needed:
-# from nemo_skills.pipeline.cli import generate, run_cmd, wrap_arguments
+# from nvflow.integrations.nemo_skills.commands import generate, run_cmd, wrap_arguments

@@ -2,8 +2,9 @@
 # The client image bakes the source + a fresh uv venv. We KEEP .git in the context
 # (hatch-vcs versioning needs it at build); the image then squashes it to a single
 # history-free snapshot commit (nemo-run only needs `git archive HEAD`). We drop
-# everything heavy, generated, or secret. Other NVFlow Dockerfiles clone their
-# sources (they do not COPY this context), so these excludes are safe for them.
+# everything heavy, generated, or secret. Dockerfile.vllm and Dockerfile.sglang
+# COPY only their lock files from dockerfiles/requirements/, so keep that
+# directory in the context; the other NVFlow Dockerfiles do not COPY it.
 
 # Prebuilt/host venv (the image builds its own) and uv cache
 .venv/
@@ -24,12 +25,16 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
-# Editor/local backups.
-*.bak*
+# Editor/local backups in any directory: without **/, a .dockerignore pattern
+# matches only at the context root.
+**/*.bak*
 *~
 
-# Secrets / personal cluster config (gitignored; must never be baked into an image)
-cluster_configs/my_cluster.yaml
+# Secrets / personal cluster configs (gitignored; must never enter build cache)
+cluster_configs/*.yaml
+!cluster_configs/containers.yaml
+!cluster_configs/template-ray.yaml
+!cluster_configs/template-slurm.yaml
 **/*.env
 .env
 

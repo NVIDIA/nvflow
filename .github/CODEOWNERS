@@ -1,3 +1,4 @@
 .github/ @NVIDIA/nvflow-dev
+docs/rfcs/ @NVIDIA/nvflow-dev
 pyproject.toml @NVIDIA/nvflow-dev
 uv.lock @NVIDIA/nvflow-dev

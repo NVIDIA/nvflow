@@ -1,0 +1,35 @@
+flowchart LR
+    subgraph Launcher["Launcher environment"]
+        CLI[nvflow]
+        Platform[NVFlow platform source]
+        Project[Selected project source]
+        ClusterConfig[Cluster configuration]
+    end
+
+    subgraph Package["Submission snapshot"]
+        PlatformArchive[Platform package]
+        ProjectArchive[Selected project subtree]
+    end
+
+    subgraph Cluster["Slurm cluster"]
+        Scheduler[Slurm scheduler]
+        Worker[Containerized worker]
+        Images[Staged worker images]
+        Models[Mounted models]
+        Data[Mounted data]
+        Outputs[Writable outputs]
+    end
+
+    CLI --> Platform
+    CLI --> Project
+    CLI --> ClusterConfig
+    Platform --> PlatformArchive
+    Project --> ProjectArchive
+    PlatformArchive --> Scheduler
+    ProjectArchive --> Scheduler
+    ClusterConfig --> Scheduler
+    Scheduler --> Worker
+    Images --> Worker
+    Models --> Worker
+    Data --> Worker
+    Worker --> Outputs

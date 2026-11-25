@@ -1,0 +1,81 @@
+# Non-runnable base for the matched Simple/OpenRubric GRPO smoke tests. The two
+# runnable child configs select the corresponding rubric.build output while
+# inheriting identical policy, judge, rollout, and optimizer settings.
+
+_base_: nemotron_nano_30b_a3b.yaml
+
+workflow:
+  description: "Shared base for rubric-reward GRPO smoke tests"
+  runnable: false
+
+cluster: my_cluster
+
+hf_model_path: /sft_ckpt/nemotron-3-nano-30b/step-4-training/model-nvidia-nemotron-3-nano-30b-a3b-bf16-64g-tp4-pp1-cp8-seq48k/hf_models/step_177
+model_output_dir: /workspace/outputs/finance/rubric-grpo-smoke/nemotron-3-nano
+
+# Runnable children replace this sentinel with the matching
+# nvfinance.stages.rl.prepare_grpo_data output.
+_rubric_data_dir: /workspace/outputs/finance/rubric-generation-smoke/SELECT_METHOD/step-3-grpo-data
+
+# The rubric data is already a train/val split, so stages 0-7 are skipped.
+pipeline_stages:
+  - training
+
+environments:
+  finance_sec_search:
+    gym:
+      finance_sec_search_resources_server:
+        resources_servers:
+          finance_sec_search:
+            # The dataset encodes {reference_answer, rubric} as JSON in
+            # expected_answer; this prompt grades the answer against those
+            # criteria instead of against the reference text alone.
+            judge_prompt_template_fpath: project://prompts/finance_sec_search_rubric_judge.yaml
+            # Pass/fail, matching how finance_agent_v2 is scored. Partial
+            # credit ([[1]] -> 0.5) would reward answers the benchmark scores
+            # as zero.
+            reward_mode: binary
+
+stages:
+  training:
+    hf_checkpoint_path: ${hf_model_path}
+    data_source_dir: ${_rubric_data_dir}
+    dependencies: []
+    total_gpus: 16
+    dependent_jobs: 0
+    stage_kwargs:
+      # The policy uses two nodes and the dedicated rubric judge uses a third,
+      # which exceeds the two-node interactive cap.
+      partition: batch
+    overrides:
+      grpo:
+        num_prompts_per_step: 4
+        num_generations_per_prompt: 8
+        max_num_steps: 1
+        val_at_start: false
+        val_at_end: false
+        val_period: 1000
+      checkpointing:
+        # A full Nano checkpoint is roughly 260-290 GB. This one-step smoke
+        # verifies rollout scoring and the optimizer path without persisting a
+        # checkpoint, which avoids exhausting the shared project quota.
+        enabled: false
+        # NeMo-RL validates this field as an integer even when checkpointing is
+        # disabled. Override the production recipe's null retention policy so
+        # the smoke config remains valid across the container's Pydantic model.
+        keep_top_k: 1
+        save_period: 1000
+      policy:
+        train_global_batch_size: 32
+        # The production Nano recipe uses 128 GPUs (TP4 x PP4 x CP8).  This
+        # smoke intentionally runs on two 8-GPU nodes, so use an equivalent
+        # 16-rank layout with no dense or expert data-parallel replica.
+        megatron_cfg:
+          tensor_model_parallel_size: 4
+          pipeline_model_parallel_size: 1
+          context_parallel_size: 4
+          expert_model_parallel_size: 16
+          expert_tensor_parallel_size: 1
+      logger:
+        wandb:
+          name: "grpo-nemotron-3-nano-rubric-smoke"

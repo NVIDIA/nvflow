@@ -63,6 +63,10 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
+## Proposing Major Changes
+
+Discuss a significant change in an RFC issue before opening a pull request. See [Requests for comments](docs/rfcs/README.md).
+
 ## Pull Requests
 
 1. Fork the repository and create a branch from `main`.
@@ -73,8 +77,29 @@ By making a contribution to this project, I certify that:
 ## Code and Documentation
 
 - Follow existing code style and conventions in the project.
-- Run the project's linters and tests before submitting (e.g. `uv run ruff check .`, `uv run pytest`).
+- Before submitting, run the checks CI runs. With the README's [contributor setup](README.md#1-install-the-local-cli) installed, `uv run pre-commit run --all-files` runs the linters.
+- `scripts/run_ci_test_lane.sh minimal` runs the tests that need no NeMo-Skills, NeMo-Run, or Torch, and `scripts/run_ci_test_lane.sh nemo` runs the tests that need them. The `minimal` lane leaves only its CI dependencies installed, so rerun the contributor setup after it.
 - Update documentation if you change behavior or add features.
+
+## Dependency Updates
+
+Runtime and CI tooling dependencies share one `uv.lock`; do not create a second
+CI requirements lock. Prefer a narrow update so unrelated packages stay fixed:
+
+```bash
+uv lock --upgrade-package <package>
+uv lock --check
+```
+
+Commit `pyproject.toml` and `uv.lock` together, and check that the update adds
+no fixable HIGH or CRITICAL vulnerabilities:
+
+```bash
+trivy fs --scanners vuln --include-dev-deps --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .
+```
+
+New or updated third-party dependencies also require the license review under
+[Third-Party Code](#third-party-code).
 
 ## License
 

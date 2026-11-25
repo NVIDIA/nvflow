@@ -2,9 +2,15 @@ default:
   tags:
     - llm-mlops
   interruptible: true
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq git > /dev/null
-    - pip install -q uv
+
+# Prefer the MR pipeline after an MR is opened. Without this guard, pushes to a
+# feature/* branch can create both a branch pipeline and an MR pipeline.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"
+      when: never
+    - when: always
 
 stages:
   - lint
@@ -15,22 +21,56 @@ stages:
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
+  UV_LINK_MODE: "copy"
+  PRE_COMMIT_HOME: "$CI_PROJECT_DIR/.cache/pre-commit"
 
-cache:
-  key: ${CI_COMMIT_REF_SLUG}
-  paths:
-    - .cache/
+# Always the latest uv; pyproject.toml's required-version is only a floor.
+.install-uv: &install-uv
+  python -m pip install --disable-pip-version-check -q --upgrade uv
+
+# TruffleHog ships as a Go binary, so it cannot come from pyproject.toml.  Its
+# official image is digest-pinned instead, matching how Trivy is pinned below:
+# one line per tool, updatable by Renovate, and no installer commit or checksum
+# to keep in sync.  Keep this as a hidden job rather than a YAML image anchor so
+# Renovate's gitlabci manager can discover the image.  The image carries git,
+# which both jobs need.  entrypoint is cleared because the image's own
+# entrypoint would otherwise consume the job script.
+.trufflehog-image:
+  image:
+    name: trufflesecurity/trufflehog:3.96.0@sha256:aa821cf4ace8861c7d096d83818cdf7bb9719028a52d37a52eaad44086a52577
+    entrypoint: [""]
 
 # =============================================================================
 # LINT STAGE
 # =============================================================================
 lint:
   stage: lint
-  image: python:3.12-slim
+  image: python:3.13.14-slim
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git > /dev/null
+    - *install-uv
   script:
-    - uv sync --all-extras
-    - uv run pre-commit run --all-files
+    - uv lock --check
+    # Install only the lockfile's lint group. Its hooks manage their own isolated
+    # environments, so resolving the full NeMo/Torch stack adds no coverage.
+    - uv sync --locked --only-group lint
+    - uv run --no-sync pre-commit run --all-files
+  cache:
+    - key:
+        files:
+          - .gitlab-ci.yml
+        prefix: pip-lint
+      paths:
+        - .cache/pip/
+    - key:
+        files:
+          - .pre-commit-config.yaml
+        prefix: pre-commit
+      paths:
+        - .cache/pre-commit/
   rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "dev"
@@ -41,49 +81,437 @@ lint:
 # merge commits that never carry Signed-off-by lines.
 dco-check:
   stage: lint
-  image: python:3.12-slim
+  image: python:3.13.14-slim
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git > /dev/null
   script:
     - python3 scripts/check_dco.py
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# A malformed renovate.json is otherwise only caught by the central runner, one
+# scheduled run later. Pin the image to the version that runner uses, so this
+# validates against the same schema. Run the validator with no file name: naming
+# one makes it validate as global config, which accepts different keys and would
+# call a broken repository config valid.
+renovate-config-check:
+  stage: lint
+  image:
+    name: renovate/renovate:44.29.2@sha256:d0c00f5e19d0042c5a3e48c5fb949bd6ce3ea4f687cb4880370cb246082d1902
+    entrypoint: [""]
+  before_script: []
+  script:
+    - renovate-config-validator --strict
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - renovate.json
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - renovate.json
 
 # Mirrors .github/workflows/secrets-detector.yml.  The GitHub copy only runs on
 # pull requests, and this repo opens one per release, so without this job a
 # finding stays invisible until release day.  Keep the flags in sync with the
 # GitHub workflow.
 secrets-detector:
+  extends: .trufflehog-image
   stage: lint
-  image: python:3.12-slim
   variables:
     GIT_DEPTH: 0
   before_script:
-    - apt-get update -qq && apt-get install -y -qq git curl > /dev/null
-    - curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+    - trufflehog --version
   script:
-    - trufflehog git file://. --since-commit "$CI_MERGE_REQUEST_DIFF_BASE_SHA" --fail --no-update --results=verified,unknown
+    # An empty --since-commit is not an error: TruffleHog drops the boundary and
+    # scans every ref, so a secret on any branch fails an unrelated MR.  GitLab
+    # leaves the base SHA empty when an MR has no diff (a sync branch already
+    # containing its target), so resolve it ourselves.  --branch HEAD is the
+    # other half: the base bounds history but not the set of refs, and runners
+    # reuse build directories, so old refs/pipelines/* are otherwise in scope.
+    #
+    # Lob is excluded because its key pattern is `(live|test)_` plus 35 word
+    # characters, which every descriptive pytest name matches.  This repo uses no
+    # Lob API, so the detector can only produce false positives here.
+    - |
+      BASE="$CI_MERGE_REQUEST_DIFF_BASE_SHA"
+      if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+        git fetch -q origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+        BASE="$(git merge-base FETCH_HEAD HEAD)"
+      fi
+      test -n "$BASE" || { echo "cannot resolve a scan base; refusing to scan every ref"; exit 1; }
+      echo "scanning ${BASE}..HEAD"
+      trufflehog git file://. --since-commit "$BASE" --branch HEAD --fail --no-update --results=verified,unknown --exclude-globs='*.whl' --exclude-detectors=Lob
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# The job above only sees one MR's commits, so nothing scans the other branches.
+# This does, on a schedule, reporting rather than blocking (allow_failure) since
+# findings usually live in someone else's branch.  Needs a schedule in
+# Settings > CI/CD > Schedules to run at all.
+secrets-audit-all-refs:
+  extends: .trufflehog-image
+  stage: lint
+  variables:
+    GIT_DEPTH: 0
+  allow_failure: true
+  before_script:
+    - trufflehog --version
+  script:
+    - git fetch -q --prune origin '+refs/heads/*:refs/remotes/origin/*'
+    - trufflehog git file://. --fail --no-update --results=verified,unknown --exclude-globs='*.whl' --exclude-detectors=Lob
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+# Scan the lockfile with a fresh per-job database. Merge requests compare their
+# merged result with the exact target-branch tree scanned by the same job and
+# fail only for fixable HIGH/CRITICAL findings introduced by the candidate.
+# Protected branches and release tags use the full gate. Scheduled dev scans
+# report the full baseline to the remediation job below instead of making an
+# unrelated feature MR own an advisory published after its branch was created.
+trivy-repository-scan:
+  stage: lint
+  image:
+    name: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c
+    entrypoint: [""]
+  variables:
+    TRIVY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/trivy/repository-$CI_JOB_ID"
+    TRIVY_NO_PROGRESS: "true"
+    GIT_DEPTH: 0
+  before_script:
+    # Some CI environments inject registry credentials for other jobs, but
+    # `trivy fs` does not need them. Trivy otherwise interprets TRIVY_PASSWORD
+    # as its native --password option and rejects it without a username.
+    - unset TRIVY_USERNAME TRIVY_PASSWORD
+    # The pinned Trivy image intentionally contains only Trivy, git, and the
+    # Alpine base. Install the standard-library-only policy helper's runtime.
+    - apk add --no-cache python3 > /dev/null
+  script:
+    # Never honor candidate-controlled trivy.yaml or .trivyignore files. Approved
+    # exceptions live in the confidential issue and remain time-bounded there.
+    - trivy fs --config /dev/null --scanners vuln --include-dev-deps --ignorefile /dev/null --format json --output trivy-repository.json --exit-code 0 .
+    - |
+      # Derive policy from the immutable pipeline context inside the script.
+      # A project or pipeline variable must not be able to downgrade a main,
+      # release, or merge-request gate to report-only mode.
+      SCAN_POLICY="strict"
+      if [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then
+        SCAN_POLICY="delta"
+      elif [ "$CI_PIPELINE_SOURCE" = "schedule" ] && \
+           [ "$CI_COMMIT_BRANCH" = "dev" ] && \
+           [ "$CI_COMMIT_REF_PROTECTED" = "true" ]; then
+        SCAN_POLICY="report"
+      fi
+
+      case "$SCAN_POLICY" in
+        delta)
+          test "$CI_PIPELINE_SOURCE" = "merge_request_event"
+          case "$CI_MERGE_REQUEST_EVENT_TYPE" in
+            merged_result|merge_train) ;;
+            *) echo "baseline-aware Trivy requires a merged-result or merge-train pipeline" >&2; exit 2 ;;
+          esac
+          TARGET_SHA="${CI_MERGE_REQUEST_TARGET_BRANCH_SHA:-}"
+          test -n "$TARGET_SHA" || { echo "CI_MERGE_REQUEST_TARGET_BRANCH_SHA is empty" >&2; exit 2; }
+          if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
+            git fetch -q --no-tags origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+          fi
+          git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null || {
+            echo "cannot resolve target commit $TARGET_SHA" >&2
+            exit 2
+          }
+          BASELINE_DIR="$CI_PROJECT_DIR/.trivy-target"
+          BASELINE_ARCHIVE="$CI_PROJECT_DIR/.trivy-target.tar"
+          test ! -e "$BASELINE_DIR" && test ! -e "$BASELINE_ARCHIVE"
+          mkdir "$BASELINE_DIR"
+          git archive --format=tar --output="$BASELINE_ARCHIVE" "$TARGET_SHA"
+          tar -xf "$BASELINE_ARCHIVE" -C "$BASELINE_DIR"
+          rm -f "$BASELINE_ARCHIVE"
+          trivy fs --config /dev/null --scanners vuln --include-dev-deps --ignorefile /dev/null --skip-db-update --format json --output trivy-repository-target.json --exit-code 0 "$BASELINE_DIR"
+          python3 scripts/trivy_report_diff.py trivy-repository.json \
+            --baseline trivy-repository-target.json \
+            --policy delta --output trivy-repository-gate.json
+          ;;
+        report)
+          python3 scripts/trivy_report_diff.py trivy-repository.json \
+            --policy report --output trivy-repository-gate.json
+          ;;
+        strict)
+          python3 scripts/trivy_report_diff.py trivy-repository.json \
+            --policy strict --output trivy-repository-gate.json
+          ;;
+        *)
+          echo "unknown repository scan policy: $SCAN_POLICY" >&2
+          exit 2
+          ;;
+      esac
+  after_script:
+    - printf 'TRIVY_SCAN_JOB_URL=%s\n' "$CI_JOB_URL" > trivy-scan.env
+  artifacts:
+    when: always
+    paths:
+      - trivy-repository*.json
+    reports:
+      dotenv: trivy-scan.env
+    expire_in: 30 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "dev" && $CI_COMMIT_REF_PROTECTED == "true" && $TRIVY_WEEKLY_SCAN == "true"
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "dev" && $CI_COMMIT_REF_PROTECTED == "true" && $TRIVY_REPOSITORY_SCAN == "true"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "web" && $TRIVY_WEEKLY_SCAN == "true"
+    - if: $CI_PIPELINE_SOURCE == "web" && $TRIVY_REPOSITORY_SCAN == "true"
+    - if: $CI_PIPELINE_SOURCE == "api" && $TRIVY_REPOSITORY_SCAN == "true"
+    - if: $CI_PIPELINE_SOURCE == "trigger" && $TRIVY_REPOSITORY_SCAN == "true"
+    - if: $CI_PIPELINE_SOURCE == "pipeline" && $TRIVY_REPOSITORY_SCAN == "true"
+
+# A scheduled dev finding is owned here rather than copied into every feature
+# MR. The helper updates one confidential issue while findings persist, closes
+# it when clean, and returns 1 after a successful update while findings remain
+# so the scheduled pipeline stays visibly red. CI_JOB_TOKEN cannot write the
+# Issues API; configure TRIVY_ISSUE_TOKEN as a masked, protected project token.
+trivy-repository-remediation:
+  stage: lint
+  image: python:3.13.14-slim
+  resource_group: trivy-dev-repository-remediation
+  needs:
+    - job: trivy-repository-scan
+      artifacts: true
+  before_script: []
+  script:
+    - python3 scripts/update_trivy_issue.py trivy-repository-gate.json
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "dev" && $CI_COMMIT_REF_PROTECTED == "true" && $TRIVY_WEEKLY_SCAN == "true"
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "dev" && $CI_COMMIT_REF_PROTECTED == "true" && $TRIVY_REPOSITORY_SCAN == "true"
+
+# Shared Trivy runtime and authenticated-registry login for on-demand and weekly
+# container scans. Each job gets its own cache, avoiding Trivy's exclusive
+# cache lock while the amd64 and arm64 jobs run concurrently.
+.trivy-container-scan-base:
+  stage: lint
+  image:
+    name: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c
+    entrypoint: [""]
+  timeout: 2h
+  variables:
+    TRIVY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/trivy/image-$CI_JOB_ID"
+    TRIVY_NO_PROGRESS: "true"
+  before_script:
+    - apk add --no-cache python3 > /dev/null
+    - test -n "${TRIVY_REGISTRY_PREFIX:-}" || { echo "TRIVY_REGISTRY_PREFIX is not configured" >&2; exit 1; }
+    - test -n "${TRIVY_REGISTRY_USERNAME:-}" || { echo "TRIVY_REGISTRY_USERNAME is not configured" >&2; exit 1; }
+    - test -n "${TRIVY_PASSWORD:-}" || { echo "TRIVY_PASSWORD is not configured" >&2; exit 1; }
+    # TRIVY_USERNAME and TRIVY_PASSWORD are also Trivy's native credential
+    # environment variables. Copy the password and clear both before
+    # --password-stdin so subsequent image scans use only the registry login.
+    - |
+      REGISTRY_HOST="${TRIVY_REGISTRY_PREFIX%%/*}"
+      REGISTRY_PASSWORD="$TRIVY_PASSWORD"
+      unset TRIVY_USERNAME TRIVY_PASSWORD
+      printf '%s' "$REGISTRY_PASSWORD" | trivy registry login --username "$TRIVY_REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
+      unset REGISTRY_PASSWORD
+
+# Shared implementation for a single manual or custom-scheduled image scan.
+.trivy-container-image-scan:
+  extends: .trivy-container-scan-base
+  variables:
+    # Avoid TRIVY_OUTPUT: Trivy treats that reserved environment variable as
+    # --output, which would redirect the gate report and overwrite the JSON.
+    SCAN_REPORT_FILE: "trivy-image.json"
+  script:
+    - test -n "${TRIVY_IMAGE:-}" || { echo "TRIVY_IMAGE is not configured" >&2; exit 1; }
+    - |
+      if [ -n "${TRIVY_PLATFORM:-}" ]; then
+        trivy image --config /dev/null --ignorefile /dev/null --image-src remote --scanners vuln --timeout 90m --platform "$TRIVY_PLATFORM" --format json --output "$SCAN_REPORT_FILE" "$TRIVY_IMAGE"
+        trivy image --config /dev/null --ignorefile /dev/null --skip-db-update --image-src remote --scanners vuln --timeout 90m --platform "$TRIVY_PLATFORM" --table-mode detailed --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$TRIVY_IMAGE"
+      else
+        trivy image --config /dev/null --ignorefile /dev/null --image-src remote --scanners vuln --timeout 90m --format json --output "$SCAN_REPORT_FILE" "$TRIVY_IMAGE"
+        trivy image --config /dev/null --ignorefile /dev/null --skip-db-update --image-src remote --scanners vuln --timeout 90m --table-mode detailed --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$TRIVY_IMAGE"
+      fi
+  artifacts:
+    when: always
+    paths:
+      - "$SCAN_REPORT_FILE"
+    expire_in: 30 days
+
+# Scan an additional image by starting a pipeline with TRIVY_IMAGE and optional
+# TRIVY_PLATFORM. Scheduled runs start immediately; other pipelines expose a
+# manual job. Large images are never pulled by an ordinary push or MR.
+container-image-scan:
+  extends: .trivy-container-image-scan
+  rules:
+    - if: $TRIVY_IMAGE_PROMOTION == "true"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $TRIVY_IMAGE
+    - if: $TRIVY_IMAGE
+      when: manual
+      allow_failure: true
+
+# Blocking contract for an external image-promotion pipeline. Supply one
+# immutable child-manifest reference per deployed architecture and make the
+# promoter depend on both matrix shards before copying or advancing a tag.
+promotion-container-image-scan:
+  extends: .trivy-container-scan-base
+  script:
+    - |
+      case "$TRIVY_PLATFORM" in
+        linux/amd64) PROMOTION_IMAGE="${TRIVY_IMAGE_AMD64:-}" ;;
+        linux/arm64) PROMOTION_IMAGE="${TRIVY_IMAGE_ARM64:-}" ;;
+        *) echo "unsupported promotion platform: $TRIVY_PLATFORM" >&2; exit 2 ;;
+      esac
+      test -n "$PROMOTION_IMAGE" || { echo "promotion image is not configured for $TRIVY_PLATFORM" >&2; exit 2; }
+      printf '%s\n' "$PROMOTION_IMAGE" | grep -Eq '@sha256:[0-9a-f]{64}$' || {
+        echo "promotion images must use immutable child-manifest digests" >&2
+        exit 2
+      }
+      test "${TRIVY_IMAGE_AMD64%@*}" = "${TRIVY_IMAGE_ARM64%@*}" || {
+        echo "amd64 and arm64 promotion images must use the same repository" >&2
+        exit 2
+      }
+      test "$TRIVY_IMAGE_AMD64" != "$TRIVY_IMAGE_ARM64" || {
+        echo "amd64 and arm64 promotion images must use distinct child-manifest digests" >&2
+        exit 2
+      }
+      REPORT_FILE="trivy-promotion-$PLATFORM_SLUG.json"
+      trivy image --config /dev/null --ignorefile /dev/null \
+        --image-src remote --scanners vuln --timeout 90m \
+        --platform "$TRIVY_PLATFORM" --format json --output "$REPORT_FILE" "$PROMOTION_IMAGE"
+      python3 scripts/validate_trivy_image_report.py "$REPORT_FILE" \
+        --expected-platform "$TRIVY_PLATFORM"
+      trivy image --config /dev/null --ignorefile /dev/null --skip-db-update \
+        --image-src remote --scanners vuln --timeout 90m \
+        --platform "$TRIVY_PLATFORM" --table-mode detailed \
+        --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$PROMOTION_IMAGE"
+  artifacts:
+    name: "trivy-promotion-$PLATFORM_SLUG"
+    when: always
+    paths:
+      - "trivy-promotion-$PLATFORM_SLUG.json"
+    expire_in: 30 days
+  parallel:
+    matrix:
+      - TRIVY_PLATFORM: "linux/amd64"
+        PLATFORM_SLUG: "linux-amd64"
+      - TRIVY_PLATFORM: "linux/arm64"
+        PLATFORM_SLUG: "linux-arm64"
+  rules:
+    - if: $TRIVY_IMAGE_PROMOTION == "true"
+
+# Scan every baseline multi-architecture tag in two visible jobs: one per
+# platform. Each job uploads one artifact bundle containing the native
+# Trivy JSON reports. --platform selects a different child manifest/digest
+# independently of the CI runner architecture.
+weekly-container-image-scan:
+  extends: .trivy-container-scan-base
+  script:
+    - |
+      mkdir -p "$SCAN_REPORT_DIR"
+      GATE_STATUS=0
+
+      while IFS= read -r IMAGE_NAME || [ -n "$IMAGE_NAME" ]; do
+        case "$IMAGE_NAME" in
+          ""|\#*) continue ;;
+        esac
+        case "$IMAGE_NAME" in
+          */*) IMAGE_REF="$IMAGE_NAME" ;;
+          *) IMAGE_REF="${TRIVY_REGISTRY_PREFIX%/}/$IMAGE_NAME" ;;
+        esac
+        IMAGE_BASENAME="${IMAGE_REF##*/}"
+        IMAGE_REPOSITORY="${IMAGE_BASENAME%:*}"
+        IMAGE_TAG="${IMAGE_BASENAME##*:}"
+        REPORT_STEM="$IMAGE_REPOSITORY-$IMAGE_TAG"
+        REPORT_FILE="$SCAN_REPORT_DIR/trivy-$REPORT_STEM-$PLATFORM_SLUG.json"
+        printf '\nScanning %s for %s\n' "$IMAGE_REF" "$TRIVY_PLATFORM"
+
+        if ! trivy image --config /dev/null --ignorefile /dev/null --image-src remote --scanners vuln --timeout 90m --platform "$TRIVY_PLATFORM" --format json --output "$REPORT_FILE" "$IMAGE_REF"; then
+          printf 'Raw scan failed for %s on %s; continuing with the remaining images\n' "$IMAGE_REF" "$TRIVY_PLATFORM" >&2
+          GATE_STATUS=1
+          continue
+        fi
+        if ! trivy image --config /dev/null --ignorefile /dev/null --skip-db-update --image-src remote --scanners vuln --timeout 90m --platform "$TRIVY_PLATFORM" --table-mode detailed --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE_REF"; then
+          GATE_STATUS=1
+        fi
+      done < ci/trivy-images.txt
+
+      exit "$GATE_STATUS"
+  artifacts:
+    name: "trivy-images-$PLATFORM_SLUG"
+    when: always
+    paths:
+      - "$SCAN_REPORT_DIR/"
+    expire_in: 30 days
+  parallel:
+    matrix:
+      - TRIVY_PLATFORM: "linux/amd64"
+        PLATFORM_SLUG: "linux-amd64"
+        SCAN_REPORT_DIR: "trivy-images-linux-amd64"
+      - TRIVY_PLATFORM: "linux/arm64"
+        PLATFORM_SLUG: "linux-arm64"
+        SCAN_REPORT_DIR: "trivy-images-linux-arm64"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $TRIVY_WEEKLY_SCAN == "true"
+    - if: $CI_PIPELINE_SOURCE == "web" && $TRIVY_WEEKLY_SCAN == "true"
 
 # =============================================================================
 # TEST STAGE
 # =============================================================================
 test:
   stage: test
-  image: python:3.12-slim
+  image: python:3.13.14-slim
+  # Unit tests do not consume lint outputs, so start them as soon as the
+  # pipeline is created instead of waiting for the entire lint stage.
+  needs: []
+  variables:
+    # Project manifests check NVFlow's version, which comes from the nearest
+    # vX.Y.Z tag; a shallow clone can leave that tag out.
+    GIT_DEPTH: 0
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git > /dev/null
+    - git fetch --tags --force
+    - *install-uv
   script:
-    # Lightweight install: the project plus tests/requirements-ci.txt, but not
-    # the heavy nemo-skills stack (~200 packages incl. torch).  Tests that
-    # genuinely need nemo-skills use pytest.importorskip and skip here; they
-    # run in the full-deps CI.  The dependency list is shared with
-    # .github/workflows/unit-tests.yml — edit it there, in one place.
-    - uv venv --python 3.12
-    - uv pip install -e . --no-deps
-    - uv pip install -r tests/requirements-ci.txt
-    # --no-sync prevents `uv run` from implicitly auto-installing heavy core
-    # deps (nemo-skills etc) that we deliberately skipped above.  Without it,
-    # tests would pass here for the wrong reason and fail on GitHub CI.
-    - uv run --no-sync pytest tests/ -v --tb=short
+    - scripts/run_ci_test_lane.sh minimal
+  cache:
+    key:
+      files:
+        - uv.lock
+        - pyproject.toml
+      prefix: uv-test
+    paths:
+      - .cache/uv/
+  after_script:
+    - command -v uv > /dev/null && uv cache prune --ci
   rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+
+# The lightweight job runs every dependency-light test. Install the full
+# dependency graph here and run only the explicitly gated integration tests, so
+# the two lanes cover the suite once without hiding undeclared dependencies.
+# Mirrored by GitHub test-full-deps.
+test-full-deps:
+  stage: test
+  image: python:3.13.14-slim
+  needs: []
+  variables:
+    GIT_DEPTH: 0
+  before_script:
+    # editdistance, a NeMo-Skills requirement, has no Python 3.13 wheel.
+    - apt-get update -qq && apt-get install -y -qq git g++ > /dev/null
+    - git fetch --tags --force
+    - *install-uv
+  script:
+    - scripts/run_ci_test_lane.sh nemo
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "dev"
@@ -94,16 +522,17 @@ test:
 # =============================================================================
 build:
   stage: build
-  image: python:3.12-slim
+  image: python:3.13.14-slim
   variables:
     GIT_DEPTH: 0
   before_script:
     - apt-get update -qq && apt-get install -y -qq git > /dev/null
     - git fetch --tags --force
     - git describe --tags || echo "No tags found"
-    - pip install -q build hatch-vcs
+    - *install-uv
+    - uv sync --locked --only-group build
   script:
-    - python -m build
+    - uv run --no-sync python -m build --no-isolation
     - ls -la dist/
     - echo "Built version:" && ls dist/*.whl | sed 's/.*nvflow-\(.*\)-py3.*/\1/'
   artifacts:
@@ -111,6 +540,8 @@ build:
       - dist/
     expire_in: 1 week
   rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "dev"
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
@@ -120,10 +551,11 @@ build:
 # =============================================================================
 publish:
   stage: publish
-  image: python:3.12-slim
+  image: python:3.13.14-slim
   interruptible: false
   before_script:
-    - pip install -q twine
+    - *install-uv
+    - uv sync --locked --only-group publish
   script:
     - |
       echo "Publishing to GitLab Package Registry..."
@@ -133,12 +565,14 @@ publish:
     - >
       TWINE_PASSWORD=${CI_JOB_TOKEN}
       TWINE_USERNAME=gitlab-ci-token
-      python -m twine upload
+      uv run --no-sync python -m twine upload
       --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
       --verbose
       dist/*
   dependencies:
     - build
   rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/

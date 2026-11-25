@@ -1,0 +1,114 @@
+# ============================================================================
+# Finance DG-SDG Pipeline - Demo Configuration
+# ============================================================================
+# Quick E2E demo configuration for testing the full document-grounded pipeline.
+# Uses smaller models, fewer resources, and reduced data volume.
+#
+# Usage:
+#   uv run nvflow run --all --config projects/finance/workflows/sdg/document-grounded-sdg-demo.yaml --cluster my_cluster
+# ============================================================================
+
+# Inherit production config
+_base_: document-grounded-sdg.yaml
+base_data_dir: /workspace/outputs/finance/demo/workflow-2-document-grounded-sdg-demo
+# Use demo filings (already downloaded in workflow-0)
+filings_dir: /workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download
+# ============================================================================
+# Demo Stage Overrides - Only override what's different from prod
+# ============================================================================
+stages:
+  # --------------------------------------------------------------------------
+  # Stage 0: Preprocess - Fewer samples, smaller chunks
+  # --------------------------------------------------------------------------
+  dg_sdg_preprocess:
+    input_dir: ${filings_dir}/data
+    output_dir: ${base_data_dir}/step-0-preprocess
+    max_tokens: 2000
+    overlap_tokens: 300
+    total_samples: 500
+    max_skip_count: 2000
+    seed: 42
+  # --------------------------------------------------------------------------
+  # Stage 1: Q-pipeline - Smaller models, fewer repeats
+  # --------------------------------------------------------------------------
+  generate_verified_questions:
+    question_generation_kwargs:
+      args:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        num_repeats: 1
+        num_chunks: 6
+        max_model_len: 16384
+        tensor_parallel_size: 8
+      ctx_args: >-
+        ++prompt_config=project://prompts/document_grounded_generate_questions.yaml ++inference.temperature=0.9 ++inference.top_p=0.9
+    question_verify_kwargs:
+      args:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        num_repeats: 3
+        # Twelve chunks keep verification comfortably below the 4h wall time.
+        # Three repeats stay inside each chunk rather than multiplying Slurm jobs.
+        num_chunks: 12
+        max_model_len: 16384
+        tensor_parallel_size: 8
+      ctx_args: >-
+        ++prompt_config=project://prompts/document_grounded_verify_questions.yaml ++inference.temperature=0.1 ++inference.top_p=0.1
+  # --------------------------------------------------------------------------
+  # Stage 2: A-pipeline - Smaller models, fewer repeats
+  # --------------------------------------------------------------------------
+  generate_answers:
+    answer_preprocess_kwargs:
+      threshold: 0.5
+    answer_generation_kwargs:
+      args:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        num_chunks: 12
+        num_repeats: 3
+        max_model_len: 16384
+        tensor_parallel_size: 8
+      ctx_args: >-
+        ++prompt_config=project://prompts/secque_template.yaml
+  # --------------------------------------------------------------------------
+  # Stage 3: GenSelect - Smaller model
+  # --------------------------------------------------------------------------
+  gym_genselect_answers:
+    models:
+      policy:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 65536
+            tensor_parallel_size: 8
+    num_chunks: 8
+  # --------------------------------------------------------------------------
+  # Stage 4: Evaluate - Fewer repeats, smaller model
+  # --------------------------------------------------------------------------
+  evaluate_answers:
+    models:
+      policy:
+        model: /hf_models/openai/gpt-oss-120b
+        num_gpus: 8
+        server_nodes: 1
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 16384
+            tensor_parallel_size: 8
+    num_chunks: 12
+    num_repeats: 3
+  # --------------------------------------------------------------------------
+  # Stage 5: Aggregate - Match repeat count
+  # --------------------------------------------------------------------------
+  aggregate_answers:
+    num_repeats: 3
+  # --------------------------------------------------------------------------
+  # Stage 6: Post-process - Same as prod (no model needed)
+  # --------------------------------------------------------------------------
+  dgsdg_post_process:
+    seed: 42

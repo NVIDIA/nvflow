@@ -1,0 +1,27 @@
+judge_prompt_template: |-
+  You are a strict financial-answer grader. Evaluate the candidate against the
+  instance-specific rubric and reference answer in TASK_SPEC. The candidate
+  must be grounded in the relevant filings: it should contain filing-specific
+  values, dates, line items, disclosures, or source references rather than only
+  generic financial knowledge.
+
+  For each rubric criterion, decide whether the candidate satisfies it. Give
+  extra weight to severity 2/3 criteria and to must_pass criteria. A candidate
+  cannot be fully correct if any must_pass criterion is missing or wrong.
+  Accept equivalent units and reasonable final-result rounding, but reject
+  directionally wrong calculations or unsupported claims.
+
+  Return a concise criterion-by-criterion explanation, followed by exactly one
+  rating token:
+  - [[0]]: ungrounded, materially incorrect, or misses most essential criteria
+  - [[1]]: grounded and partially correct, but misses at least one essential criterion
+  - [[2]]: grounded, correct, complete, and satisfies every must_pass criterion
+
+  QUESTION:
+  {question}
+
+  TASK_SPEC (JSON containing reference_answer and rubric):
+  {expected_answer}
+
+  CANDIDATE:
+  {generated_answer}

@@ -14,8 +14,7 @@
 #
 """Tests for responses_api_converter content equivalence + error routing.
 
-Pins the contract that downstream stages (``ng_prepare_data``,
-``aggregate_seeds``) rely on:
+Pins the contract that downstream preparation and difficulty filtering rely on:
 
 - Each apply_prompt_template row is converted *losslessly* -- the
   output retains every input field plus three additions
@@ -30,7 +29,7 @@ Pins the contract that downstream stages (``ng_prepare_data``,
 
 Parses outputs with stdlib ``json.loads`` (the converter writes via
 ``orjson``) to guard the orjson-output <-> stdlib-input contract that
-``ng_prepare_data`` relies on -- it reads the converter's output with
+Gym dataset collation relies on -- it reads the converter's output with
 stdlib ``json``.
 """
 
@@ -81,7 +80,7 @@ def _run_converter(input_path: Path, output_file: Path) -> subprocess.CompletedP
     cmd = [
         sys.executable,
         "-m",
-        "nvflow.recipes.finance.utils.rl.responses_api_converter",
+        "nvfinance.utils.rl.responses_api_converter",
         str(input_path),
         str(output_file),
     ]
@@ -93,7 +92,7 @@ def test_directory_input_concatenates_all_chunks(tmp_path: Path) -> None:
 
     apply_prompt_template emits a directory of per-chunk JSONL files;
     the converter is the join point that turns N chunks into a single
-    ``final_result.jsonl`` consumed by ng_prepare_data.
+    ``final_result.jsonl`` consumed by Gym dataset collation.
     """
     input_dir = tmp_path / "in"
     output_file = tmp_path / "out" / "final_result.jsonl"
@@ -111,7 +110,7 @@ def test_directory_input_concatenates_all_chunks(tmp_path: Path) -> None:
 
     assert len(records) == 6, f"expected 6 records (3 chunks x 2 records), got {len(records)}"
     # Sorted-by-filename ordering: chunk1's records come before chunk2's, etc.
-    # ``ng_prepare_data`` doesn't depend on this, but the deterministic
+    # Gym collation doesn't depend on this, but the deterministic
     # ordering makes diffing across reruns possible.
     assert all(rec["uuid"].startswith("uuid-chunk") for rec in records)
 
@@ -149,9 +148,7 @@ def test_content_equivalence_preserves_all_input_fields(tmp_path: Path) -> None:
             "_response_params leaked into output (must be merged + popped)"
         )
         # The three converter additions:
-        assert converted["question"] == original["problem"], (
-            "question must mirror the raw problem (used by eval/aggregate_seeds)"
-        )
+        assert converted["question"] == original["problem"]
         assert converted["expected_answer"] == original["expected_answer"]
         rcp = converted["responses_create_params"]
         assert rcp["input"] == [{"role": "user", "content": original["prompt"]}], (
@@ -235,7 +232,7 @@ def test_missing_input_path_exits_nonzero_with_clean_message(tmp_path: Path) -> 
     cmd = [
         sys.executable,
         "-m",
-        "nvflow.recipes.finance.utils.rl.responses_api_converter",
+        "nvfinance.utils.rl.responses_api_converter",
         str(tmp_path / "does_not_exist"),
         str(tmp_path / "out.jsonl"),
     ]
@@ -269,7 +266,7 @@ def test_missing_input_does_not_leave_zombie_output_file(tmp_path: Path) -> None
     cmd = [
         sys.executable,
         "-m",
-        "nvflow.recipes.finance.utils.rl.responses_api_converter",
+        "nvfinance.utils.rl.responses_api_converter",
         str(tmp_path / "does_not_exist"),
         str(output_file),
     ]
@@ -311,7 +308,7 @@ def test_empty_input_dir_does_not_leave_zombie_output_file(tmp_path: Path) -> No
     cmd = [
         sys.executable,
         "-m",
-        "nvflow.recipes.finance.utils.rl.responses_api_converter",
+        "nvfinance.utils.rl.responses_api_converter",
         str(input_dir),
         str(output_file),
     ]

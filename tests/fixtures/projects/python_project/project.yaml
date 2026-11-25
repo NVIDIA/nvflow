@@ -1,0 +1,4 @@
+manifest_version: 1
+project: fixture-python
+requires_nvflow: ">=0"
+python_source_root: src

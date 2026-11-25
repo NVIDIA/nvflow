@@ -1,0 +1,265 @@
+# ==========================================================================
+# VALS 1.1, workflow 2: teacher traces for one dataset (shared base)
+# ==========================================================================
+# vals11-teacher-{sft,rl}-{web-off,web-on} and
+# vals11-teacher-sft-held-out-{web-off,web-on} inherit this file and set
+# question_set and dataset, so each run answers one of workflow 1's datasets.
+# The held-out runs answer the validation questions in each mode, so validation
+# can be cleaned the same way as training; their traces aren't training data.
+# The teacher, Kimi K3.1 Pro, answers the dataset's questions as the
+# finance agent, with the prompts and tools workflow 1 rendered,
+# teacher_answers times each. The hosted judge grades every answer against the
+# question's reference answer, and each question keeps its most efficient
+# passing answer as an SFT trace.
+#
+# Stage          What runs                                   Container, Slurm jobs
+# teacher        the teacher answers the dataset             nemo-gym: the teacher's GPU
+#                                                            nodes, then 1 CPU job
+# select_traces  keep one trace per question; report         nemo-skills: 1 CPU job
+# rejudge        grade the answers again with rejudge_judge; nemo-gym: 2 CPU jobs
+#                off unless added to pipeline_stages
+#
+# The teacher is sized for GB300 nodes; each target mounts its checkpoint
+# under /hf_models. The tools search the local SEC index and read
+# filings from the SEC download under /workspace/outputs/finance/sp500, and
+# cache them under /workspace/cache; the web_on datasets' rows also offer
+# web_search, which Gym runs through Tavily.
+# Gym reads TAVILY_API_KEY and the judge reads NVIDIA_API_KEY in the job, from
+# the target's environment; the launching shell needs neither.
+
+workflow:
+  name: "vals11-teacher"
+  type: "sdg"
+  description: "Collect teacher answers to one VALS 1.1 dataset and keep one verified trace per question"
+  runnable: false
+
+cluster: my_cluster
+
+scope: vals11
+# sft or rl.
+question_set: ???
+# web_off or web_on: one of the set's datasets from workflow 1.
+dataset: ???
+# Names the output folder.
+teacher: kimi-k3.1-pro
+data_root: /workspace/outputs/finance/${scope}
+base_output_dir: ${data_root}/workflow-2-teacher/${question_set}/${dataset}/${teacher}
+pools: ${data_root}/workflow-1-prepare/${question_set}/step-2-build-pools/1-render
+# The first questions of the dataset to answer. Workflow 1 shuffled its pools,
+# so these are a random sample; null answers every question.
+max_questions: null
+teacher_answers: 1
+# About 700 questions a chunk for an SFT dataset's 2,800; a held-out set's
+# few hundred fit in one.
+teacher_chunks: 4
+
+sec_root: /workspace/outputs/finance/sp500/workflow-2-download-sec
+# Gym returns a cache entry it can't read or write as a tool error, so the
+# tools cache filings in a folder of this user's own.
+sec_cache: /workspace/cache/finance_sec_search
+gym_install: export PATH=/opt/nemo_gym_venv/bin:$PATH
+
+# Kimi K3.1 Pro as one copy on two GB300 nodes: 8-way tensor parallel. Its
+# 2.8T parameters don't fit one node.
+teacher_model:
+  model: /hf_models/Kimi-K3.1-Pro
+  container: vllm
+  num_gpus: 4
+  server_nodes: 2
+  deployment: nvflow
+  gym_model:
+    uses_reasoning_parser: true
+    # The model card's evaluation setting; low, medium and high also exist.
+    chat_template_kwargs:
+      thinking: true
+      thinking_effort: max
+    vllm_serve_env_vars:
+      # NCCL's multi-node NVLink, which needs its cuMem allocator, carries the
+      # tensor-parallel traffic between the two nodes.
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_CUMEM_ENABLE: "1"
+      # Each node writes the checkpoint's model code to its own folder; on
+      # shared storage both nodes would write the same files at once.
+      HF_MODULES_CACHE: /tmp/hf-modules
+      # Kept across jobs: a cold start's FlashInfer MoE autotuning more than
+      # doubles engine startup.
+      VLLM_CACHE_ROOT: /workspace/cache/vllm-serving/kimi-k3.1-pro/vllm
+      VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: /workspace/cache/vllm-serving/kimi-k3.1-pro/flashinfer-autotune
+      XDG_CACHE_HOME: /workspace/cache/vllm-serving/kimi-k3.1-pro/xdg
+      # Loading 1.56 TB of weights can outlast vLLM's default wait for the engine.
+      VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+    vllm_serve_kwargs:
+      tensor_parallel_size: 8
+      # vLLM's own multi-node mode: the official Kimi image has no Ray.
+      distributed_executor_backend: mp
+      # Decode context parallelism splits the attention caches across the 8
+      # GPUs instead of copying them to each; plain TP8 runs out of KV cache
+      # with many long conversations.
+      decode_context_parallel_size: 8
+      gpu_memory_utilization: 0.92
+      max_model_len: 327680
+      # Above 128, sweeps of this profile measured lower throughput.
+      max_num_seqs: 128
+      max_num_batched_tokens: 16384
+      load_format: fastsafetensors
+      # The agent sends text only, so the vision encoder stays unloaded.
+      language_model_only: true
+      tool_call_parser: kimi_k3
+      reasoning_parser: kimi_k3
+      enable_auto_tool_choice: true
+
+judge_model:
+  deployment: external
+  model_type: openai_model
+  model: openai/openai/gpt-5.2
+  base_url: https://inference-api.nvidia.com/v1
+  api_key_env: NVIDIA_API_KEY
+
+# The second judge, which the rejudge stage grades the collected answers with
+# again; its name names the stage's output folder. DeepSeek V4.1 Flash, through
+# NVCF's chat completions API.
+rejudge_judge: deepseek-v4.1-flash
+rejudge_model:
+  deployment: external
+  model_type: vllm_model
+  model: private/nemotron/deepseek-ai/deepseek-v4.1-flash
+  base_url: https://integrate.api.nvidia.com/v1
+  api_key_env: NVCF_API_KEY
+  gym_model:
+    return_token_id_information: false
+    uses_reasoning_parser: true
+
+finance_agent:
+  responses_api_agents:
+    finance_agent:
+      max_steps: 50
+      # A text-only turn ends the episode.
+      continue_if_not_tool_call: false
+      # retrieve_information reasons over a whole filing; using its full output
+      # budget can take over half an hour.
+      tool_call_timeout: 3600
+
+# rejudge is off; add it here to grade the answers again with rejudge_judge.
+pipeline_stages:
+  - teacher
+  - select_traces
+
+directories:
+  step-0-teacher: ${base_output_dir}/step-0-teacher
+  step-1-traces: ${base_output_dir}/step-1-traces
+  rejudge: ${base_output_dir}/rejudge/${rejudge_judge}
+
+stages:
+  teacher:
+    description: "Collect the teacher's answers as the finance agent and grade them against the reference answers"
+    uses: nemo_gym.collect
+    contract_version: 1
+    container: nemo-gym
+    installation_command: ${gym_install}
+    output_dir: ${directories.step-0-teacher}
+    dependencies: []
+    environments:
+      finance_sec_search:
+        input_data: ${pools}/${dataset}.jsonl
+        config_paths: [resources_servers/finance_sec_search/configs/finance_sec_search.yaml]
+        agent_name: finance_agent
+        models:
+          judge: ${judge_model}
+        gym:
+          # How long Gym waits for the teacher's server to answer; a cold
+          # two-node start takes about 25 minutes, past Gym's default of 10.
+          model_endpoint_readiness_timeout_seconds: 3600
+          finance_sec_search_resources_server:
+            resources_servers:
+              # The tools search the local SEC index, read filings from the
+              # download, and cache what they read in sec_cache. Every
+              # question gets the same filing cutoff; select_traces counts the
+              # answers that read a filing dated after their question.
+              finance_sec_search:
+                cache_dir: ${sec_cache}
+                use_cache: true
+                sec_dump_path: ${sec_root}/step-0-download/data
+                edgar_search_mode: local
+                local_edgar_index_path: ${sec_root}/step-1-index/sp500_sec_fts.sqlite
+                max_end_date: "2025-04-07"
+                tavily_api_key: \${oc.env:TAVILY_API_KEY}
+                # Each answer's wall-clock budget, waiting for the server
+                # included. When it runs out, the tools ask the model to submit
+                # what it has.
+                max_rollout_time_seconds: 10800
+                reward_mode: binary
+                judge_prompt_template_fpath: project://prompts/finance_sec_search_judge.yaml
+                # Room for the judge's reasoning and its [[N]] verdict; Gym
+                # scores a reply cut off before the verdict 0.
+                judge_responses_create_params:
+                  input: []
+                  max_output_tokens: 32768
+                  reasoning:
+                    effort: high
+                # Seconds per judge call; three timeouts fail the answer, not
+                # just its score.
+                judge_call_timeout: 600
+                retrieval_system_prompt_fpath: project://prompts/finance_sec_search_retrieval.yaml
+                # retrieve_information runs on the teacher, thinking included, so
+                # its reasoning and the extracted answer must both fit. Max-effort
+                # thinking over a long filing can pass 32K tokens.
+                retrieval_responses_create_params:
+                  input: []
+                  temperature: 1.0
+                  top_p: 0.95
+                  max_output_tokens: 65536
+          finance_agent: ${finance_agent}
+    rollout:
+      max_num_samples: ${max_questions}
+      num_repeats: ${teacher_answers}
+      # The chunks run at once, each on its own two-node copy of the teacher. A
+      # chunk that outlasts its Slurm job resumes in its next chained attempt; an
+      # attempt whose chunk is done exits before starting the teacher.
+      num_chunks: ${teacher_chunks}
+      dependent_jobs: 2
+      # Answers in flight on each copy, sized for its KV cache: split across 8
+      # GPUs it holds about 21M tokens by vLLM's figures, and 100 answers peaked
+      # at 61% of it. More answers than the cache holds evict each other's
+      # conversations between turns.
+      num_samples_in_parallel: 128
+      # Kimi K3.1 Pro's checkpoint recommends no sampling values. Reasoning
+      # counts toward max_output_tokens.
+      responses_create_params:
+        temperature: 1.0
+        top_p: 0.95
+        max_output_tokens: 65536
+      models:
+        policy: ${teacher_model}
+
+  select_traces:
+    description: "Keep each question's most efficient passing answer as an SFT trace, and report solve rates and costs"
+    uses: project:nvfinance.stages.sft.select_teacher_traces:SelectTeacherTracesStage
+    container: nemo-skills
+    output_dir: ${directories.step-1-traces}
+    dependencies: [teacher]
+    dataset: ${dataset}
+    rollouts: ${directories.step-0-teacher}/finance_sec_search/jobs/job-1-analyze-rollouts/outputs
+    teacher: ${teacher}
+    shared_cache_dir: ${sec_cache}
+
+  rejudge:
+    description: "Grade the teacher's collected answers again with rejudge_judge"
+    uses: nemo_gym.rejudge
+    contract_version: 1
+    container: nemo-gym
+    installation_command: ${gym_install}
+    dependencies: [teacher]
+    rollouts_dir: ${directories.step-0-teacher}
+    output_dir: ${directories.rejudge}
+    environments: ${stages.teacher.environments}
+    verification:
+      # Gym doesn't mark the finance verifiers stateless, so NVFlow re-verifies
+      # each answer itself.
+      mode: fallback
+      num_samples_in_parallel: 32
+      # The hosted judge's prompt cache can turn an answer's identical prompt
+      # into nonsense on every retry; a unique line in each answer's question
+      # changes the prompt.
+      unique_prompts: true
+      models:
+        judge: ${rejudge_model}

@@ -1,0 +1,157 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":gitSignOff"
+  ],
+  "baseBranchPatterns": [
+    "dev"
+  ],
+  "enabledManagers": [
+    "custom.regex",
+    "dockerfile",
+    "github-actions",
+    "gitlabci",
+    "pep621",
+    "pre-commit"
+  ],
+  "pre-commit": {
+    "enabled": true
+  },
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Dependency Dashboard",
+  "timezone": "America/New_York",
+  "schedule": [
+    "* 6-7 * * 1"
+  ],
+  "minimumReleaseAge": "7 days",
+  "minimumReleaseAgeBehaviour": "timestamp-optional",
+  "internalChecksFilter": "strict",
+  "commitHourlyLimit": 0,
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 2,
+  "branchConcurrentLimit": 2,
+  "rebaseWhen": "conflicted",
+  "automerge": false,
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "configMigration": true,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "* 6-7 * * 1"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Require an explicit decision before major upgrades",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Require an explicit decision for runtime container changes",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Keep coordinated upstream Git commits under manual control",
+      "matchDatasources": [
+        "git-refs"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Keep the coupled NeMo-Skills source commit under manual control",
+      "matchPackageNames": [
+        "nemo-skills"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Require an explicit decision for language and ML runtime upgrades",
+      "matchPackageNames": [
+        "python",
+        "torch"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Require an explicit decision before changing uv compatibility overrides",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDepTypes": [
+        "tool.uv.override-dependencies"
+      ],
+      "dependencyDashboardApproval": true,
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Keep the repository validator aligned with the externally managed Renovate runner",
+      "matchManagers": [
+        "gitlabci"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "renovate/renovate"
+      ],
+      "matchFileNames": [
+        ".gitlab-ci.yml"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Combine GitHub Actions updates into one review",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Combine pre-commit hook updates into one review",
+      "matchManagers": [
+        "pre-commit"
+      ],
+      "groupName": "pre-commit hooks"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Extract top-level uv dependency overrides that PEP 621 does not manage",
+      "managerFilePatterns": [
+        "/^pyproject\\.toml$/"
+      ],
+      "matchStringsStrategy": "recursive",
+      "matchStrings": [
+        "(?:^|\\n)override-dependencies\\s*=\\s*\\[[\\s\\S]*?\\n\\]",
+        "\"(?<depName>[A-Za-z0-9._-]+)(?:\\[[^\\]\"]+\\])?(?<currentValue>(?:~=|==|!=|<=|>=|<|>)[^\"]+)\""
+      ],
+      "datasourceTemplate": "pypi",
+      "depTypeTemplate": "tool.uv.override-dependencies",
+      "versioningTemplate": "pep440"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the TruffleHog version the GitHub workflow installs. The GitLab jobs run a digest-pinned image that the gitlabci manager updates instead",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.*\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "TRUFFLEHOG_VERSION:\\s*[\\\"']?(?<currentValue>\\d+\\.\\d+\\.\\d+)[\\\"']?"
+      ],
+      "depNameTemplate": "TruffleHog",
+      "packageNameTemplate": "trufflesecurity/trufflehog",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver-coerced",
+      "extractVersionTemplate": "^v(?<version>\\d+\\.\\d+\\.\\d+)$"
+    }
+  ]
+}

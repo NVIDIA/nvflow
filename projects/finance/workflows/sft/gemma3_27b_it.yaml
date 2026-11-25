@@ -1,0 +1,210 @@
+# ============================================================================
+# Gemma3-27B-IT SFT Training Configuration (Example / Demo)
+# ============================================================================
+# Example run for testing Gemma SFT — not a production workflow.
+# Inherits shared pipeline logic from base.yaml and provides all Gemma3-27B-IT
+# specific settings (tokenizer, model paths, parallelism, etc.)
+#
+# Requires 16 GPUs (H100 80GB recommended)
+# Uses FSDP2 backend with TP=8 (matches NVIDIA nightly config for Gemma3-27B)
+#
+# Usage:
+#   uv run nvflow run --all --config projects/finance/workflows/sft/gemma3_27b_it.yaml --cluster my_cluster
+# ============================================================================
+
+# Inherit base SFT workflow
+_base_: base.yaml
+
+# Model-specific output directory (example / demo workflow)
+base_output_dir: /workspace/outputs/finance/demo/workflow-4-sft/gemma3_27b_it
+
+directories:
+  raw_train_data: /workspace/outputs/finance/demo/workflow-3-template-based-sdg/step-5-filter-answers
+
+# ============================================================================
+# Model-Specific Stage Overrides
+# ============================================================================
+
+stages:
+
+  # --------------------------------------------------------------------------
+  # Stage 0: Data Transformation (include reasoning traces)
+  # --------------------------------------------------------------------------
+  data_transformation:
+    reasoning_mode: thinking
+
+  # --------------------------------------------------------------------------
+  # Stage 1: Prepare for SFT - Gemma3-27B-IT tokenizer
+  # --------------------------------------------------------------------------
+  # All Gemma3 variants (1B, 4B, 27B) share the same 262K vocab tokenizer
+  prepare_for_sft:
+    prepare_data_kwargs:
+      ctx_args: >-
+        ++tokenizer=/hf_models/google/gemma-3-27b-it
+        ++prompt_config=project://prompts/secque_template.yaml
+        ++chat_template_kwargs.enable_thinking=true
+
+  # --------------------------------------------------------------------------
+  # Stage 2: Train/Validation Split - larger sequence length
+  # --------------------------------------------------------------------------
+  train_validation_split:
+    max_token_length: 32768
+
+  # --------------------------------------------------------------------------
+  # Stage 3: Sequence Length Grouping - Gemma3-27B-IT tokenizer
+  # --------------------------------------------------------------------------
+  sequence_length_grouping:
+    tokenizer_path: /hf_models/google/gemma-3-27b-it
+    bucket_sizes:
+      - 8192
+      - 16384
+      - 24576
+      - 32768
+
+  # --------------------------------------------------------------------------
+  # Stage 4: Training - Gemma3-27B-IT configuration (FSDP2 backend)
+  # --------------------------------------------------------------------------
+  # FSDP2 preferred for Gemma3: avoids Megatron logprob OOM (262K vocab fp32 .exp()),
+  # supports activation checkpointing (Megatron fails with save_for_backward tuple error),
+  # and matches NVIDIA's own Gemma3 test configs (FSDP2, not Megatron).
+  #
+  # TP=8 splits 262K vocab across 8 GPUs → ~32K vocab/GPU
+  # Logit tensor at 16K seq: 16K × 32K × 4 bytes ≈ 2 GiB (fits comfortably)
+  # Logit tensor at 32K seq: 32K × 32K × 4 bytes ≈ 4 GiB (fits with act ckpt)
+  # Gemma3-27B has 16 GQA KV heads → TP up to 16 possible, TP=8 is intra-node
+  # --------------------------------------------------------------------------
+  training:
+    model_name: google/gemma-3-27b-it
+    hf_checkpoint_path: /hf_models/google/gemma-3-27b-it
+
+    # Use FSDP2/Automodel backend (preferred for Gemma3 — avoids Megatron logprob OOM)
+    backend: fsdp
+
+    # Cluster configuration for 27B model
+    total_gpus: 16
+    dependent_jobs: 0        # No dependent jobs
+
+    # Use base preset with model-specific overrides
+    preset: "sft-base"
+
+    # Gemma3-27B-IT specific configuration (only non-default values)
+    overrides:
+      sft:
+        max_num_epochs: 2
+        val_period: 50
+
+      checkpointing:
+        save_period: 100
+        checkpoint_must_save_by: "00:03:40:00"
+
+      policy:
+        max_total_sequence_length: 16384  # 16K — conservative start (TP=8 could support 32K: ~4 GiB logit/GPU)
+        train_global_batch_size: 128
+
+        # Dynamic batching: adjusts micro batch size based on actual sequence lengths
+        # Prevents OOM on long-sequence batches (matches NVIDIA Gemma3 nightly config)
+        dynamic_batching:
+          enabled: true
+          train_mb_tokens: ${stages.training.overrides.policy.max_total_sequence_length}
+
+        # Sequence packing: disabled (Gemma3 does not support packed_seq_params)
+        sequence_packing:
+          enabled: false
+
+        # FSDP2 parallelism: TP=8, CP=1 → DP = 16/8 = 2
+        # TP=8: Gemma3-27B has 16 GQA KV heads (16 % 8 == 0 ✓)
+        # TP=8 keeps all TP communication intra-node (fast NVLink)
+        # This TP plan is not yet validated on the Automodel backend.
+        # Ref: github.com/NVIDIA-NeMo/RL/blob/main/examples/configs/recipes/llm/
+        #   grpo-gemma3-27b-it-8n8g-fsdp2tp8-actckpt-long.yaml
+        automodel_cfg:
+          activation_checkpointing: true   # Works with FSDP2 (fails on Megatron for Gemma3)
+          tensor_parallel_size: 8
+
+        # Make sequence length divisible by TP (matches NVIDIA nightly pattern)
+        make_sequence_length_divisible_by: 8
+
+        # FSDP optimizer (PyTorch native)
+        optimizer:
+          kwargs:
+            lr: 5.0e-6
+            weight_decay: 0.01
+
+      data:
+        max_input_seq_length: ${stages.training.overrides.policy.max_total_sequence_length}
+        force_reprocess: false
+
+  # --------------------------------------------------------------------------
+  # Stage 4b: Training - Gemma3-27B-IT configuration (Megatron backend - REFERENCE)
+  # --------------------------------------------------------------------------
+  # Megatron backend has known issues with Gemma3:
+  #   - 262K vocab → fp32 logit .exp() OOM in DistributedLogprob (NLLLoss non-chunked)
+  #   - activation_checkpointing fails (save_for_backward tuple error)
+  #   - Unused VLModel params → overlap_grad_reduce assertion error
+  # Kept for reference; use FSDP2 (training stage above) instead.
+  # --------------------------------------------------------------------------
+  training_megatron:
+    model_name: google/gemma-3-27b-it
+    hf_checkpoint_path: /hf_models/google/gemma-3-27b-it
+
+    # Use Megatron backend
+    backend: megatron
+
+    # Cluster configuration for 27B model
+    total_gpus: 16
+    dependent_jobs: 0        # No dependent jobs
+
+    # Use base preset with model-specific overrides
+    preset: "sft-base"
+
+    # Gemma3-27B-IT specific configuration (only non-default values)
+    overrides:
+      sft:
+        max_num_epochs: 2
+        val_period: 10
+
+      checkpointing:
+        save_period: 10
+        checkpoint_must_save_by: "00:03:40:00"
+
+      policy:
+        max_total_sequence_length: 8192   # 8K — smoke test with short sequences only
+        train_global_batch_size: 16       # Reduced: only 41 samples in 8K bucket
+
+        # Sequence packing: disabled (Gemma3 does not support packed_seq_params)
+        sequence_packing:
+          enabled: false
+
+        # Megatron parallelism: TP × PP × CP = 8×1×1 = 8 → DP = 16/8 = 2
+        # TP=8: Gemma3-27B has 16 GQA KV heads (16 % 8 == 0 ✓)
+        # TP=8 keeps all TP communication intra-node (fast NVLink)
+        # CP disabled: Gemma3 doesn't support sequence packing (required for CP)
+        megatron_cfg:
+          # Reduce CUDA memory fragmentation
+          env_vars:
+            PYTORCH_ALLOC_CONF: "expandable_segments:True"
+
+          tensor_model_parallel_size: 8
+          context_parallel_size: 1
+          sequence_parallel: true
+          activation_checkpointing: false  # Gemma3 incompatible (save_for_backward tuple error)
+          bias_activation_fusion: false    # Required: Gemma3 uses gelu_approximate, not swiglu
+          defer_fp32_logits: true          # Keeps logits bf16 in model output (OOM still occurs in loss path)
+
+          # Disable overlapped grad reduce: Gemma3 VLModel has unused param buckets
+          # that trigger "Communication call has not been issued" assertion
+          distributed_data_parallel_config:
+            overlap_grad_reduce: false
+            overlap_param_gather: false
+
+          optimizer:
+            min_lr: 5e-7
+
+          scheduler:
+            lr_decay_style: "cosine"
+            lr_warmup_iters: 1
+            lr_warmup_init: 1e-7
+
+      data:
+        max_input_seq_length: ${stages.training_megatron.overrides.policy.max_total_sequence_length}
+        force_reprocess: false

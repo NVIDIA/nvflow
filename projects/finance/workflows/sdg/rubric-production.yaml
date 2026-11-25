@@ -1,0 +1,138 @@
+# Finance rubric generation at production scale.
+#
+# The rubric-smoke configs beside this one run the same stage and, in
+# rubric-smoke-openrubric's case, the same contrastive method. They differ in scale
+# and portability, not behaviour: 20 records against placeholder model and
+# cluster paths, so they run anywhere. This file carries the real checkpoint,
+# the real budgets, and the settings the Vals V2 campaign measured.
+#
+# One config covers every input shape, because the arm is chosen per record
+# rather than per run. Set RUBRIC_INPUT_FILE and go; mixing shapes in one file
+# is fine.
+#
+# 1. Rollouts only, no source document. This is the shape to use when you have
+#    a correct and a wrong rollout per question and nothing else. The contrast
+#    between the two answers is what grounds the rubric, so no context is
+#    needed:
+#      {"id", "question",
+#       "preferred_answer": <correct rollout>, "rejected_answer": <wrong rollout>}
+#    Equivalently, with a ranked list:
+#      {"id", "question",
+#       "candidate_answers": [<correct>, <wrong>], "preferred_index": 0}
+#    If you use candidate_answers you must also send preferred_index. Without
+#    it the record falls through to shape 3 instead and the real negative is
+#    discarded.
+#
+# 2. Real negative with a document. Same as 1 plus context, which then
+#    outranks both answers wherever they conflict with it:
+#      {"id", "question", "context", "reference_answer", "metadata",
+#       "candidate_answers": [<gold>, <judged-wrong rollout>], "preferred_index": 0}
+#
+# 3. Synthetic negative. No wrong answer exists, so the model writes one:
+#      {"id", "question", "context", "reference_answer", "metadata",
+#       "preferred_answer": <gold>}
+#    Context is optional here too, but this is the shape that loses the most
+#    without it. Nothing can catch an error in the single answer, so whatever
+#    it says becomes the rubric's gold, and every lookalike is invented rather
+#    than taken from a real adjacent figure. Usable, measurably weaker.
+#
+# Only the simple method truly requires a context, because it writes criteria
+# straight from the document and has no answer to work from.
+#
+# Only a judge rating of 0 belongs in candidate_answers. Rating 1 is partial,
+# and there is no way to tell which part of a partial answer was wrong, so it
+# makes an ambiguous contrast.
+#
+# A correct rollout works as the preferred answer, but a gold reference answer
+# is stronger where you have one: a judge rates the final answer, not the
+# figures quoted along the way, so a rollout's supporting numbers can be wrong
+# and would become criteria.
+#
+# Real negatives are not the better arm. Measured on 338 Vals V2 questions held
+# in both, a wrong answer passed 12.65% of the criteria built from a real
+# negative and 13.16% of those built from a synthetic one. Use a real negative
+# where a judged-wrong rollout exists because you already have it, not because
+# it produces a stronger rubric.
+#
+# Sized from the Vals V2 campaign: 5,753 questions, 53,780 criteria, a wrong
+# answer passing 12.7% of the checkable criteria against 35% before the
+# gold/lookalike prompt change.
+workflow:
+  name: finance_rubric_generation
+  type: rubric
+  description: "Production finance rubrics, contrastive, real or synthetic negative per record"
+  runnable: true
+
+cluster: my_cluster_rubric
+
+# Contrastive, not simple: criteria written from a reference answer alone
+# describe what a good answer discusses rather than what it has to get right,
+# and a wrong answer passed 35% of them.
+method: openrubric_contrastive
+input_format: canonical
+
+rubric_output_root: ${oc.env:RUBRIC_OUTPUT_ROOT,/workspace/outputs/finance/rubric-generation}
+base_output_dir: ${rubric_output_root}/rubrics
+rubric_input_file: ${oc.env:RUBRIC_INPUT_FILE,${rubric_output_root}/step-0-input/input.jsonl}
+# GLM-5.3-Flash, not full GLM5.3: rubric generation is single-turn JSON, so
+# the 704 GB two-node checkpoint buys nothing here.
+rubric_model_checkpoint: /hf_models/GLM-5.3-Flash
+# Raise to your line count. Records past this are silently skipped.
+max_records: 6000
+
+pipeline_stages:
+  - build_rubrics
+
+stages:
+  build_rubrics:
+    uses: rubric.build
+    contract_version: 1
+    input_file: ${rubric_input_file}
+    output_dir: ${base_output_dir}
+    output_file: ${base_output_dir}/step-2-rubrics/rubrics.jsonl
+    method: ${method}
+    input_format: ${input_format}
+    max_records: ${max_records}
+    field_map:
+      id: [id, uuid, source_id]
+      question: [question, problem]
+      context: [context, source_context]
+      reference_answer: [reference_answer, expected_answer, answer]
+      candidate_answers: [candidate_answers, solutions]
+      preferred_index: [preferred_index, selected_index]
+      preferred_answer: [preferred_answer, chosen_answer]
+      rejected_answer: rejected_answer
+    # 16384, not 4096: the synthetic-negative branch asks for a whole counterfeit
+    # answer, and at 4096 it truncated 48 of round 4's 100 records mid-reasoning.
+    ranking_inline_args: >-
+      ++inference.temperature=0.0
+      ++inference.tokens_to_generate=16384
+      ++max_concurrent_requests=32
+    # 32768, not 16384: generation writes a whole rubric and needs more room
+    # than ranking. At 16384 the V2 synthetic arm lost 93 of 279 records, every
+    # one of them to a generation that ran out mid-reasoning without emitting
+    # JSON. Concurrency halves because each request can hold twice the KV cache.
+    generation_inline_args: >-
+      ++inference.temperature=0.0
+      ++inference.tokens_to_generate=32768
+      ++max_concurrent_requests=16
+    stage_kwargs:
+      model: ${rubric_model_checkpoint}
+      server_type: vllm
+      server_gpus: 4
+      server_nodes: 1
+      # One chunk per 4 GPUs, so this asks for 24. Raise for throughput, but
+      # note that the parse stage waits on every chunk: if one never gets a
+      # node, the finished generations in the others stay unusable until
+      # recovered by hand.
+      num_chunks: 6
+      # 131072, not 32768: the V1 sample this stage was sized for topped out at
+      # ~14.7k tokens, but V2 contexts reach 66k, and 32768 could not even hold
+      # the prompt plus the generation budget -- every V2 real-negative chunk
+      # died with ContextWindowExceededError at 32769 tokens. The 32768 pin came
+      # from GLM5.3, whose sparse-MLA hits a broken SplitKV path on SM100; Flash
+      # is a different checkpoint and has run the rollout arm at 131072 for
+      # 10,000 trajectories with no asserts, on this same 4-GPU single-node
+      # topology.
+      server_args: "--max-model-len 131072"
+    dependencies: []

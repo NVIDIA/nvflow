@@ -1,17 +1,22 @@
 # Tests
 
-This directory contains tests for NVFlow.
+This directory contains platform contract and cross-project integration tests.
+Project-owned behavior is tested beside each maintained project under
+`projects/<name>/tests/`.
 
 ## Running Tests
 
 ```bash
-# Run all tests
+# Complete platform and recipe suite
 uv run pytest
 
-# Run tests in parallel
+# Lightweight tests that do not require the NeMo dependency stack
+uv run pytest -m "not requires_nemo"
+
+# Parallel execution
 uv run pytest -n auto
 
-# Run specific test file
+# One test module
 uv run pytest tests/test_core.py
 
 # Run with coverage
@@ -20,12 +25,20 @@ uv run pytest --cov=nvflow --cov-report=html
 
 ## Test Structure
 
-```
+```text
 tests/
-├── conftest.py         # Pytest fixtures
-├── test_core.py        # Core functionality tests
-└── README.md           # This file
+├── fixtures/                    # Stable command/config snapshots
+├── test_architecture_*.py       # Package and dependency boundaries
+├── test_project_*.py            # Project/recipe contracts and packaging
+├── test_workflow_*.py           # Workflow loading and validation
+└── test_*.py                    # Platform integration and utility tests
+
+projects/<name>/tests/           # Domain behavior owned by that project
 ```
+
+Project-environment tests use temporary caches and verify each project resolves
+without installing sibling projects. Normal unit tests disable transparent CLI
+handoff so in-process fakes remain deterministic.
 
 ## Writing Tests
 
@@ -39,24 +52,19 @@ def test_my_function():
     assert result == expected_output
 ```
 
-### Integration Tests
+### Full-dependency tests
 
-Test multiple components working together:
+Tests requiring the installed NeMo-Skills/NeMo-Run stack use the only registered
+marker:
 
 ```python
-@pytest.mark.integration
-def test_workflow_integration(tmp_path):
-    # Set up test workflow
-    config_path = tmp_path / "config.yaml"
-    # ... create config
-
-    # Run workflow
-    runner = WorkflowRunner(str(config_path))
-    runner.run()
-
-    # Verify results
-    assert output_exists()
+@pytest.mark.requires_nemo
+def test_workflow_plan():
+    ...
 ```
+
+Pytest uses strict marker validation. Add any new marker to `pyproject.toml`
+before using it.
 
 ### Fixtures
 
@@ -73,9 +81,8 @@ def test_with_fixture(sample_data):
 
 ## Test Coverage
 
-Aim for >80% code coverage for core components.
-
-View coverage report:
+Coverage identifies untested behavior but is not a substitute for contract,
+snapshot, and boundary assertions. View the generated report:
 ```bash
 uv run pytest
 # Open htmlcov/index.html in browser
@@ -83,7 +90,5 @@ uv run pytest
 
 ## Continuous Integration
 
-Tests run automatically on:
-- Pull requests
-- Commits to main branch
-- Pre-commit hooks (optional)
+CI separates lightweight and full-dependency lanes. Pre-commit runs formatting,
+linting, type checking, license checks, and dependency-policy validation.

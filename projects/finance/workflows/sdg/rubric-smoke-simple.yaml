@@ -1,0 +1,68 @@
+# Controlled 20-record finance smoke test for the shared rubric.build stage.
+# OpenRubric inherits this file so both arms use the same source rows, model,
+# and execution geometry.
+workflow:
+  name: rubric_generation_smoke
+  type: rubric
+  description: "20-record smoke test of the rubric stage, Simple method, no negative"
+  runnable: true
+
+cluster: my_cluster
+
+method: simple
+input_format: canonical
+rubric_output_root: ${oc.env:RUBRIC_OUTPUT_ROOT,/workspace/outputs/finance/rubric-generation-smoke}
+base_output_dir: ${rubric_output_root}/simple
+rubric_input_file: ${oc.env:RUBRIC_INPUT_FILE,/data/rubric-input.jsonl}
+rubric_model_checkpoint: ${oc.env:RUBRIC_MODEL_CHECKPOINT,/models/rubric-generator}
+max_records: 20
+
+pipeline_stages:
+  - build_rubrics
+
+stages:
+  build_rubrics:
+    uses: rubric.build
+    contract_version: 1
+    input_file: ${rubric_input_file}
+    output_dir: ${base_output_dir}
+    output_file: ${base_output_dir}/step-2-rubrics/rubrics.jsonl
+    method: ${method}
+    input_format: ${input_format}
+    max_records: ${max_records}
+    field_map:
+      id: [id, uuid, source_id]
+      question: [question, problem]
+      context: [context, source_context]
+      reference_answer: [reference_answer, expected_answer, answer]
+      candidate_answers: [candidate_answers, solutions]
+      preferred_index: [preferred_index, selected_index]
+      preferred_answer: [preferred_answer, chosen_answer]
+      rejected_answer: rejected_answer
+    # Both budgets are 16384 because both prompts now ask for a whole document.
+    # Ranking writes the synthetic negative, a full-length answer in which every
+    # material figure differs; at 4096 it truncated 48 of 100 records mid-
+    # reasoning and emitted no JSON, and at 1024 it cannot finish at all.
+    # Generation writes the rubric, and 4096 rejected every record in the first
+    # round for the same reason.
+    #
+    # A 16384 budget only leaves room for a prompt if the served window is well
+    # past 32768. On a 32768 window this stage fails outright rather than
+    # degrading: a 16385-token prompt plus the budget is 32769, and every chunk
+    # dies with ContextWindowExceededError. Agentic contexts reach 66k, so size
+    # the server to the corpus, not to this file.
+    ranking_inline_args: >-
+      ++inference.temperature=0.0
+      ++inference.tokens_to_generate=16384
+      ++max_concurrent_requests=64
+    generation_inline_args: >-
+      ++inference.temperature=0.0
+      ++inference.tokens_to_generate=16384
+      ++max_concurrent_requests=64
+    stage_kwargs:
+      model: ${rubric_model_checkpoint}
+      server_type: sglang
+      server_gpus: 8
+      server_nodes: 2
+      num_chunks: 1
+    dependencies: []

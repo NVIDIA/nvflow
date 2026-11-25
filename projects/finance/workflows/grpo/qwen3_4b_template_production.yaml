@@ -1,0 +1,61 @@
+# Qwen3-4B GRPO using the S&P 500 template-SDG dataset.
+_base_: qwen3_4b.yaml
+scope: sp500
+_production_judge: &production_judge
+  model: /hf_models/openai/gpt-oss-120b
+  num_gpus: 4
+  server_nodes: 1
+  gym_model:
+    uses_reasoning_parser: true
+    return_token_id_information: false
+    vllm_serve_kwargs:
+      reasoning_parser: openai_gptoss
+      max_model_len: 32768
+      async_scheduling: true
+  deployment: nvflow
+environments:
+  equivalence_llm_judge:
+    raw_train_data: /workspace/outputs/finance/sp500/workflow-3-template-based-sdg/step-5-filter-answers
+    models:
+      judge: *production_judge
+  finance_sec_search:
+    config_paths:
+      - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
+    models:
+      policy:
+        num_gpus: 4
+        gym_model:
+          vllm_serve_kwargs:
+            max_model_len: 131072
+            hf_config_overrides:
+              rope_scaling:
+                rope_type: yarn
+                factor: 3.2
+                original_max_position_embeddings: 40960
+      judge: *production_judge
+stages:
+  validate_questions:
+    source_data: /workspace/outputs/finance/sp500/workflow-3-template-based-sdg/step-5-filter-answers
+  collect_rollouts:
+    rollout:
+      models:
+        policy:
+          model: ${hf_model_path}
+          num_gpus: 4
+          server_nodes: 1
+          gym_model:
+            vllm_serve_kwargs:
+              max_model_len: 32768
+              dtype: bfloat16
+              enable_auto_tool_choice: true
+              tool_call_parser: hermes
+              reasoning_parser: qwen3
+          deployment: nvflow
+  # The S&P 500 data trains for 20 steps; the demo it builds on stops at 10.
+  training:
+    overrides:
+      grpo:
+        max_num_steps: 20
+  eval:
+    eval_steps: [20]
+    eval_data_root: /workspace/outputs/finance/baselines/step-1-eval-data  # prepared by eval/baselines

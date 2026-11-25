@@ -1,0 +1,63 @@
+# ============================================================================
+# Relational SDG — Beat-or-Miss variant
+# ============================================================================
+# Beat-or-Miss is ONE instantiation of relational SDG: it pairs a management
+# guidance/target from an earlier filing with the actual reported result in a
+# later filing and asks whether the company beat / met / missed it (with a
+# quantitative delta). Over the base relational config it:
+#   1. turns on the guidance pre-filter (only keep contexts containing
+#      forward-looking language), and
+#   2. swaps the generic question prompt for the beat-or-miss prompt, and
+#   3. boosts 8-K Item 2.02 (results-of-operations) in the multi-period sampler.
+#
+# Run:
+#   uv run nvflow run --all --config projects/finance/workflows/sdg/relational-sdg-beat-or-miss.yaml --cluster my_cluster
+# ============================================================================
+
+_base_: relational-sdg.yaml
+
+workflow:
+  # Distinct name so NeMo-Run experiment names (and their stale-experiment
+  # cleanup) do not collide with other relational SDG variants running at once.
+  name: "rsdg_beat_or_miss_vals_noweb"
+  type: "sdg"
+  description: "Relational SDG — Beat-or-Miss (guidance vs actual) questions"
+
+base_data_dir: /workspace/outputs/finance/vals-noweb/relational-sdg-beat-or-miss
+
+# Beat-or-Miss is another weighted RSDG configuration, not a separate SDG
+# method. Stop after verified questions; the shared agentic workflow generates
+# and selects full tool-use trajectories across all VALS question sources.
+pipeline_stages:
+  - dg_sdg_preprocess
+  - generate_verified_questions
+
+stages:
+  dg_sdg_preprocess:
+    # Keep the complete historical allocation explicit so this focused recipe
+    # does not silently change when the generic RSDG defaults evolve.
+    extra_args:
+      multi_period_weight: 0.35
+      cross_form_weight: 0.15
+      cross_form_multi_period_weight: 0.15
+      same_year_multi_filing_weight: 0.20
+      multi_form_weight: 0.05
+      multi_company_multi_year_weight: 0.0
+      multi_company_cross_form_weight: 0.0
+      guidance_prefilter: true
+      # Bias 8-K / 8-K_A multi-period sampling toward Item 2.02 (results of
+      # operations) pairs, where beat-or-miss guidance-vs-actual lives.
+      multi_period_section_boost: '{"8-K": {"2-2": 5.0}, "8-K_A": {"2-2": 5.0}}'
+      multi_period_max_periods: '{"8-K": 6, "8-K_A": 6, "10-K": 4, "10-Q": 4}'
+      same_year_multi_filing_min: 3
+      same_year_multi_filing_max: 5
+
+  # Swap the generic DG-SDG question prompt for the beat-or-miss prompt (only the
+  # Q-generation sub-step changes; verify/answer/genselect are inherited).
+  generate_verified_questions:
+    question_generation_kwargs:
+      ctx_args: >-
+        ++prompt_config=project://prompts/dg_generate_beat_or_miss.yaml
+        ++inference.temperature=0.9
+        ++inference.top_p=0.9
+        ++chat_template_kwargs.reasoning_effort=high

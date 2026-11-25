@@ -1,0 +1,13 @@
+# Controlled OpenRubric arm. Inheriting the complete Simple smoke workflow
+# guarantees that method and output root are the only experiment differences.
+#
+# This runs the same contrastive method as production.yaml, synthetic negatives
+# included. It is a 20-record test of that method on placeholder paths, not a
+# different pipeline.
+_base_: rubric-smoke-simple.yaml
+
+workflow:
+  description: "20-record smoke test of the rubric stage, OpenRubric contrastive method"
+
+method: openrubric_contrastive
+base_output_dir: ${rubric_output_root}/openrubric

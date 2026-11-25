@@ -40,8 +40,7 @@ from __future__ import annotations
 import string
 
 import pytest
-
-from nvflow.recipes.finance.utils.rl.regex_prefilter_questions import (
+from nvfinance.utils.rl.regex_prefilter_questions import (
     _NON_COMPANY_TOKENS,
     _has_proper_noun_mid_sentence,
     _has_ticker,

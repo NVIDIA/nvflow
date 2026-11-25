@@ -26,10 +26,9 @@ from pathlib import Path
 
 import orjson
 import pytest
-
-from nvflow.recipes.finance.utils.rl.apply_validate_filter import apply_validate_filter
-from nvflow.recipes.finance.utils.rl.parse_validate_responses import parse_validate_responses
-from nvflow.recipes.finance.utils.rl.postprocess_validate import postprocess_validate
+from nvfinance.utils.rl.apply_validate_filter import apply_validate_filter
+from nvfinance.utils.rl.parse_validate_responses import parse_validate_responses
+from nvfinance.utils.rl.postprocess_validate import postprocess_validate
 
 # ---------------------------------------------------------------------------
 # Fixture builders
@@ -226,7 +225,7 @@ def test_orchestrator_emits_sentinel_logs(tmp_path: Path) -> None:
     """
     import logging
 
-    from nvflow.recipes.finance.utils.rl import postprocess_validate as orchestrator_module
+    from nvfinance.utils.rl import postprocess_validate as orchestrator_module
 
     captured: list[str] = []
 

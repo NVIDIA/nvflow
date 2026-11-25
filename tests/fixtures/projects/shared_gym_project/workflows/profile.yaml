@@ -1,0 +1,57 @@
+workflow:
+  name: profile
+  type: evaluation
+cluster: my_cluster
+pipeline_stages:
+  - prepare_data
+  - collect_rollouts
+  - build_training_dataset
+stages:
+  prepare_data:
+    uses: nemo_gym.collate
+    contract_version: 1
+    output_dir: /workspace/outputs/shared-gym/prepared
+    gym_path: /opt/nemo-gym
+    container: nemo-gym
+    shuffle: false
+    environments: &environments
+      example:
+        enabled: true
+        source_data: /workspace/inputs/example/input.jsonl
+        input_data: /workspace/outputs/shared-gym/prepared/example/train.jsonl
+        output_name: example
+        config_paths:
+          - resources_servers/example/configs/example.yaml
+        agent_name: example_agent
+  collect_rollouts:
+    uses: nemo_gym.collect
+    contract_version: 1
+    output_dir: /workspace/outputs/shared-gym/rollouts
+    container: nemo-gym
+    vllm_container: vllm
+    environments: *environments
+    dependencies: [prepare_data]
+    rollout:
+      num_repeats: 2
+      num_chunks: 1
+      dependent_jobs: 0
+      models:
+        policy:
+          deployment: external
+          model: example-model
+          model_type: openai_model
+          base_url: https://example.invalid/v1
+          api_key_env: EXAMPLE_API_KEY
+  build_training_dataset:
+    uses: nemo_gym.build_training_dataset
+    contract_version: 1
+    source: /workspace/outputs/shared-gym/prepared/example/train.jsonl
+    profile: /workspace/outputs/shared-gym/rollouts/example/jobs/job-1-analyze-rollouts/outputs/rollouts_reward_profiling.jsonl
+    materialized_inputs: /workspace/outputs/shared-gym/rollouts/example/jobs/job-1-analyze-rollouts/outputs/rollouts_materialized_inputs.jsonl
+    rollouts: /workspace/outputs/shared-gym/rollouts/example/jobs/job-1-analyze-rollouts/outputs/rollouts.jsonl
+    rollout_completion: /workspace/outputs/shared-gym/rollouts/example/jobs/job-1-analyze-rollouts/completion.json
+    output_dir: /workspace/outputs/shared-gym/selected
+    container: nemo-gym
+    dependencies: [collect_rollouts]
+    dataset_selection:
+      mode: all

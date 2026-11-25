@@ -1,0 +1,17 @@
+_base_: base.yaml
+
+workflow:
+  description: "Download SEC filings for the S&P 500 production scope"
+  runnable: true
+
+scope: sp500
+
+stages:
+  download:
+    config: project://configs/sp500.yaml
+
+  prefetch_cache:
+    # Tickers the fabv1 questions ask about that SEC's company_tickers.json does
+    # not resolve: companies outside the S&P 500, and ones whose ticker SEC
+    # dropped after a delisting or rename.
+    supplementary_tickers: /opt/nemo-gym/benchmarks/finance_sec_search/data/supplementary_tickers.json

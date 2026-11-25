@@ -1,0 +1,11 @@
+# VALS 1.1, workflow 2 for the SFT set's held-out questions, with web search.
+_base_: vals11-teacher.yaml
+
+workflow:
+  name: "vals11-teacher-sft-held-out-web-on"
+  description: "Collect teacher answers to the VALS 1.1 SFT set's held-out questions with web search"
+  runnable: true
+
+question_set: sft
+dataset: held_out_web_on
+teacher_chunks: 1

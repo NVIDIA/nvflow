@@ -1,0 +1,35 @@
+# ============================================================================
+# SECQUE question prompt (eval)
+# ============================================================================
+# The "Financial Prompt" from the SECQUE paper, verbatim:
+#   "SECQUE: A Benchmark for Evaluating Real-World Financial Analysis
+#   Capabilities" (Ben Yoash et al., 2024), Appendix B
+#   https://arxiv.org/pdf/2504.04596
+#
+# Used instead of the benchmark's own prompt so that evaluation measures the
+# wording the rest of the project uses. The paper reports prompt choice as its
+# most impactful ablation, and the two wordings differ by ~3.6 points on
+# GPT-OSS-20B.
+#
+# Must stay word-for-word identical to
+# project://prompts/secque_template.yaml, which SDG, SFT, GRPO and
+# the nemo-skills eval all render. The only permitted difference is the question
+# placeholder: Gym substitutes from the prepared record, whose field is
+# `question`, while the rest of the project uses `problem`.
+# tests/test_prompt_parity.py enforces this.
+# ============================================================================
+
+user: |
+  You are given a financial text extracted from 10-K or 10-Q files and a question written by domain experts. Your task is to answer the question based only on the provided context. Do not use any additional context. Your answer should be concise and accurate. In case you are unable to answer the question, you should state that you can't answer the question. Do not guess and do not suggest your own solutions.
+
+  Input:
+  • Document: {context}
+  • Question: {question}
+
+  Output:
+  • Think through the problem step by step if needed
+  • Conclude with your final answer prefixed by "Answer:"
+
+  Example format:
+  [Your reasoning here]
+  Answer: [Your concise answer]

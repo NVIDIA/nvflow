@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Tests for nvflow.lib.cli_cmd.build_python_cmd.
+"""Tests for nvflow.execution.commands.build_python_cmd.
 
 Pins the shlex-quoting + interpreter contract so future refactors can't
 accidentally reintroduce a path-injection vector via the rendered shell
@@ -27,7 +27,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-from nvflow.lib.cli_cmd import build_python_cmd, build_python_script_cmd
+from nvflow.execution.commands import build_python_cmd, build_python_script_cmd
 
 
 def test_emits_module_invocation() -> None:
@@ -203,13 +203,13 @@ def test_script_cmd_quotes_path_with_spaces() -> None:
 def test_script_cmd_accepts_pathlib_script() -> None:
     """Stage code may pass a pathlib.Path script -- helper must stringify."""
     out = build_python_script_cmd(
-        Path("/opt/Gym/scripts/prefetch.py"),
+        Path("/opt/nemo-gym/scripts/prefetch.py"),
         cache_dir=Path("/cache/finance"),
         ticker_config=Path("/configs/sp500.yaml"),
     )
     tokens = shlex.split(out)
     assert tokens[0] == "python3"
-    assert tokens[1] == "/opt/Gym/scripts/prefetch.py"
+    assert tokens[1] == "/opt/nemo-gym/scripts/prefetch.py"
     assert "--cache_dir" in tokens
     assert tokens[tokens.index("--cache_dir") + 1] == "/cache/finance"
 

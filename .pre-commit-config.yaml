@@ -20,6 +20,16 @@ repos:
         types: [python]
         pass_filenames: true
 
+  # Project environments must render the same uv policy as pyproject.toml
+  - repo: local
+    hooks:
+      - id: check-project-environment-policy
+        name: check-project-environment-policy
+        entry: python scripts/check_project_environment_policy.py
+        language: system
+        files: ^(pyproject\.toml|dockerfiles/Dockerfile\.nemo-skills|nvflow/project/_environment_policy/|scripts/check_project_environment_policy\.py)$
+        pass_filenames: false
+
   # DCO: require Signed-off-by in commit message
   - repo: local
     hooks:

@@ -1,8 +1,0 @@
-{"prompt": "What is 2+2?", "option_a": "4", "option_b": "5"}
-{"prompt": "What color is the sky?", "option_a": "Blue", "option_b": "Red"}
-{"prompt": "How many days in a week?", "option_a": "7", "option_b": "10"}
-{"prompt": "Is Python a programming language?", "option_a": "Yes", "option_b": "No"}
-{"prompt": "What is the capital of France?", "option_a": "Paris", "option_b": "London"}
-{"prompt": "Can fish swim?", "option_a": "Yes", "option_b": "No"}
-{"prompt": "Is the Earth flat?", "option_a": "No", "option_b": "Yes"}
-{"prompt": "What comes after Monday?", "option_a": "Tuesday", "option_b": "Friday"}

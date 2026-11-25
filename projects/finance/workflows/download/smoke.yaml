@@ -1,0 +1,16 @@
+_base_: base.yaml
+
+workflow:
+  description: "Download SEC filings for the two-company smoke scope"
+  runnable: true
+
+scope: smoke
+
+# No eval or training consumer reads a smoke metadata cache.
+pipeline_stages:
+  - download
+  - build_index
+
+stages:
+  download:
+    config: project://configs/smoke.yaml

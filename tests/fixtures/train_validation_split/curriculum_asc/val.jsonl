@@ -1,0 +1,8 @@
+{"uuid": "q-004", "input": "Question 4: what is the ratio for filing 4? — €4", "total_token_length": 68, "metadata": {"source": "doc-0"}, "question_type": "numeric", "difficulty_profile": {"avg_reward": 0.48}}
+{"uuid": "q-032", "input": "Question 32: what is the ratio for filing 32? — €32", "output": "Answer 32", "total_token_length": 84, "metadata": {"source": "doc-0"}, "question_type": "free_text", "difficulty_profile": {"avg_reward": 0.84}}
+{"uuid": "q-031", "input": "Question 31: what is the ratio for filing 31? — €31", "output": "Answer 31", "total_token_length": 77, "metadata": {"source": "doc-3"}, "question_type": "free_text", "difficulty_profile": {"avg_reward": 0.47}}
+{"uuid": "q-024", "input": "Question 24: what is the ratio for filing 24? — €24", "output": "Answer 24", "total_token_length": 118, "metadata": {"source": "doc-0"}, "question_type": "boolean", "difficulty_profile": {"avg_reward": 0.88}}
+{"uuid": "q-036", "input": "Question 36: what is the ratio for filing 36? — €36", "output": "Answer 36", "total_token_length": 112, "metadata": {"source": "doc-0"}, "difficulty_profile": {"avg_reward": 0.32}}
+{"uuid": "q-003", "input": "Question 3: what is the ratio for filing 3? — €3", "output": "Answer 3", "total_token_length": 61, "metadata": {"source": "doc-3"}, "question_type": "numeric"}
+{"uuid": "q-009", "input": "Question 9: what is the ratio for filing 9? — €9", "output": "Answer 9", "metadata": {"source": "doc-1"}, "question_type": "numeric", "difficulty_profile": {"avg_reward": 0.33}}
+{"uuid": "q-018", "input": "Question 18: what is the ratio for filing 18? — €18", "output": "Answer 18", "total_token_length": 76, "metadata": {"source": "doc-2"}, "question_type": "boolean"}

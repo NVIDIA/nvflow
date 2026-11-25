@@ -1,0 +1,352 @@
+# ============================================================================
+# GRPO Training Presets - NeMo-RL + NeMo-Gym (Full Preset)
+# ============================================================================
+# Model-independent default configurations for GRPO RL training.
+# These presets are merged with model-specific overrides in workflow YAMLs.
+#
+# This is a FULL preset (like SFT) -- every parameter we pass is explicit.
+# Model configs (e.g., qwen3_4b.yaml) override model-specific values.
+#
+# Aligned with the NeMo-Gym example configs in the selected NeMo-RL image.
+#
+# Deviations from the NeMo-Gym example are marked with:
+#   [FINANCE] -- intentional change for our open-QA / finance setup
+#   [FIX]     -- upstream bug workaround
+#   [MANAGED] -- key is set at runtime via ++key=value CLI args
+#                (last-write-wins) by the nemo_rl.grpo stage
+#
+# The full preset is written as a YAML file and passed to
+# run_grpo_nemo_gym.py via --config.  Runtime overrides
+# (model_name, cluster, checkpoint_dir, data paths, etc.) are applied
+# on top via ++key=value CLI args by the nemo_rl.grpo stage.
+# ============================================================================
+presets:
+  grpo-base:
+    # ========================================================================
+    # GRPO Algorithm Configuration
+    # ========================================================================
+    grpo:
+      max_num_epochs: 1
+      num_prompts_per_step: 64
+      num_generations_per_prompt: 16
+      max_rollout_turns: 1
+      max_num_steps: 1000000
+      normalize_rewards: true
+      use_leave_one_out_baseline: true
+      val_period: 10
+      val_at_start: true
+      val_at_end: true
+      overlong_filtering: false
+      max_val_samples: null # Inferred from validation dataset size
+      val_batch_size: null
+      seed: 42
+      use_dynamic_sampling: false
+      dynamic_sampling_max_gen_batches: 10
+      batch_multiplier: 1
+      skip_reference_policy_logprobs_calculation: true
+      calculate_advantages_on_gpu: true
+      reward_shaping:
+        enabled: false
+        overlong_buffer_length: 128
+        overlong_buffer_penalty: 1
+        max_response_length: 32768 # Should match policy.max_total_sequence_length
+      seq_logprob_error_threshold: null
+      reward_scaling:
+        enabled: false
+        source_min: 0.0
+        source_max: 1.0
+        target_min: 0.0
+        target_max: 1.0
+    # ========================================================================
+    # Loss Function Configuration
+    # ========================================================================
+    loss_fn:
+      reference_policy_kl_penalty: 0
+      reference_policy_kl_type: "k3"
+      kl_input_clamp_value: 20.0
+      kl_output_clamp_value: 10.0
+      ratio_clip_min: 0.2
+      ratio_clip_max: 0.2
+      ratio_clip_c: null
+      use_on_policy_kl_approximation: false
+      truncated_importance_sampling_ratio: null
+      use_importance_sampling_correction: false
+      token_level_loss: true
+      force_on_policy_ratio: false
+    # ========================================================================
+    # Checkpointing Configuration
+    # ========================================================================
+    checkpointing:
+      enabled: true
+      # [MANAGED] checkpoint_dir and checkpoint_must_save_by are set by
+      # the nemo_rl.grpo stage at runtime via CLI args.
+      checkpoint_dir: "results/grpo"
+      checkpoint_must_save_by: null
+      metric_name: "val:accuracy"
+      higher_is_better: true
+      keep_top_k: 20
+      save_period: 1
+      save_optimizer: true
+    # ========================================================================
+    # Policy Configuration (Model + Training + Generation)
+    # ========================================================================
+    policy:
+      # [MANAGED] model_name is set by the nemo_rl.grpo stage from hf_checkpoint_path.
+      model_name: null # e.g., "Qwen/Qwen3-4B"
+      tokenizer:
+        name: null # Set in model config (e.g. qwen3_4b.yaml)
+        chat_template_kwargs: null
+      hf_config_overrides: {}
+      # Training batch sizes
+      train_global_batch_size: 1024 # num_prompts_per_step * num_generations_per_prompt
+      train_micro_batch_size: 1
+      logprob_batch_size: 1
+      generation_batch_size: 32
+      max_total_sequence_length: 32768
+      precision: "bfloat16"
+      logprob_chunk_size: 1024
+      max_grad_norm: 1.0
+      # [FIX] NeMo-Gym example omits this but NeMo-RL's Megatron setup requires it
+      offload_optimizer_for_logprob: false
+      # offload_policy_before_refit can be true only for non-colocated refit with the Megatron backend.
+      offload_policy_before_refit: false
+      offload_optimizer_for_refit: true
+      # Automodel (FSDP) configuration - default backend for GRPO
+      automodel_cfg:
+        # [MANAGED] enabled is set by the nemo_rl.grpo stage based on backend parameter.
+        enabled: true
+        checkpoint:
+          model_save_format: "safetensors"
+          save_consolidated: "false"
+        cpu_offload: false
+        sequence_parallel: false
+        activation_checkpointing: true
+        tensor_parallel_size: 2
+        context_parallel_size: 1
+        custom_parallel_plan: null
+        clear_cache_every_n_steps: null
+        automodel_kwargs: {}
+      # ----------------------------------------------------------------------
+      # Megatron configuration (disabled by default for GRPO)
+      # Enable via backend: megatron in model config.
+      # Layout mirrors sft_presets.yaml and NeMo-RL's grpo_math_1B.yaml defaults.
+      # ----------------------------------------------------------------------
+      megatron_cfg:
+        # [MANAGED] enabled is set by the nemo_rl.grpo stage based on backend parameter.
+        enabled: false
+        env_vars: null
+        empty_unused_memory_level: 1
+        # --- Parallelism (dense defaults; override per-model for MoE) --------
+        activation_checkpointing: false
+        tensor_model_parallel_size: 1
+        pipeline_model_parallel_size: 1
+        context_parallel_size: 1
+        expert_model_parallel_size: 1
+        expert_tensor_parallel_size: 1
+        sequence_parallel: false
+        pipeline_dtype: "bfloat16"
+        num_layers_in_first_pipeline_stage: null
+        num_layers_in_last_pipeline_stage: null
+        # --- Compute / precision ------------------------------------------
+        apply_rope_fusion: true
+        bias_activation_fusion: true
+        use_fused_weighted_squared_relu: false
+        defer_fp32_logits: true
+        layernorm_epsilon: 1e-6
+        # --- MoE parameters (safe defaults for both MoE and dense models) -
+        # For dense models these are no-ops; for MoE override per-model.
+        freeze_moe_router: true
+        moe_router_dtype: "fp64"
+        moe_router_load_balancing_type: "none"
+        moe_aux_loss_coeff: 0.0
+        moe_router_bias_update_rate: 0.0
+        moe_permute_fusion: true
+        moe_enable_deepep: false
+        moe_token_dispatcher_type: "allgather"
+        moe_shared_expert_overlap: false
+        gradient_accumulation_fusion: false # Required by v0.6.0 community_import.py
+        moe_per_layer_logging: true
+        # --- MTP (Multi-Token Prediction) ---------------------------------
+        mtp_loss_scaling_factor: 0.0
+        mtp_use_repeated_layer: false
+        mtp_num_layers: 0
+        mtp_detach_heads: false
+        # --- FP8 configuration --------------------------------------------
+        fp8_cfg:
+          enabled: false
+          fp8: "e4m3"
+          fp8_recipe: "blockwise"
+          fp8_param: false
+        first_last_layers_bf16: false
+        num_layers_at_start_in_bf16: 1
+        num_layers_at_end_in_bf16: 1
+        # --- Optimizer ----------------------------------------------------
+        optimizer:
+          optimizer: "adam"
+          lr: 5.0e-6
+          min_lr: 5.0e-7
+          weight_decay: 0.01
+          bf16: true
+          fp16: false
+          params_dtype: "float32"
+          adam_beta1: 0.9
+          adam_beta2: 0.999
+          adam_eps: 1e-8
+          sgd_momentum: 0.9
+          use_distributed_optimizer: true
+          use_precision_aware_optimizer: true
+          clip_grad: 1.0
+          optimizer_cpu_offload: false
+          optimizer_offload_fraction: 0.0
+        # --- Scheduler ----------------------------------------------------
+        scheduler:
+          start_weight_decay: 0.01
+          end_weight_decay: 0.01
+          weight_decay_incr_style: "constant"
+          lr_decay_style: "constant"
+          lr_decay_iters: null
+          lr_warmup_iters: 13
+          lr_warmup_init: 5.0e-7
+        # --- Distributed Data Parallel ------------------------------------
+        distributed_data_parallel_config:
+          grad_reduce_in_fp32: false
+          overlap_grad_reduce: true
+          overlap_param_gather: true
+          use_custom_fsdp: false
+          data_parallel_sharding_strategy: "optim_grads_params"
+      # Dynamic batching (disabled by default)
+      dynamic_batching:
+        enabled: false
+        train_mb_tokens: 32768 # max_total_sequence_length * train_micro_batch_size
+        logprob_mb_tokens: 32768 # max_total_sequence_length * logprob_batch_size
+        sequence_length_round: 64
+      # Sequence packing (disabled by default for GRPO)
+      sequence_packing:
+        enabled: false
+        train_mb_tokens: 32768 # max_total_sequence_length * train_micro_batch_size
+        logprob_mb_tokens: 32768 # max_total_sequence_length * logprob_batch_size
+        algorithm: "modified_first_fit_decreasing"
+        sequence_length_round: 64
+      make_sequence_length_divisible_by: 2 # Matches automodel_cfg TP=2
+      # Optimizer (Automodel/FSDP backend)
+      optimizer:
+        name: "torch.optim.AdamW"
+        kwargs:
+          lr: 1.0e-6
+          weight_decay: 0.01
+          betas: [0.9, 0.999]
+          eps: 1e-8
+          foreach: false
+          fused: false
+      # Scheduler (Automodel/FSDP backend)
+      scheduler:
+        - name: "torch.optim.lr_scheduler.ConstantLR"
+          kwargs:
+            factor: 1.0
+            total_iters: 10000000000
+        - milestones: []
+      # Generation configuration (vLLM inference server)
+      generation:
+        backend: "vllm"
+        max_new_tokens: 32768
+        temperature: 1.0
+        top_p: 1.0
+        top_k: null
+        # NeMo-RL requires explicit validation sampling; mirror rollout sampling.
+        val_temperature: ${.temperature}
+        val_top_p: ${.top_p}
+        val_top_k: ${.top_k}
+        stop_token_ids: null
+        stop_strings: null
+        vllm_cfg:
+          async_engine: true # Required for NeMo-Gym (HTTP server)
+          precision: "bfloat16"
+          # [FIX] NeMo-Gym example omits kv_cache_dtype but grpo.py requires it
+          kv_cache_dtype: "auto"
+          tensor_parallel_size: 1
+          pipeline_parallel_size: 1
+          enable_expert_parallel: false
+          expert_parallel_size: 1
+          gpu_memory_utilization: 0.7
+          max_model_len: 32768
+          enforce_eager: false
+          use_deep_gemm: false
+          num_last_layers_in_bf16: 0
+          num_first_layers_in_bf16: 0
+          expose_http_server: true # Required for NeMo-Gym
+          skip_tokenizer_init: false
+          http_server_serving_chat_kwargs:
+            enable_auto_tools: true
+            tool_parser: hermes
+        vllm_kwargs:
+          compilation_config:
+            backend: eager
+        colocated:
+          enabled: true
+          resources:
+            gpus_per_node: null
+            num_nodes: null
+    # ========================================================================
+    # Environment Configuration (NeMo-Gym)
+    # ========================================================================
+    # config_paths is built dynamically by the nemo_rl.grpo stage
+    # (_resolve_nemo_rl_config) from the top-level environments dict in base.yaml.
+    #
+    # Judge model routing:
+    #   The training stage dynamically injects judge_model config from the
+    #   environment's shared models.judge endpoint.
+    #   See: nvflow/stages/nemo_rl/grpo.py (_inject_judge_config)
+    env:
+      should_use_nemo_gym: true
+      should_log_nemo_gym_responses: true
+      nemo_gym: {}
+    # ========================================================================
+    # Data Configuration (NeMo-RL main format)
+    # ========================================================================
+    # train.data_path and validation.data_path are injected at runtime
+    # via ++data.train.data_path=... by the nemo_rl.grpo stage.
+    data:
+      max_input_seq_length: null
+      shuffle: true
+      num_workers: 0
+      use_multiple_dataloader: false
+      train: {}
+      validation: {}
+      default:
+        dataset_name: NemoGymDataset
+        processor: "nemo_gym_data_processor"
+    # ========================================================================
+    # Logger Configuration
+    # ========================================================================
+    # [FINANCE] NeMo-Gym example enables W&B with project "grpo-dev".
+    # We disable W&B by default and use finance-specific project names.
+    logger:
+      # [MANAGED] log_dir is set by the nemo_rl.grpo stage at runtime.
+      log_dir: "logs"
+      num_val_samples_to_print: 5
+      wandb_enabled: false
+      swanlab_enabled: false
+      tensorboard_enabled: true
+      mlflow_enabled: false
+      monitor_gpus: true
+      wandb:
+        project: "finance-grpo"
+        name: "grpo-training"
+      swanlab:
+        project: "finance-grpo"
+        name: "grpo-training"
+      tensorboard: {}
+      mlflow:
+        experiment_name: "finance-grpo"
+        run_name: "grpo-training"
+      gpu_monitoring:
+        collection_interval: 10
+        flush_interval: 10
+    # ========================================================================
+    # Cluster Configuration (overridden by nemo-skills)
+    # ========================================================================
+    # [MANAGED] cluster.gpus_per_node and cluster.num_nodes are set by
+    # the nemo_rl.grpo stage at runtime via CLI args.
+    cluster:
+      gpus_per_node: 8
+      num_nodes: 1

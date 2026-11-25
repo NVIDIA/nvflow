@@ -1,0 +1,15 @@
+_base_: rubric-smoke.yaml
+
+workflow:
+  description: "One-step GRPO smoke test with Simple rubrics"
+  runnable: true
+
+model_output_dir: /workspace/outputs/finance/rubric-grpo-smoke/simple/nemotron-3-nano
+_rubric_data_dir: /workspace/outputs/finance/rubric-generation-smoke/simple/step-3-grpo-data
+
+stages:
+  training:
+    overrides:
+      logger:
+        wandb:
+          name: "grpo-nemotron-3-nano-simple-rubric-smoke"

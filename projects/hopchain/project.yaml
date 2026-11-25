@@ -1,0 +1,20 @@
+manifest_version: 1
+project: hopchain
+description: "HopChain multi-hop vision-language synthetic data generation workflows"
+requires_nvflow: ">=1.1"
+python_source_root: .
+
+recipes:
+  quickstart:
+    description: "Filter demo images and generate demo-scale HopChain data"
+    workflows:
+      image_filter/demo: {}
+      sdg/demo:
+        depends_on: [image_filter/demo]
+
+  vision-reasoning:
+    description: "Filter the full image collection and generate HopChain data"
+    workflows:
+      image_filter/full: {}
+      sdg/full:
+        depends_on: [image_filter/full]

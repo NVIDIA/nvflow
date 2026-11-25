@@ -1,0 +1,6 @@
+system: Answer the multiple-choice question and explain briefly.
+
+user: |-
+  Question: {prompt}
+  Option A: {option_a}
+  Option B: {option_b}

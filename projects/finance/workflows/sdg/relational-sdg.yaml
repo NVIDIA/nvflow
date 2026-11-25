@@ -1,0 +1,71 @@
+# ============================================================================
+# Relational (multi-document) SDG — base config
+# ============================================================================
+# Relational SDG is the multi-document generalization of document-grounded SDG.
+# It inherits the ENTIRE document-grounded pipeline (question gen/verify, answer
+# gen, genselect, evaluate, aggregate, post-process) unchanged and swaps ONLY the
+# preprocess/context step: instead of building each generation context from a
+# single filing, it samples a context from a SET of RELATED filings (temporal /
+# cross-form / same-year / cross-entity) via weighted "relation modes", then the
+# question generator produces a question that must be answered across the relation.
+#
+# This is NOT a separate workflow — it is document_grounded_sdg with
+# sampling_strategy: relational. The dg_sdg_preprocess stage dispatches to the
+# relational engine (relational_data_preprocess) and all downstream stages are
+# identical to standard DG-SDG.
+#
+# Setting all relation weights to 0 reduces this to single-document DG-SDG (a
+# built-in equivalence). "Beat-or-Miss" is a variant of this config
+# (relational-sdg-beat-or-miss.yaml) that adds a guidance pre-filter + the
+# beat-or-miss question prompt.
+#
+# Run:
+#   uv run nvflow run --all --config projects/finance/workflows/sdg/relational-sdg.yaml --cluster my_cluster
+# ============================================================================
+
+_base_: document-grounded-sdg.yaml
+
+workflow:
+  name: "document_grounded_sdg"
+  type: "sdg"
+  description: "Relation-aware multi-document synthetic data generation"
+
+# Per-run output + input roots (override for a real run).
+base_data_dir: /workspace/outputs/finance/relational-sdg
+filings_dir: /workspace/outputs/finance/sp500/workflow-2-download-sec/step-0-download
+
+stages:
+  # --------------------------------------------------------------------------
+  # Relation-aware context construction. sampling_strategy: relational routes
+  # to the relational engine (relational_data_preprocess). Mode weights and the
+  # optional guidance pre-filter are forwarded via extra_args:
+  #   - float weights            -> "--<mode>_weight <v>"
+  #   - guidance_prefilter: true -> "--guidance_prefilter" (bare flag)
+  #   - JSON-string params       -> "--<key> '<json>'"  (nested caps/boosts)
+  # distribution_dir is omitted: the relational engine auto-generates uniform
+  # CSVs under output_dir/auto_distribution when they are absent.
+  # --------------------------------------------------------------------------
+  dg_sdg_preprocess:
+    sampling_strategy: relational
+    input_dir: ${filings_dir}/data
+    output_dir: ${base_data_dir}/step-0-preprocess
+    dependencies: []
+
+    max_tokens: 3000
+    overlap_tokens: 500
+    total_samples: 25000
+    max_skip_count: 200000
+    seed: 42
+
+    # Relation-mode weights (fraction of total_samples per mode; the remainder is
+    # single-document == DG-SDG). Balanced default spanning temporal + cross-form
+    # + same-year + multi-form; override per variant.
+    extra_args:
+      multi_period_weight: 0.35
+      cross_form_weight: 0.15
+      cross_form_multi_period_weight: 0.15
+      same_year_multi_filing_weight: 0.20
+      multi_form_weight: 0.05
+      # remaining 0.10 -> single-document contexts
+      # Form mix to sample from (JSON string; keys = EDGAR form types).
+      form_weights: '{"10-K": 5000, "10-Q": 2000, "8-K": 4000, "8-K_A": 1000, "6-K": 500, "20-F": 500, "DEF 14A": 500}'

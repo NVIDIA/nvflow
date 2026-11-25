@@ -1,0 +1,331 @@
+# ==========================================================================
+# VALS 1.1, workflow 1: prepare one question set (shared base)
+# ==========================================================================
+# vals11-prepare-sft and vals11-prepare-rl inherit this file and set
+# question_set and pool_inputs, so the SFT and RL sets never mix. Each run
+# merges its pool files and splits the questions into held_out (5%), web_off,
+# and web_on: 47.5% each for SFT, and 85% and 10% for RL. Each is rendered as
+# Gym rows with its agent prompt and tools.
+#
+# Stage              Substages                                  Container, Slurm jobs
+# merge_questions    merge, dedup, decontaminate                nemo-skills: 1 CPU job, plus
+#                                                               1 vllm GPU job for embeddings
+# verify_questions   judge_requests, judge, drop_contaminated,  nemo-gym: 1 CPU job (RL adds
+#                    expert_requests, expert_check              3 expert_check chunk jobs and
+#                                                               1 job that combines them)
+# build_pools        split, render                              nemo-gym: 1 CPU job
+#
+# Inputs: the pool files under pool_dir, FAB v1's questions mounted at
+# /workspace/inputs/fabv1, the other evaluation sets that finance:eval/baselines'
+# eval_data stage prepares, and the SEC filing metadata from finance:download/sp500.
+# The judge and the expert check call the hosted model in judge_model through
+# NeMo Gym, which reads NVIDIA_API_KEY.
+
+workflow:
+  name: "vals11-prepare"
+  type: "sdg"
+  description: "Clean, dedup, decontaminate, check, split, and render one VALS 1.1 question set"
+  runnable: false
+
+cluster: my_cluster
+
+# Set sample_rows to prepare a random sample of that many questions per set
+# instead of every question.
+scope: vals11
+sample_rows: null
+# The expert check runs as one Slurm job. A set whose calls don't fit the
+# cluster's 4-hour limit splits it into chunks; expert_resume_jobs adds jobs that
+# continue a chunk stopped by the limit.
+expert_chunks: 1
+expert_resume_jobs: 0
+# sft or rl, and the files of that set as {path, source} entries.
+question_set: ???
+pool_inputs: ???
+data_root: /workspace/outputs/finance/${scope}
+base_output_dir: ${data_root}/workflow-1-prepare/${question_set}
+# The folder of the set's pool files: the for_super RL pools by default.
+pool_dir: /workspace/inputs/reward-profiling
+eval_data_root: /workspace/outputs/finance/baselines/step-1-eval-data
+sec_metadata_parquet: /workspace/outputs/finance/sp500/workflow-2-download-sec/step-0-download/sec_metadata.parquet
+
+gym_install: export PATH=/opt/nemo_gym_venv/bin:$PATH
+format_verification: "{{NVFLOW_CODE_ROOT}}/nvflow/integrations/nemo_gym/configs/format_verification.yaml"
+judge_model:
+  deployment: external
+  model_type: openai_model
+  model: openai/openai/gpt-5.2
+  base_url: https://inference-api.nvidia.com/v1
+  api_key_env: NVIDIA_API_KEY
+# Gym rewards a reply 1.0 only when it holds the pass verdict and no other one.
+expert_verifier:
+  type: string_match
+  expected_markers: ["Verdict: PASS"]
+  patterns: ["Verdict: (PASS|FAIL)"]
+judge_verifier:
+  type: string_match
+  expected_markers: ["Verdict: DIFFERENT"]
+  patterns: ["Verdict: (SAME|DIFFERENT)"]
+# Write passed.jsonl and failed.jsonl in each check's analysis folder. A row
+# passes when at least pass_rate of its num_repeats calls succeed: a pair is
+# judged different only when every call says so, and a question passes the
+# expert check when most of its calls pass. Every call's verdict is kept, so
+# another pass_rate can be applied to the same calls later.
+judge_split:
+  report:
+    contract_version: 1
+    module: nvflow.integrations.nemo_gym.workers.split_by_reward
+    options: {pass_rate: 1.0}
+expert_split:
+  report:
+    contract_version: 1
+    module: nvflow.integrations.nemo_gym.workers.split_by_reward
+    options: {pass_rate: 0.5}
+
+pipeline_stages:
+  - merge_questions
+  - verify_questions
+  - build_pools
+
+directories:
+  step-0-merge-questions: ${base_output_dir}/step-0-merge-questions
+  step-1-verify-questions: ${base_output_dir}/step-1-verify-questions
+  step-2-build-pools: ${base_output_dir}/step-2-build-pools
+
+stages:
+  merge_questions:
+    description: "Merge the set's files, drop duplicates, and drop questions that overlap the evaluation sets"
+    container: nemo-skills
+    dependencies: []
+    substages:
+      # Writes one record per usable question with problem and question (the
+      # same text), expected_answer, uuid, source, question_type (one spelling
+      # per type; null when the record has none), and current_date. The date
+      # comes from the record, the prompt, or the filing date plus a jitter; the
+      # fallback applies when none is known. Rows without a question or an
+      # answer, that say "the company" or "this filing" without naming the
+      # company, or whose answer links an SEC filing filed after their date go
+      # to rejected.jsonl.
+      merge:
+        uses: project:nvfinance.stages.sdg.clean_question_pool:CleanQuestionPoolStage
+        output_dir: ${directories.step-0-merge-questions}/0-merge
+        inputs: ${pool_inputs}
+        sec_metadata_parquet: ${sec_metadata_parquet}
+        fallback_current_date: "2025-04-07"
+        # The old prompts, traces, answers, and reasoning are most of the rows'
+        # size; the questions are rendered with new prompts later.
+        drop_fields: [responses_create_params, messages, agent_ref, prompt, generation, reasoning_content]
+        sample_rows: ${sample_rows}
+
+      # Groups questions that match exactly or near-exactly (MinHash Jaccard of
+      # 5-word shingles at 0.85 or more) and keeps one per group; groups whose
+      # answers differ are flagged in groups.jsonl. Writes kept.jsonl and
+      # dropped.jsonl.
+      dedup:
+        uses: data.dedup
+        contract_version: 1
+        input_file: ${directories.step-0-merge-questions}/0-merge/clean.jsonl
+        output_dir: ${directories.step-0-merge-questions}/1-dedup
+        text_fields: [problem]
+        id_field: uuid
+        near:
+          threshold: 0.85
+          shingle_size: 5
+        conflict_field: expected_answer
+
+      # Compares each question with the questions of four evaluation sets by
+      # exact match, 8-gram containment, and Nemotron embedding similarity. Only
+      # an exact match drops a question here. Each question's 3 best matches at
+      # 20% containment or more, and its 3 closest evaluation questions at 0.85
+      # similarity or more, go to candidates.jsonl for the judge to decide. The
+      # embeddings run on one GPU in the vllm container. Writes kept.jsonl,
+      # dropped.jsonl, and candidates.jsonl.
+      decontaminate:
+        uses: data.decontaminate
+        contract_version: 1
+        input_file: ${directories.step-0-merge-questions}/1-dedup/kept.jsonl
+        output_dir: ${directories.step-0-merge-questions}/2-decontaminate
+        text_fields: [problem]
+        id_field: uuid
+        references:
+          fabv1:
+            # Mounted from the cluster config.
+            path: /workspace/inputs/fabv1/gym_eval.jsonl
+            text_fields: [question]
+          fabv2:
+            path: ${eval_data_root}/fabv2/eval.jsonl
+            text_fields: [question]
+          secque:
+            path: ${eval_data_root}/secque/eval.jsonl
+            text_fields: [question]
+          financebench:
+            path: ${eval_data_root}/financebench/eval.jsonl
+            text_fields: [question]
+        ngram:
+          size: 8
+          review: 0.2
+          top_k: 3
+        embedding:
+          backend: vllm
+          # Nemotron-3.5-Embed needs the target's vllm image at vLLM 0.32 or newer.
+          container: vllm
+          num_gpus: 1
+          model: /hf_models/nvidia/Nemotron-3.5-Embed-8B-BF16
+          # The model's chat template takes the prefix as its system message.
+          prefix: "query:"
+          chat_template: true
+          batch_size: 1024
+          options:
+            dtype: bfloat16
+            max_model_len: 4096
+            pooler_config: {task: embed, pooling_type: MEAN, use_activation: true}
+          review: 0.85
+          top_k: 3
+        # Beside 2-decontaminate, so deleting that folder to try new thresholds
+        # keeps the vectors.
+        cache_dir: ${directories.step-0-merge-questions}/2-decontaminate-cache
+
+  verify_questions:
+    description: "Drop the questions a judge matches to an evaluation set or an expert check fails"
+    container: nemo-gym
+    installation_command: ${gym_install}
+    dependencies: [merge_questions]
+    substages:
+      # Fills contamination_judge.yaml with each pair's training and evaluation
+      # question, and adds the verifier that rewards "Verdict: DIFFERENT".
+      judge_requests:
+        uses: nemo_gym.render
+        contract_version: 1
+        output_dir: ${directories.step-1-verify-questions}/0-judge-requests
+        renders:
+          candidates:
+            input_file: ${directories.step-0-merge-questions}/2-decontaminate/candidates.jsonl
+            prompt: project://prompts/contamination_judge.yaml
+            row_fields:
+              verifier: ${judge_verifier}
+
+      # Sends each request to the judge model on Gym's format_verification
+      # environment, 3 times at high reasoning effort. split_by_reward writes the
+      # pairs every call judges different to passed.jsonl and the rest to
+      # failed.jsonl.
+      judge:
+        uses: nemo_gym.collect
+        contract_version: 1
+        output_dir: ${directories.step-1-verify-questions}/1-judge
+        environments:
+          contamination_judge:
+            input_data: ${directories.step-1-verify-questions}/0-judge-requests/candidates.jsonl
+            config_paths: [ "${format_verification}" ]
+            agent_name: sdg_format_verification_simple_agent
+        rollout:
+          # Decontamination may find no pairs to review; the judge then passes
+          # nothing to drop_contaminated.
+          allow_empty_input: true
+          num_repeats: 3
+          num_chunks: 1
+          num_samples_in_parallel: 16
+          # Reasoning tokens count toward max_output_tokens.
+          responses_create_params:
+            max_output_tokens: 8192
+            reasoning: {effort: high}
+          models:
+            policy: ${judge_model}
+        extensions: ${judge_split}
+
+      # Removes from decontaminate's kept.jsonl every question with a pair in
+      # the judge's failed.jsonl. Writes kept.jsonl and dropped.jsonl.
+      drop_contaminated:
+        uses: data.filter
+        contract_version: 1
+        input_file: ${directories.step-0-merge-questions}/2-decontaminate/kept.jsonl
+        exclude_file: ${directories.step-1-verify-questions}/1-judge/contamination_judge/jobs/job-1-analyze-rollouts/analysis/evaluation/failed.jsonl
+        output_dir: ${directories.step-1-verify-questions}/2-drop-contaminated
+        id_field: uuid
+        exclude_id_field: id
+
+      # Fills question_answer_expert_check.yaml with each question and its
+      # reference answer, and adds the verifier that rewards "Verdict: PASS".
+      expert_requests:
+        uses: nemo_gym.render
+        contract_version: 1
+        output_dir: ${directories.step-1-verify-questions}/3-expert-requests
+        renders:
+          pool:
+            input_file: ${directories.step-1-verify-questions}/2-drop-contaminated/kept.jsonl
+            prompt: project://prompts/question_answer_expert_check.yaml
+            row_fields:
+              verifier: ${expert_verifier}
+
+      # The expert model checks, from their text alone and without solving, that
+      # each question names its company, stands alone, and is coherent, and that
+      # the reference answer answers it, is a real answer, and doesn't contradict
+      # it. Each question gets 3 calls at high reasoning effort and passes when
+      # at least 2 of them pass, so one borderline verdict doesn't decide it.
+      # split_by_reward writes the passing questions to passed.jsonl.
+      expert_check:
+        uses: nemo_gym.collect
+        contract_version: 1
+        output_dir: ${directories.step-1-verify-questions}/4-expert-check
+        environments:
+          expert_check:
+            input_data: ${directories.step-1-verify-questions}/3-expert-requests/pool.jsonl
+            config_paths: [ "${format_verification}" ]
+            agent_name: sdg_format_verification_simple_agent
+        rollout:
+          num_repeats: 3
+          num_chunks: ${expert_chunks}
+          dependent_jobs: ${expert_resume_jobs}
+          num_samples_in_parallel: 64
+          # Reasoning tokens count toward max_output_tokens.
+          responses_create_params:
+            max_output_tokens: 16384
+            reasoning: {effort: high}
+          models:
+            policy: ${judge_model}
+        extensions: ${expert_split}
+
+  build_pools:
+    description: "Split the questions into held_out, web_off, and web_on and render them as Gym rows"
+    container: nemo-gym
+    installation_command: ${gym_install}
+    dependencies: [verify_questions]
+    substages:
+      # Assigns questions at random, keeping each question type's share in
+      # every pool (SFT questions have no type). held_out shares companies and
+      # filings with web_off and web_on; dedup has already removed copies of any
+      # question. Both sets keep the same fields: question and expected_answer,
+      # which Gym's finance environment requires; problem and current_date,
+      # which the templates fill; and uuid, source, and question_type.
+      split:
+        uses: data.train_validation_split
+        contract_version: 1
+        input_file: ${directories.step-1-verify-questions}/4-expert-check/expert_check/jobs/job-1-analyze-rollouts/analysis/evaluation/passed.jsonl
+        output_dir: ${directories.step-2-build-pools}/0-split
+        splits:
+          held_out: 0.05
+          web_off: 0.475
+          web_on: 0.475
+        stratify_by: [question_type]
+        fields: [uuid, question, problem, expected_answer, current_date, source, question_type]
+        id_field: uuid
+        random_seed: 42
+
+      # Renders web_off with the agent prompt whose tools search the local SEC
+      # index (edgar_search) and web_on with the same prompt plus web search.
+      # held_out is rendered both ways so it can evaluate either mode.
+      render:
+        uses: nemo_gym.render
+        contract_version: 1
+        output_dir: ${directories.step-2-build-pools}/1-render
+        renders:
+          web_off:
+            input_file: ${directories.step-2-build-pools}/0-split/web_off.jsonl
+            prompt: project://prompts/finance_sec_search_template_edgar_search_without_web.yaml
+          web_on:
+            input_file: ${directories.step-2-build-pools}/0-split/web_on.jsonl
+            prompt: project://prompts/finance_sec_search_template_edgar_search_with_web.yaml
+          held_out_web_off:
+            input_file: ${directories.step-2-build-pools}/0-split/held_out.jsonl
+            prompt: project://prompts/finance_sec_search_template_edgar_search_without_web.yaml
+          held_out_web_on:
+            input_file: ${directories.step-2-build-pools}/0-split/held_out.jsonl
+            prompt: project://prompts/finance_sec_search_template_edgar_search_with_web.yaml

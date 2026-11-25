@@ -1,0 +1,57 @@
+# ============================================================================
+# Generate Beat-or-Miss Questions Only (Document-Grounded)
+# ============================================================================
+# Dedicated prompt for generating Beat or Miss questions from SEC filings.
+# Focuses exclusively on comparing management guidance vs actual results.
+#
+# Input Variables:
+#   - context: Financial text from sequential SEC filings (8-K, 10-K, etc.)
+#
+# Output: JSON object with only Beat_or_Miss questions
+# ============================================================================
+
+user: |-
+  You are a financial analyst specializing in earnings analysis. You will be provided with financial text extracted from sequential SEC filings for the same company (or related companies).
+
+  Your ONLY task is to generate "Beat or Miss" questions — questions that compare forward-looking management guidance, targets, or projections against actual reported results from later filings.
+
+  A Beat or Miss question must:
+  1. Reference specific management guidance, targets, forecasts, or projections from one filing period
+  2. Compare that guidance against actual results reported in a subsequent filing period
+  3. Ask whether the company beat, missed, or met the target, ideally with a quantitative measure (%, BPS, dollar amount)
+
+  Types of Beat or Miss questions to generate:
+  - Revenue guidance vs actual revenue
+  - EPS (GAAP or Non-GAAP) guidance vs actual EPS
+  - Operating margin guidance vs actual operating margin
+  - Free cash flow or cash flow conversion targets vs actuals
+  - Capital expenditure guidance vs actual CapEx
+  - Adjusted EBITDA guidance vs actual Adjusted EBITDA
+  - Segment-level guidance vs segment actuals
+  - Any other metric where management provided forward guidance that can be compared to actuals
+
+  Requirements:
+  1. Generate as many Beat or Miss questions as the content supports (up to 10). If the content does not contain both guidance AND subsequent actuals, return an empty list.
+  2. Every question MUST be fully self-contained:
+     - ALWAYS include the full company name and ticker symbol (e.g., "Analog Devices (NYSE:ADI)")
+     - ALWAYS include specific time references (fiscal year, quarter, or date) for both the guidance period and the actuals period
+     - NEVER reference "the document", "the filing", "the table", or "the exhibit"
+  3. Prefer questions that ask for quantitative comparison (% beat/miss, BPS difference, dollar delta)
+  4. Your response must contain ONLY a valid JSON object. Do not include thinking, reasoning, analysis, markdown code fences, or any text before or after the JSON. The first character of your response must be {{ and the last must be }}.
+
+  Example questions (for reference only — generate questions based on the provided content):
+  - "How many basis points did Analog Devices (NYSE:ADI) beat or miss its Q1 Fiscal Year 2025 adjusted operating margin guidance at the midpoint?"
+  - "Did TJX Companies (NYSE:TJX) beat or miss its Q4 FY 2025 pre-tax margin guidance? Express result as BPS difference."
+  - "Did FIGS Inc. (NYSE:FIGS) beat or miss its FY24 revenue guidance provided in Q1 2024? Express as % beat or miss of midpoint of revenue range."
+  - "How much did Meta Platforms (NASDAQ:META) beat its FY2022 guidance given in Q3 2022? Format each line to represent guidance, actual, and delta (based on midpoint of guidance). Present delta as a % BEAT or MISS."
+  - "Did TKO Group Holdings (NYSE:TKO) achieve its FY 2024 free cash flow conversion target provided in Q3 2024?"
+  - "By how much did Shift4 Payments (NYSE:FOUR) beat or miss its Q4 2024 end-to-end payment volume using the midpoint of the guidance range provided in Q2 2024? Express as % BEAT or MISS."
+  - "How did Lyft's (NASDAQ:LYFT) Q4 2024 Adjusted EBITDA margin compare to management guidance at midpoint in Q3 2024? Express answer as beat or miss and the BPS difference."
+  - "In FY23 and FY24, did General Mills (NYSE:GIS) beat or miss beginning of year organic net sales growth guidance? What is the guidance for FY25?"
+
+  Output Format:
+  {{
+    "Beat_or_Miss": ["question 1", "question 2", "question 3", ...]
+  }}
+
+  Document: {context}

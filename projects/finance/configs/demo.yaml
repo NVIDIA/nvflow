@@ -1,0 +1,22 @@
+# Demo configuration for SEC filing downloads
+# Small set of tickers for testing
+
+tickers:
+  - "NVDA"
+  - "AAPL"
+  - "GOOG"
+  - "CSCO"
+  - "IBM"
+  - "META"
+  - "MSFT"
+
+start_year: 2020
+end_year: 2024
+
+# DEF 14A has no section extractor, which is deliberate: it keeps the demo
+# covering the path where a form is indexed but not extracted.
+forms:
+  - "10-K"
+  - "10-Q"
+  - "8-K"
+  - "DEF 14A"

@@ -1,0 +1,97 @@
+# End-to-end finance-agent GRPO initialized from the final three-epoch
+# Lightning SFT checkpoint produced by the vals-no-web recipe. The generated
+# TSDG/RSDG questions are profiled with that checkpoint before the mixed-reward
+# subset is split and consumed by GRPO training.
+#
+# Run with the finance environment selected explicitly:
+#   uv run nvflow run --all --config <this-file> --cluster my_cluster -e finance_sec_search
+
+_base_: nemotron_nano_30b_a3b.yaml
+
+data_root: /workspace/outputs/finance/nemotron-3.5-lightning-rl-combined-noweb
+model_output_dir: ${data_root}/nemotron-3.5-lightning
+
+# HF export produced by the SFT recipe's step-1656 conversion/evaluation job.
+hf_model_path: /workspace/outputs/finance/nemotron-3.5-lightning-sft-combined-noweb/step-4-training/model-nvidia-nemotron-3.5-lightning-30b-a3b-bf16-64g-tp4-pp1-cp8-seq48k/hf_models/step_1656
+
+environments:
+  equivalence_llm_judge:
+    enabled: false
+  finance_sec_search:
+    # The GenSelect output supplies the selected final answer. Teacher
+    # reasoning/trajectory content is used by SFT, not as the RL gold answer.
+    source_format: inline
+    # Use the no-web SEC filing-search tool schema and the shared cache produced
+    # by finance:download/sp500. data_root below is the RL dataset root, so the
+    # filing paths must point explicitly to the download workflow's outputs.
+    prompt_template: project://prompts/finance_sec_search_template_sec_filing_search_without_web.yaml
+    gym:
+      finance_sec_search_resources_server:
+        resources_servers:
+          finance_sec_search:
+            cache_dir: /workspace/outputs/finance/sp500/workflow-2-download-sec/cache/finance_sec_search
+            sec_dump_path: /workspace/outputs/finance/sp500/workflow-2-download-sec/step-0-download/data
+            # The selected prompt exposes sec_filing_search, not edgar_search.
+            edgar_search_mode: null
+            local_edgar_index_path: null
+
+stages:
+  validate_questions:
+    # The agentic-trajectory workflow has already selected and answerability-
+    # filtered a teacher answer for each generated TSDG/RSDG question. This
+    # file is the question/answer source for target-model RL profiling.
+    source_data: /workspace/outputs/finance/vals-noweb/agentic-trajectories/step-8-filter
+
+  apply_prompt_template:
+    # Filing metadata is produced by the shared SP500 download workflow, not
+    # under this GRPO campaign's output root.
+    sec_metadata_parquet: /workspace/outputs/finance/sp500/workflow-2-download-sec/step-0-download/sec_metadata.parquet
+
+  collect_rollouts:
+    rollout:
+      # Profile every generated question with the SFT checkpoint. The shared
+      # scalar-variance selector retains only questions with mixed rewards.
+      max_num_samples: null
+
+  training:
+    model_name: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+    # Keep production runs independent of external W&B credentials.
+    wandb_mode: disabled
+    # data_source_dir and dependencies are inherited from the GRPO base:
+    # training reads the split produced after target-model reward profiling.
+    dependent_jobs: 10
+    overrides:
+      grpo:
+        max_num_steps: 785
+      checkpointing:
+        # Keep each eval step (save_period) and persist every expensive
+        # optimizer step across four-hour allocations (ft_save_period).
+        save_period: 100
+        ft_save_period: 1
+      env:
+        nemo_gym:
+          global_aiohttp_connector_limit: 16384
+          global_aiohttp_connector_limit_per_host: 1024
+      policy:
+        megatron_cfg:
+          # Keep the checkpoint-proven PP1 topology for Lightning's MTP layer.
+          tensor_model_parallel_size: 4
+          pipeline_model_parallel_size: 1
+          context_parallel_size: 8
+          expert_tensor_parallel_size: 2
+          layernorm_epsilon: 1.0e-5
+          moe_shared_expert_overlap: false
+          mtp_num_layers: 1
+          mtp_loss_scaling_factor: 0.0
+          mtp_use_repeated_layer: false
+          mtp_detach_heads: false
+        # TP(4) * CP(8) * 2 for sequence/context parallel padding.
+        make_sequence_length_divisible_by: 64
+      logger:
+        wandb:
+          name: grpo-nemotron-3.5-lightning-combined-rl-noweb
+
+  eval:
+    eval_steps: [100, 300, 785]
+    checkpoint_path: ${directories.step-8-training}/finance_sec_search/grpo-nvidia-nemotron-3.5-lightning-30b-a3b-bf16-${stages.training.total_gpus}g-tp4-cp8-seq48k
+    baseline_model: ${hf_model_path}

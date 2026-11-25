@@ -1,0 +1,15 @@
+user: |-
+  You will be given a financial question followed by {num_solutions} candidate solutions (indexed 0-{max_idx}). Systematically analyze these solutions to identify the most accurate answer based solely on the solutions themselves.
+
+  Evaluate numerical accuracy, financial methodology, fiscal-year interpretation, logical reasoning, completeness, and source support. Rounding differences alone are acceptable. Fiscal-year labels can differ from calendar-year labels, so prefer the interpretation that answers the complete question consistently.
+
+  Compare conflicting answers and select the candidate with the strongest internally consistent evidence and calculations.
+
+  End your evaluation with exactly:
+  Judgment: [IDX]
+
+  IDX must be an integer from 0 through {max_idx}.
+
+  Problem: {problem}
+  Solutions:
+  {solutions}

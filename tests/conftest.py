@@ -14,11 +14,24 @@
 #
 """Pytest configuration and fixtures."""
 
+import os
 import sys
-from types import ModuleType
-from typing import Any
+from pathlib import Path
 
 import pytest
+
+_ROOT = Path(__file__).parents[1]
+_PROJECT_SOURCE_ROOTS = sorted(
+    manifest.parent for manifest in (_ROOT / "projects").glob("*/project.yaml")
+)
+for _source_root in _PROJECT_SOURCE_ROOTS:
+    sys.path.insert(0, str(_source_root))
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    [*(str(path) for path in _PROJECT_SOURCE_ROOTS), os.environ.get("PYTHONPATH", "")]
+)
+os.environ.setdefault("NVFLOW_DISABLE_PROJECT_ENVIRONMENT", "1")
+os.environ.setdefault("SEC_IDENTITY_EMAIL", "nvflow-tests@example.com")
+os.environ.setdefault("SEC_IDENTITY_COMPANY", "NVFlow Tests")
 
 
 @pytest.fixture
@@ -49,27 +62,3 @@ def test_config():
             },
         },
     }
-
-
-@pytest.fixture
-def stub_nemo_pipeline_cli(monkeypatch):
-    """Provide the NeMo pipeline calls used by stage-submission unit tests."""
-    submitted: list[dict[str, Any]] = []
-    nemo_skills_module = ModuleType("nemo_skills")
-    pipeline_module = ModuleType("nemo_skills.pipeline")
-    pipeline_cli_module = ModuleType("nemo_skills.pipeline.cli")
-
-    def run_cmd(**kwargs: Any) -> None:
-        submitted.append(kwargs)
-
-    def wrap_arguments(command: str) -> str:
-        return command
-
-    nemo_skills_module.pipeline = pipeline_module
-    pipeline_module.cli = pipeline_cli_module
-    pipeline_cli_module.run_cmd = run_cmd
-    pipeline_cli_module.wrap_arguments = wrap_arguments
-    monkeypatch.setitem(sys.modules, "nemo_skills", nemo_skills_module)
-    monkeypatch.setitem(sys.modules, "nemo_skills.pipeline", pipeline_module)
-    monkeypatch.setitem(sys.modules, "nemo_skills.pipeline.cli", pipeline_cli_module)
-    return submitted

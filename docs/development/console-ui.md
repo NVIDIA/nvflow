@@ -2,25 +2,29 @@
 
 Simple utilities for consistent, beautiful terminal output in NVFlow orchestration.
 
+## Stream contract
+
+`nvflow.core.console` writes orchestration messages to stderr. CLI stdout is
+reserved for payloads such as plan text or `plan --format json`; progress,
+warnings, diagnostics, and errors belong on stderr. `nvflow run` intentionally
+leaves stdout empty in every selection mode.
+
+Stage and orchestration code should therefore use these helpers for operator
+messages instead of printing to stdout. Report concrete events such as a task
+submission or a discovered file; planning alone is not evidence that a stage
+finished.
+
 ## Quick Start
 
 ```python
 from nvflow.core import console
 
-# In your stage execute() method:
-def execute(self, config, cluster, expname, run_after=None):
-    console.status("Preparing to submit job...")
+# In launcher/controller code around exact execution:
+console.status("Submitting exact execution graph...")
 
-    # Show configuration
-    console.detail("Model", config['model'])
-    console.detail("GPUs", str(config['total_gpus']))
-    console.detail("Cluster", cluster)
-
-    # Submit job (via NeMo-RL)
-    job_id = submit_to_cluster(...)
-
-    console.success(f"Job submitted: {job_id}")
-    console.info("View logs: ssh cluster 'tail -f /path/to/log'")
+console.detail("Engine", resolved_target.engine)
+console.detail("Target", resolved_target.binding.cluster)
+console.success(f"Controller submitted: {receipt.controller_handle}")
 ```
 
 ## Available Functions
@@ -35,7 +39,7 @@ console.header("Starting Workflow")      # Big header with lines
 console.section("Running Stage: train")  # Section with lighter lines
 
 # Status messages
-console.success("Job completed")     # ✓ Green checkmark
+console.success("Job submitted")     # ✓ Green checkmark
 console.info("Found 3 files")        # ℹ Blue info
 console.warning("Job may be slow")   # ⚠ Yellow warning
 console.error("Job failed")          # ✗ Red error
@@ -53,66 +57,60 @@ console.rule("Configuration")        # Horizontal rule
 ## Example: Complete Stage
 
 ```python
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-from nvflow.core import BaseStage, StageRegistry, console
+from nvflow.core import BaseStage
+from nvflow.execution import (
+    CommandPlan,
+    DependencyPlan,
+    PlanningContext,
+    ResourceRequest,
+    StageExecution,
+    TaskPlan,
+)
 
-@StageRegistry.register(recipe="finance", workflow="sft", stage="sft")
 class SFTStage(BaseStage):
     """Supervised fine-tuning stage."""
 
-    workflow = "sft"
-
-    def execute(
-        self,
-        config: Dict[str, Any],
-        cluster: str,
-        expname: str,
-        run_after: Optional[List[str]] = None,
-    ) -> None:
-        """Execute SFT training."""
-
-        # Show what we're doing
-        console.status("Preparing SFT training job")
-        console.blank()
-
-        # Show configuration
-        console.detail("Model", config['model'])
-        console.detail("Data", config['data_path'])
-        console.detail("GPUs", str(config.get('total_gpus', 8)))
-        console.detail("Cluster", cluster)
-        console.blank()
-
-        # Validate input data exists
-        data_path = Path(config['data_path'])
-        if not data_path.exists():
-            console.error(f"Data not found: {data_path}")
-            raise FileNotFoundError(f"Data not found: {data_path}")
-
-        console.info(f"Found training data: {data_path}")
-
-        # Submit job (real stages use the workflow runner and cluster backend; this is illustrative)
-        console.status("Submitting job to cluster...")
-
-        try:
-            job_id = "12345"  # placeholder; actual submission is handled by the workflow runner
-
-            console.success(f"Job submitted successfully: {job_id}")
-            console.info(f"Experiment: {expname}")
-
-            # Tell user how to monitor
-            console.blank()
-            console.rule("Next Steps")
-            console.info("Monitor job:")
-            console.detail("SSH", f"ssh {cluster}")
-            console.detail("Logs", f"tail -f /path/to/slurm-{job_id}.out")
-
-        except Exception as e:
-            console.error(f"Job submission failed: {e}")
-            raise
+    def execution(self, context: PlanningContext) -> StageExecution:
+        config = dict(context.config)
+        return StageExecution(
+            stage=context.stage,
+            tasks=(
+                TaskPlan(
+                    task_id=f"{context.stage}.0",
+                    stage=context.stage,
+                    name=context.expname,
+                    operation="shell",
+                    commands=(
+                        CommandPlan(
+                            command=build_training_command(config),
+                            container="nemo-rl",
+                            runtime_role="nemo-rl",
+                        ),
+                    ),
+                    resources=(
+                        ResourceRequest(
+                            nodes=config["num_nodes"],
+                            gpus_per_node=config["num_gpus"],
+                        ),
+                    ),
+                    dependencies=tuple(
+                        DependencyPlan(name, external=True) for name in context.run_after
+                    ),
+                    parameters={"ray_application": True},
+                ),
+            ),
+        )
 ```
 
-## Output Example
+Select the class from workflow YAML:
+
+```yaml
+stages:
+  sft:
+    uses: project:my_project.stages.sft:SFTStage
+```
+
+## Stderr example
 
 ```
 ▶ Preparing SFT training job
@@ -120,7 +118,7 @@ class SFTStage(BaseStage):
   Model: /models/llama-3-8b
   Data: /data/finance/train.jsonl
   GPUs: 8
-  Cluster: nrt
+  Cluster: my_cluster
 
 ℹ Found training data: /data/finance/train.jsonl
 ▶ Submitting job to cluster...
@@ -129,7 +127,7 @@ class SFTStage(BaseStage):
 
 ────────────────── Next Steps ──────────────────
 ℹ Monitor job:
-  SSH: ssh nrt
+  SSH: ssh <login-host>
   Logs: tail -f /path/to/slurm-12345.out
 ```
 
@@ -148,11 +146,14 @@ class SFTStage(BaseStage):
 
 ## Remember
 
-**These are for LOCAL orchestration logs!**
+**These are for launcher/controller orchestration logs.**
 
-- ✅ Use in `stage.execute()` methods (runs on your machine)
-- ✅ Shows what's being submitted to cluster
-- ❌ Not for code running inside cluster jobs
-- ❌ Not for training/inference logs (those are in Slurm files)
+- ✅ Use around planning, engine dispatch, submission, and status transitions
+- ✅ Show what exact graph and target are being used
+- ✅ Writes progress and diagnostics to stderr
+- ❌ Do not use for machine-readable stdout payloads
+- ❌ Do not print from pure `StageExecution` builders
+- ❌ Not for training/inference logs (those belong to Slurm or Ray Jobs logs)
 
-The actual job execution logs are captured by Slurm on the cluster and don't need (or benefit from) Rich formatting.
+Actual job logs are captured by the selected execution engine and do not need
+or benefit from Rich formatting.

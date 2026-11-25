@@ -1,0 +1,9 @@
+# Multi-architecture release images scanned for linux/amd64 and linux/arm64.
+# Unqualified NVFlow-owned names use the deployment registry prefix supplied
+# by CI; fully qualified third-party references are scanned as written.
+nvflow-nemo-rl:v0.8.0
+nvflow-nemo-gym:v0.7.0
+nvflow-nemo-skills:v1.2.0
+nvflow-vllm:v0.29.0
+nvflow-sglang:v0.5.17-ray2.58.0
+nvflow-client:v1.2.0

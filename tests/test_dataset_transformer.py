@@ -65,6 +65,8 @@ def _run_transformer(
     input_path: Path,
     output_path: Path,
     num_chunks: int,
+    *,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Invoke the transformer as a subprocess so we exercise the same
     code path the Slurm job would (including ``main()`` and argparse).
@@ -72,7 +74,7 @@ def _run_transformer(
     cmd = [
         sys.executable,
         "-m",
-        "nvflow.recipes.finance.utils.shared.dataset_transformer",
+        "nvfinance.utils.shared.dataset_transformer",
         str(input_path),
         "--output_file",
         str(output_path),
@@ -83,7 +85,17 @@ def _run_transformer(
         "--num_chunks",
         str(num_chunks),
     ]
-    return subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return subprocess.run(cmd, capture_output=True, text=True, check=check)
+
+
+def test_missing_input_file_fails_without_writing_chunks(tmp_path: Path) -> None:
+    output_path = tmp_path / "out" / "final_result.jsonl"
+
+    result = _run_transformer(tmp_path / "missing.jsonl", output_path, num_chunks=2, check=False)
+
+    assert result.returncode == 1
+    assert "Input file not found" in result.stdout
+    assert not list(output_path.parent.glob("chunks/*.jsonl"))
 
 
 def test_chunk_cleanup_removes_stale_chunks_from_previous_run(tmp_path: Path) -> None:
@@ -241,7 +253,7 @@ def test_chunk_records_preserve_input_content(tmp_path: Path) -> None:
         assert rec["context"] == f"Acme Corp filing {i}: revenue was ${i}M."
         # UUID is deterministic per (problem, generation) pair via uuid5,
         # so it must be present and non-empty -- this is the field that
-        # downstream stages (responses_api_converter, ng_prepare_data)
+        # downstream response conversion and Gym dataset collation
         # join on, so a missing/blank uuid would silently break the
         # whole pipeline.
         assert rec.get("uuid"), f"record for idx {i} is missing a uuid"
